@@ -1,0 +1,180 @@
+<?php
+
+namespace App\Services\Chat;
+
+use App\Interfaces\ChatRepositoryInterface;
+use App\Models\Conversation;
+use App\Models\Message;
+use App\Models\User;
+use App\Services\File\FileUploadService;
+use App\Services\MessageTypes\MessageTypeFactory;
+use Illuminate\Http\UploadedFile;
+
+/**
+ * Chat Message Handler
+ *
+ * EXTRACTED FROM: ChatController::sendMessage() (100+ lines)
+ *
+ * Single Responsibility: Process and send chat messages
+ *
+ * Handles:
+ * - Message validation
+ * - Type-specific processing
+ * - File uploads (images)
+ * - Message creation
+ */
+final class ChatMessageHandler
+{
+    public function __construct(
+        private readonly ChatRepositoryInterface $chatRepository,
+        private readonly MessageTypeFactory $messageTypeFactory,
+        private readonly FileUploadService $fileUploadService
+    ) {}
+
+    /**
+     * Process and send a message
+     *
+     * @throws \Exception if validation fails or conversation not found
+     */
+    public function sendMessage(
+        int $conversationId,
+        User $sender,
+        array $data
+    ): Message {
+        // Validate conversation access
+        $conversation = $this->chatRepository->findConversation($conversationId);
+
+        if (!$conversation || !$conversation->isParticipant($sender)) {
+            throw new \Exception('Conversation not found or access denied');
+        }
+
+        // Get message type
+        $messageType = $data['type'] ?? 'text';
+
+        // Validate message type
+        if (!in_array($messageType, $this->messageTypeFactory->getAvailableTypes())) {
+            throw new \Exception('Invalid message type');
+        }
+
+        // Get handler for message type
+        $handler = $this->messageTypeFactory->create($messageType);
+
+        if (!$handler->validate($data)) {
+            throw new \Exception('Invalid message data');
+        }
+
+        // Process message based on type
+        if ($messageType === 'image' && isset($data['image'])) {
+            return $this->sendImageMessage($conversation, $sender, $data);
+        }
+
+        // Process other message types
+        $processed = $handler->process($data);
+
+        return $this->chatRepository->sendMessage(
+            $conversationId,
+            $sender->id,
+            $processed['content'],
+            $messageType,
+            $processed['metadata']
+        );
+    }
+
+    /**
+     * Send image message
+     */
+    private function sendImageMessage(
+        Conversation $conversation,
+        User $sender,
+        array $data
+    ): Message {
+        if (!isset($data['image']) || !($data['image'] instanceof UploadedFile)) {
+            throw new \Exception('Invalid image file');
+        }
+
+        // Get receiver ID
+        $receiverId = $conversation->participants()
+            ->where('user_id', '!=', $sender->id)
+            ->value('user_id');
+
+        // Upload image using FileUploadService
+        $uploadResult = $this->fileUploadService->uploadChatImage(
+            $data['image'],
+            $sender->id,
+            $receiverId
+        );
+
+        // Create message with image path
+        return $this->chatRepository->sendMessage(
+            $conversation->id,
+            $sender->id,
+            $uploadResult['path'],
+            'image',
+            array_merge($uploadResult['metadata'], [
+                'caption' => $data['caption'] ?? ''
+            ])
+        );
+    }
+
+    /**
+     * Get messages with formatted data
+     */
+    public function getFormattedMessages(int $conversationId, int $limit = 50, int $offset = 0): array
+    {
+        $messages = $this->chatRepository->getMessages($conversationId, $limit, $offset);
+
+        return $messages->map(function ($message) {
+            return $this->formatMessage($message);
+        })->toArray();
+    }
+
+    /**
+     * Format message for API response
+     */
+    public function formatMessage(Message $message): array
+    {
+        $profilePhoto = $this->getUserProfilePhoto($message->sender);
+
+        return [
+            'id' => $message->id,
+            'sender' => [
+                'id' => $message->sender->id,
+                'name' => $message->sender->first_name . ' ' . $message->sender->last_name,
+                'profile_photo' => $profilePhoto,
+            ],
+            'type' => $message->type,
+            'content' => $message->type === 'image'
+                ? $this->fileUploadService->url($message->content)
+                : $message->content,
+            'metadata' => $message->metadata,
+            'created_at' => $message->created_at->toIso8601String(),
+            'is_edited' => $message->is_edited,
+        ];
+    }
+
+    /**
+     * Get user profile photo
+     */
+    private function getUserProfilePhoto(User $user): ?string
+    {
+        $profile = \App\Models\Profile::where('user_id', $user->id)->first();
+
+        if (!$profile || !$profile->profile_photo) {
+            return null;
+        }
+
+        if (!$this->fileUploadService->exists($profile->profile_photo)) {
+            return null;
+        }
+
+        return $this->fileUploadService->url($profile->profile_photo);
+    }
+
+    /**
+     * Delete message
+     */
+    public function deleteMessage(int $messageId, User $user): bool
+    {
+        return $this->chatRepository->deleteMessage($messageId, $user->id);
+    }
+}

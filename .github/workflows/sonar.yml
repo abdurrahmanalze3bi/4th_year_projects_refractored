@@ -1,0 +1,76 @@
+name: SonarQube Analysis
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  sonarcloud:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ''
+          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+          MYSQL_DATABASE: 4th_year_project_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, pdo, pdo_mysql, xdebug
+          coverage: xdebug
+
+      - name: Copy .env
+        run: cp .env.example .env
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Generate app key
+        run: php artisan key:generate
+
+      - name: Run migrations
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: 4th_year_project_test
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+        run: php artisan migrate --force
+
+      - name: Run tests with coverage
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: 4th_year_project_test
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          XDEBUG_MODE: coverage
+          JWT_SECRET: test_secret_key_for_testing_only_32chars
+          JWT_TTL: 600
+          OTP_BYPASS_ENABLED: 'true'
+          WALLET_OTP_MODE: testing
+          FIREBASE_CREDENTIALS: ''
+        run: php artisan test --coverage-clover=coverage.xml || true
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
