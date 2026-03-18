@@ -1,0 +1,244 @@
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Events\MessageSent;
+use App\Http\Controllers\Controller;
+use App\Interfaces\ChatRepositoryInterface;
+use App\Services\Chat\ChatMessageHandler;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
+
+/**
+ * Chat Controller (REFACTORED)
+ *
+ * BEFORE: 300+ lines with business logic in controller
+ * AFTER: 120 lines - thin controller delegating to services
+ *
+ * Delegates to:
+ * - ChatMessageHandler: Message processing
+ * - ChatRepositoryInterface: Data access
+ */
+class ChatController extends Controller
+{
+    public function __construct(
+        private readonly ChatRepositoryInterface $chatRepository,
+        private readonly ChatMessageHandler $messageHandler
+    ) {}
+
+    /**
+     * Get user's conversations
+     */
+    public function getConversations(Request $request)
+    {
+        try {
+            $conversations = $this->chatRepository->getUserConversations($request->user());
+
+            return response()->json([
+                'success' => true,
+                'data' => $conversations->map(function ($conversation) use ($request) {
+                    return $this->formatConversation($conversation, $request->user());
+                })
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch conversations: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Start a conversation
+     */
+    public function startConversation(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'user_id' => 'required|exists:users,id|different:' . $request->user()->id,
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $currentUser = $request->user();
+            $otherUser = \App\Models\User::find($request->user_id);
+
+            // Check if conversation already exists
+            $existingConversation = $this->chatRepository->findPrivateConversation(
+                $currentUser,
+                $otherUser
+            );
+
+            if ($existingConversation) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'conversation_id' => $existingConversation->id,
+                        'message' => 'Conversation already exists'
+                    ]
+                ]);
+            }
+
+            // Create new conversation
+            $conversation = $this->chatRepository->createConversation(
+                [$currentUser->id, $otherUser->id],
+                'private'
+            );
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'conversation_id' => $conversation->id,
+                    'message' => 'Conversation created successfully'
+                ]
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create conversation: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get messages from a conversation
+     */
+    public function getMessages(Request $request, int $conversationId)
+    {
+        try {
+            $conversation = $this->chatRepository->findConversation($conversationId);
+
+            if (!$conversation || !$conversation->isParticipant($request->user())) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conversation not found or access denied'
+                ], 404);
+            }
+
+            $page = $request->get('page', 1);
+            $limit = 50;
+            $offset = ($page - 1) * $limit;
+
+            $formattedMessages = $this->messageHandler->getFormattedMessages(
+                $conversationId,
+                $limit,
+                $offset
+            );
+
+            return response()->json([
+                'success' => true,
+                'data' => $formattedMessages
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch messages: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Send a message
+     *
+     * REFACTORED: Business logic moved to ChatMessageHandler
+     */
+    public function sendMessage(Request $request, int $conversationId)
+    {
+        try {
+            // Delegate to service
+            $message = $this->messageHandler->sendMessage(
+                $conversationId,
+                $request->user(),
+                $request->all()
+            );
+
+            // Broadcast event
+            broadcast(new MessageSent($message));
+
+            // Format and return
+            return response()->json([
+                'success' => true,
+                'data' => $this->messageHandler->formatMessage($message)
+            ], 201);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to send message: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete a message
+     */
+    public function deleteMessage(Request $request, int $messageId)
+    {
+        try {
+            $success = $this->messageHandler->deleteMessage(
+                $messageId,
+                $request->user()
+            );
+
+            if (!$success) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Message not found or permission denied'
+                ], 404);
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Message deleted successfully'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to delete message: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Format conversation for API response
+     */
+    private function formatConversation($conversation, $currentUser): array
+    {
+        $otherParticipant = $conversation->getOtherParticipant($currentUser);
+        $lastMessage = $conversation->lastMessage->first();
+
+        // Get profile photo for other participant
+        $profilePhoto = null;
+        if ($otherParticipant) {
+            $profile = \App\Models\Profile::where('user_id', $otherParticipant->id)->first();
+            if ($profile && $profile->profile_photo) {
+                if (\Illuminate\Support\Facades\Storage::disk('public')->exists($profile->profile_photo)) {
+                    $profilePhoto = asset('storage/' . $profile->profile_photo);
+                }
+            }
+        }
+
+        return [
+            'id' => $conversation->id,
+            'type' => $conversation->type,
+            'title' => $conversation->title,
+            'other_participant' => $otherParticipant ? [
+                'id' => $otherParticipant->id,
+                'name' => $otherParticipant->first_name . ' ' . $otherParticipant->last_name,
+                'profile_photo' => $profilePhoto,
+            ] : null,
+            'last_message' => $lastMessage ? [
+                'content' => $lastMessage->type === 'image'
+                    ? asset('storage/' . $lastMessage->content)
+                    : $lastMessage->content,
+                'sender_name' => $lastMessage->sender->first_name,
+                'created_at' => $lastMessage->created_at->diffForHumans(),
+            ] : null,
+            'updated_at' => $conversation->updated_at->toIso8601String(),
+        ];
+    }
+}
