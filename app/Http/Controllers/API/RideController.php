@@ -202,17 +202,16 @@ class RideController extends Controller
         try {
             $ride = $this->rideService->getRideById($rideId);
 
+            // ✅ FIXED: load the count so RideResource can compute seats.booked
+            $ride->loadCount(['bookings as total_booked_seats' => function ($query) {
+                $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
+            }]);
+
             return response()->json([
                 'success' => true,
-                'data'    => $ride,
+                'data'    => new RideResource($ride),  // ← was: $ride (raw model)
             ]);
-
         } catch (\Exception $e) {
-            Log::error('Failed to fetch ride details', [
-                'ride_id' => $rideId,
-                'error'   => $e->getMessage(),
-            ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'Ride not found: ' . $e->getMessage(),

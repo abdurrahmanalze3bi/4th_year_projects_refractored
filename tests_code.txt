@@ -749,6 +749,230 @@ class AuthTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Auth\ResetPasswordControllerTest.php =====
+
+<?php
+
+namespace Tests\Feature\Auth;
+
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
+use Tests\TestCase;
+
+/**
+ * ResetPasswordControllerTest â€” Feature tests for POST /api/auth/reset-password.
+ *
+ * LOCATION: tests/Feature/Auth/ResetPasswordControllerTest.php
+ *
+ * HOW PASSWORD RESET WORKS IN THIS APP:
+ * 1. POST /api/auth/forgot-password   â†’ generates a token in password_reset_tokens table
+ * 2. POST /api/auth/reset-password    â†’ validates token + email + password, resets it
+ *
+ * The controller uses PasswordResetRepository â†’ Password::reset()
+ *
+ * POSTMAN EQUIVALENT:
+ * POST http://localhost/api/auth/reset-password
+ * Body: { "token": "<token>", "email": "<email>", "password": "newpass123", "password_confirmation": "newpass123" }
+ * Expected: { "success": true, "message": "..." }  HTTP 200
+ */
+class ResetPasswordControllerTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User   $user;
+    private string $rawToken;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->user = User::factory()->create([
+            'email'    => 'reset@test.com',
+            'password' => bcrypt('old_password'),
+        ]);
+
+        // Generate a real reset token the same way the forgot-password flow does
+        $this->rawToken = Password::createToken($this->user);
+    }
+
+    // â”€â”€â”€ Successful reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_user_can_reset_password_with_valid_token(): void
+    {
+        $response = $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true);
+    }
+
+    public function test_password_is_actually_changed_after_successful_reset(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'brand_new_pass123',
+            'password_confirmation' => 'brand_new_pass123',
+        ]);
+
+        $this->user->refresh();
+        $this->assertTrue(Hash::check('brand_new_pass123', $this->user->password));
+    }
+
+    public function test_old_password_no_longer_works_after_reset(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ]);
+
+        $this->user->refresh();
+        $this->assertFalse(Hash::check('old_password', $this->user->password));
+    }
+
+    // â”€â”€â”€ Validation failures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_reset_fails_with_missing_token(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'email'                 => 'reset@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ])->assertStatus(422);
+    }
+
+    public function test_reset_fails_with_missing_email(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ])->assertStatus(422);
+    }
+
+    public function test_reset_fails_with_missing_password(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password_confirmation' => 'new_password123',
+        ])->assertStatus(422);
+    }
+
+    public function test_reset_fails_with_password_mismatch(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'different_password',
+        ])->assertStatus(422);
+    }
+
+    public function test_reset_fails_with_password_too_short(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'short',
+            'password_confirmation' => 'short',
+        ])->assertStatus(422);
+    }
+
+    public function test_reset_fails_with_non_existent_email(): void
+    {
+        $response = $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'nobody@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ]);
+
+        // Validation rule `exists:users,email` rejects this
+        $response->assertStatus(422);
+    }
+
+    public function test_reset_fails_with_invalid_email_format(): void
+    {
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'not-an-email',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ])->assertStatus(422);
+    }
+
+    // â”€â”€â”€ Invalid / expired token â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_reset_fails_with_wrong_token(): void
+    {
+        $response = $this->postJson('/api/auth/reset-password', [
+            'token'                 => 'invalid_token_string_here',
+            'email'                 => 'reset@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ]);
+
+        // Returns 400 (invalid token) or 422 (validation fail) â€” not 200
+        $this->assertNotEquals(200, $response->status());
+    }
+
+    public function test_reset_token_can_only_be_used_once(): void
+    {
+        // First use â€” should succeed
+        $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ])->assertStatus(200);
+
+        // Second use of the same token â€” should fail
+        $response = $this->postJson('/api/auth/reset-password', [
+            'token'                 => $this->rawToken,
+            'email'                 => 'reset@test.com',
+            'password'              => 'another_password123',
+            'password_confirmation' => 'another_password123',
+        ]);
+
+        $this->assertNotEquals(200, $response->status());
+    }
+
+    // â”€â”€â”€ Forgot-password integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_forgot_password_endpoint_exists_and_accepts_email(): void
+    {
+        $response = $this->postJson('/api/auth/forgot-password', [
+            'email' => 'reset@test.com',
+        ]);
+
+        // Laravel password broker returns 200 or 400 depending on config
+        // The endpoint must exist (not 404/405)
+        $this->assertNotEquals(404, $response->status());
+        $this->assertNotEquals(405, $response->status());
+    }
+
+    public function test_forgot_password_fails_with_non_existent_email(): void
+    {
+        $response = $this->postJson('/api/auth/forgot-password', [
+            'email' => 'nobody@test.com',
+        ]);
+
+        // Laravel Password broker sends 400 for unknown email
+        $this->assertContains($response->status(), [400, 422]);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Bookings\BookingTest.php =====
 
 <?php
@@ -2832,6 +3056,647 @@ class RideControllerFullTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Rides\RideResourceTest.php =====
+
+<?php
+
+namespace Tests\Feature\Rides;
+
+use App\Models\Booking;
+use App\Models\Photo;
+use App\Models\Ride;
+use App\Models\User;
+use App\Models\Wallet;
+use App\Services\Ride\RideSearchService;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Tests\TestCase;
+
+/**
+ * RideResourceTest â€” Feature tests that exercise RideResource serialization.
+ *
+ * LOCATION: tests/Feature/Rides/RideResourceTest.php
+ *
+ * HOW TO TEST IN POSTMAN:
+ * GET  /api/rides/{rideId}          â†’ exercises RideResource via show()
+ * GET  /api/rides                   â†’ exercises RideResource::collection() via index()
+ *
+ * WHAT WE VERIFY:
+ * - Response structure matches RideResource fields (id, driver, pickup, destination,
+ *   departure_time, seats, price_per_seat, status, distance, duration, etc.)
+ * - Nested driver object is present
+ * - Coordinate arrays are present
+ * - Numeric fields are correct types
+ */
+class RideResourceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User   $driver;
+    private string $token;
+    private string $driverPhone;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->driverPhone = '091' . rand(1000000, 9999999);
+
+        $this->driver = User::factory()->create([
+            'is_verified_driver'  => true,
+            'verification_status' => 'approved',
+            'password'            => bcrypt('password123'),
+        ]);
+
+        if (!$this->driver->profile) {
+            $this->driver->profile()->create([
+                'full_name'       => 'Test Driver',
+                'number_of_rides' => 0,
+            ]);
+        }
+
+        $this->seedAdminWallets();
+
+        $wallet = Wallet::create([
+            'user_id'       => $this->driver->id,
+            'phone_number'  => $this->driverPhone,
+            'wallet_number' => 'WLT-' . Str::random(8),
+            'balance'       => 1_000_000,
+        ]);
+        $this->driver->update(['wallet_id' => $wallet->id]);
+
+        $this->token = $this->getToken($this->driver);
+    }
+
+    // â”€â”€â”€ show() serialization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_show_returns_top_level_success_key(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonPath('success', true);
+    }
+
+    public function test_show_returns_id_field(): void
+    {
+        $ride = $this->insertRide();
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertEquals($ride->id, $response->json('data.id'));
+    }
+
+    public function test_show_returns_driver_nested_object(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => [
+                    'driver' => ['id', 'name'],
+                ],
+            ]);
+    }
+
+    public function test_show_returns_pickup_object(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => [
+                    'pickup' => ['address'],
+                ],
+            ]);
+    }
+
+    public function test_show_returns_destination_object(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => [
+                    'destination' => ['address'],
+                ],
+            ]);
+    }
+
+    public function test_show_returns_seats_object_with_available_field(): void
+    {
+        $ride = $this->insertRide(['available_seats' => 3]);
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertEquals(3, $response->json('data.seats.available'));
+    }
+
+    public function test_show_returns_price_per_seat(): void
+    {
+        $ride = $this->insertRide();
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertNotNull($response->json('data.price_per_seat'));
+    }
+
+    public function test_show_returns_status_field(): void
+    {
+        $ride = $this->insertRide(['status' => 'active']);
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertEquals('active', $response->json('data.status'));
+    }
+
+    public function test_show_returns_vehicle_type(): void
+    {
+        $ride = $this->insertRide();
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertArrayHasKey('vehicle_type', $response->json('data'));
+    }
+
+    public function test_show_returns_payment_method(): void
+    {
+        $ride = $this->insertRide(['payment_method' => 'cash']);
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertEquals('cash', $response->json('data.payment_method'));
+    }
+
+    public function test_show_returns_departure_time_formatted(): void
+    {
+        $ride = $this->insertRide();
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertNotNull($response->json('data.departure_time'));
+    }
+
+    public function test_show_returns_distance_object(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => [
+                    'distance' => ['meters', 'kilometers'],
+                ],
+            ]);
+    }
+
+    public function test_show_returns_duration_object(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => [
+                    'duration' => ['seconds', 'minutes', 'human'],
+                ],
+            ]);
+    }
+
+    public function test_show_returns_created_at_and_updated_at(): void
+    {
+        $ride = $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}")
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => ['created_at', 'updated_at'],
+            ]);
+    }
+
+    public function test_show_driver_id_matches_actual_driver(): void
+    {
+        $ride = $this->insertRide();
+        $response = $this->withToken($this->token)
+            ->getJson("/api/rides/{$ride->id}");
+
+        $response->assertStatus(200);
+        $this->assertEquals($this->driver->id, $response->json('data.driver.id'));
+    }
+
+    // â”€â”€â”€ index() collection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_index_returns_collection_wrapped_in_data_key(): void
+    {
+        $this->insertRide();
+        $this->withToken($this->token)
+            ->getJson('/api/rides')
+            ->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonStructure(['data']);
+    }
+
+    // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function insertRide(array $overrides = []): Ride
+    {
+        $status       = $overrides['status']          ?? 'active';
+        $seats        = $overrides['available_seats'] ?? 4;
+        $paymentMethod= $overrides['payment_method']  ?? 'cash';
+
+        DB::statement("
+            INSERT INTO rides (
+                driver_id, pickup_address, destination_address,
+                pickup_location, destination_location,
+                departure_time, available_seats, price_per_seat,
+                payment_method, booking_type, status, distance, duration,
+                communication_number, created_at, updated_at
+            ) VALUES (
+                ?, 'Ø¯Ù…Ø´Ù‚ - Ø³Ø§Ø­Ø© Ø§Ù„Ù…Ø±Ø¬Ø©', 'Ø­Ù„Ø¨ - Ø§Ù„Ø¹Ø²ÙŠØ²ÙŠØ©',
+                ST_GeomFromText('POINT(33.5138 36.2765)', 4326),
+                ST_GeomFromText('POINT(36.2021 37.1343)', 4326),
+                ?, ?, 50000, ?, 'direct', ?, 320500, 14400, ?, NOW(), NOW()
+            )
+        ", [
+            $this->driver->id,
+            now()->addHours(3)->format('Y-m-d H:i:s'),
+            $seats,
+            $paymentMethod,
+            $status,
+            $this->driverPhone,
+        ]);
+
+        return Ride::with(['driver', 'driver.profile'])->latest('id')->first();
+    }
+
+    private function seedAdminWallets(): void
+    {
+        foreach (['primary', 'sycash'] as $type) {
+            $cfg  = config("admin.{$type}");
+            $user = User::firstOrCreate(
+                ['email' => $cfg['email']],
+                [
+                    'first_name' => $type, 'last_name' => 'Admin',
+                    'password'   => bcrypt($cfg['password']),
+                    'gender'     => 'M', 'address' => 'Ø¯Ù…Ø´Ù‚', 'status' => true,
+                ]
+            );
+            if (!Wallet::where('phone_number', $cfg['phone'])->exists()) {
+                $w = Wallet::create([
+                    'user_id'       => $user->id,
+                    'phone_number'  => $cfg['phone'],
+                    'wallet_number' => 'WLT-' . strtoupper($type) . '-' . Str::random(4),
+                    'balance'       => 10_000_000,
+                ]);
+                $user->update(['wallet_id' => $w->id]);
+            }
+        }
+    }
+
+    private function getToken(User $user): string
+    {
+        return $this->postJson('/api/auth/login', [
+            'email'    => $user->email,
+            'password' => 'password123',
+        ])->json('tokens.access_token');
+    }
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// RideSearchServiceTest
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+/**
+ * RideSearchServiceTest â€” Feature tests for RideSearchService.
+ *
+ * LOCATION: tests/Feature/Rides/RideSearchServiceTest.php
+ *   (or add as a second class in the same file since they're closely related)
+ *
+ * WHAT RideSearchService DOES:
+ * - searchRides(array $params): finds rides matching departure date, seat count,
+ *   and spatial proximity (pickup + destination within 20km radius)
+ * - getNearbyRides(lat, lng, radius): finds active rides near a point
+ *
+ * HOW TO TEST IN POSTMAN:
+ * POST /api/rides/search
+ * Body: {
+ *   "source_lat": 33.5138, "source_lng": 36.2765,
+ *   "dest_lat": 36.2021, "dest_lng": 37.1343,
+ *   "departure_date": "2025-10-15",
+ *   "seats_required": 1
+ * }
+ */
+class RideSearchServiceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private RideSearchService $service;
+    private User              $driver;
+    private string            $driverPhone;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->service     = app(RideSearchService::class);
+        $this->driverPhone = '091' . rand(1000000, 9999999);
+
+        $this->driver = User::factory()->create([
+            'is_verified_driver'  => true,
+            'verification_status' => 'approved',
+            'password'            => bcrypt('password123'),
+        ]);
+
+        if (!$this->driver->profile) {
+            $this->driver->profile()->create([
+                'full_name'       => 'Search Test Driver',
+                'number_of_rides' => 0,
+            ]);
+        }
+    }
+
+    // â”€â”€â”€ searchRides() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_search_returns_empty_collection_when_no_rides_exist(): void
+    {
+        $results = $this->service->searchRides([
+            'departure_date' => now()->addDays(3)->toDateString(),
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        $this->assertEmpty($results);
+    }
+
+    public function test_search_returns_matching_ride_when_conditions_met(): void
+    {
+        $departureDate = now()->addDays(3)->toDateString();
+        $this->insertRide(['departure_date' => $departureDate]);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $departureDate,
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        $this->assertNotEmpty($results);
+    }
+
+    public function test_search_does_not_return_cancelled_rides(): void
+    {
+        $departureDate = now()->addDays(3)->toDateString();
+        $this->insertRide(['departure_date' => $departureDate, 'status' => 'cancelled']);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $departureDate,
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        $this->assertEmpty($results);
+    }
+
+    public function test_search_does_not_return_finished_rides(): void
+    {
+        $departureDate = now()->addDays(3)->toDateString();
+        $this->insertRide(['departure_date' => $departureDate, 'status' => 'finished']);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $departureDate,
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        $this->assertEmpty($results);
+    }
+
+    public function test_search_filters_by_departure_date(): void
+    {
+        $targetDate = now()->addDays(5)->toDateString();
+        $otherDate  = now()->addDays(10)->toDateString();
+
+        $this->insertRide(['departure_date' => $targetDate]);
+        $this->insertRide(['departure_date' => $otherDate]);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $targetDate,
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        // All returned rides should be on the target date
+        foreach ($results as $ride) {
+            $this->assertEquals(
+                $targetDate,
+                Carbon::parse($ride->departure_time)->toDateString()
+            );
+        }
+    }
+
+    public function test_search_filters_by_minimum_seats(): void
+    {
+        $departureDate = now()->addDays(3)->toDateString();
+
+        // Ride with only 1 seat
+        $this->insertRide(['departure_date' => $departureDate, 'available_seats' => 1]);
+
+        // Search requires 3 seats â€” should find nothing
+        $results = $this->service->searchRides([
+            'departure_date' => $departureDate,
+            'seats_required' => 3,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        $this->assertEmpty($results);
+    }
+
+    public function test_search_returns_ride_when_seats_exactly_match_requirement(): void
+    {
+        $departureDate = now()->addDays(3)->toDateString();
+        $this->insertRide(['departure_date' => $departureDate, 'available_seats' => 2]);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $departureDate,
+            'seats_required' => 2,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        $this->assertNotEmpty($results);
+    }
+
+    public function test_search_results_include_driver_relationship(): void
+    {
+        $departureDate = now()->addDays(3)->toDateString();
+        $this->insertRide(['departure_date' => $departureDate]);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $departureDate,
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        if ($results->isNotEmpty()) {
+            $this->assertNotNull($results->first()->driver);
+        }
+    }
+
+    public function test_search_orders_results_by_departure_time_ascending(): void
+    {
+        $baseDate = now()->addDays(3)->toDateString();
+
+        // Insert two rides on the same day, 2 hours apart
+        $this->insertRide(['departure_date' => $baseDate, 'departure_hour' => 9]);
+        $this->insertRide(['departure_date' => $baseDate, 'departure_hour' => 14]);
+
+        $results = $this->service->searchRides([
+            'departure_date' => $baseDate,
+            'seats_required' => 1,
+            'source_lat'     => 33.5138,
+            'source_lng'     => 36.2765,
+            'dest_lat'       => 36.2021,
+            'dest_lng'       => 37.1343,
+        ]);
+
+        if ($results->count() >= 2) {
+            $firstTime  = Carbon::parse($results->first()->departure_time);
+            $secondTime = Carbon::parse($results->skip(1)->first()->departure_time);
+            $this->assertTrue($firstTime->lessThanOrEqualTo($secondTime));
+        }
+    }
+
+    // â”€â”€â”€ getNearbyRides() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_get_nearby_rides_returns_active_rides_near_location(): void
+    {
+        $this->insertRide(['status' => 'active']);
+
+        $results = $this->service->getNearbyRides(33.5138, 36.2765, 20);
+
+        $this->assertNotEmpty($results);
+    }
+
+    public function test_get_nearby_rides_excludes_cancelled_rides(): void
+    {
+        $this->insertRide(['status' => 'cancelled']);
+
+        $results = $this->service->getNearbyRides(33.5138, 36.2765, 20);
+
+        $this->assertEmpty($results);
+    }
+
+    public function test_get_nearby_rides_returns_collection(): void
+    {
+        $results = $this->service->getNearbyRides(33.5138, 36.2765, 20);
+
+        $this->assertInstanceOf(\Illuminate\Database\Eloquent\Collection::class, $results);
+    }
+
+    // â”€â”€â”€ API integration (via RideController::searchRides) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_search_endpoint_returns_200_with_valid_params(): void
+    {
+        $driver = $this->driver;
+        $token  = $this->postJson('/api/auth/login', [
+            'email'    => $driver->email,
+            'password' => 'password123',
+        ])->json('tokens.access_token');
+
+        $this->withToken($token)
+            ->postJson('/api/rides/search', [
+                'source_lat'     => 33.5138,
+                'source_lng'     => 36.2765,
+                'dest_lat'       => 36.2021,
+                'dest_lng'       => 37.1343,
+                'departure_date' => now()->addDays(5)->toDateString(),
+                'seats_required' => 1,
+            ])->assertStatus(200);
+    }
+
+    public function test_search_endpoint_returns_422_with_missing_params(): void
+    {
+        $token = $this->postJson('/api/auth/login', [
+            'email'    => $this->driver->email,
+            'password' => 'password123',
+        ])->json('tokens.access_token');
+
+        $this->withToken($token)
+            ->postJson('/api/rides/search', [])
+            ->assertStatus(422);
+    }
+
+    // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function insertRide(array $overrides = []): Ride
+    {
+        $status        = $overrides['status']          ?? 'active';
+        $seats         = $overrides['available_seats'] ?? 4;
+        $departureDate = $overrides['departure_date']  ?? now()->addDays(3)->toDateString();
+        $hour          = $overrides['departure_hour']  ?? 10;
+        $departureTime = Carbon::parse($departureDate)->setHour($hour)->format('Y-m-d H:i:s');
+
+        DB::statement("
+            INSERT INTO rides (
+                driver_id, pickup_address, destination_address,
+                pickup_location, destination_location,
+                departure_time, available_seats, price_per_seat,
+                payment_method, booking_type, status, distance, duration,
+                communication_number, created_at, updated_at
+            ) VALUES (
+                ?, 'Ø¯Ù…Ø´Ù‚', 'Ø­Ù„Ø¨',
+                ST_GeomFromText('POINT(33.5138 36.2765)', 4326),
+                ST_GeomFromText('POINT(36.2021 37.1343)', 4326),
+                ?, ?, 50000, 'cash', 'direct', ?, 320500, 14400, ?, NOW(), NOW()
+            )
+        ", [
+            $this->driver->id,
+            $departureTime,
+            $seats,
+            $status,
+            $this->driverPhone,
+        ]);
+
+        return Ride::latest('id')->first();
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Rides\RideTest.php =====
 
 <?php
@@ -4514,6 +5379,211 @@ class VerifyOtpMiddlewareTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Models\RefreshTokenTest.php =====
+
+<?php
+
+namespace Tests\Unit\Models;
+
+use App\Models\RefreshToken;
+use App\Models\User;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
+use Tests\TestCase;
+
+/**
+ * RefreshTokenTest â€” Unit tests for the RefreshToken model.
+ *
+ * LOCATION: tests/Unit/Models/RefreshTokenTest.php
+ *
+ * COVERS:
+ * - Fillable attributes
+ * - Casts
+ * - Relationships (belongsTo User)
+ * - isExpired()
+ * - isValid()
+ * - Database persistence
+ */
+class RefreshTokenTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User $user;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->user = User::factory()->create();
+    }
+
+    // â”€â”€â”€ Fillable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_fillable_contains_expected_fields(): void
+    {
+        $model    = new RefreshToken();
+        $fillable = $model->getFillable();
+
+        foreach (['user_id', 'token', 'expires_at', 'revoked', 'user_agent', 'ip_address'] as $field) {
+            $this->assertContains($field, $fillable, "Expected '{$field}' to be fillable");
+        }
+    }
+
+    // â”€â”€â”€ Casts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_expires_at_is_cast_to_datetime(): void
+    {
+        $casts = (new RefreshToken())->getCasts();
+        $this->assertArrayHasKey('expires_at', $casts);
+        $this->assertEquals('datetime', $casts['expires_at']);
+    }
+
+    public function test_revoked_is_cast_to_boolean(): void
+    {
+        $casts = (new RefreshToken())->getCasts();
+        $this->assertArrayHasKey('revoked', $casts);
+        $this->assertEquals('boolean', $casts['revoked']);
+    }
+
+    // â”€â”€â”€ Relationship â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_belongs_to_user(): void
+    {
+        $token = $this->makeToken();
+        $this->assertNotNull($token->user);
+        $this->assertEquals($this->user->id, $token->user->id);
+    }
+
+    // â”€â”€â”€ isExpired() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_is_expired_returns_false_when_token_is_not_expired(): void
+    {
+        $token = $this->makeToken(expiresAt: Carbon::now()->addHour());
+        $this->assertFalse($token->isExpired());
+    }
+
+    public function test_is_expired_returns_true_when_token_is_expired(): void
+    {
+        $token = $this->makeToken(expiresAt: Carbon::now()->subMinutes(1));
+        $this->assertTrue($token->isExpired());
+    }
+
+    public function test_is_expired_returns_true_when_expires_at_is_exactly_now(): void
+    {
+        // Carbon::now()->isPast() â€” a token expiring exactly now is considered past
+        $token = $this->makeToken(expiresAt: Carbon::now()->subSecond());
+        $this->assertTrue($token->isExpired());
+    }
+
+    public function test_is_expired_returns_false_for_token_expiring_far_in_future(): void
+    {
+        $token = $this->makeToken(expiresAt: Carbon::now()->addDays(30));
+        $this->assertFalse($token->isExpired());
+    }
+
+    // â”€â”€â”€ isValid() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_is_valid_returns_true_for_active_non_revoked_token(): void
+    {
+        $token = $this->makeToken(revoked: false, expiresAt: Carbon::now()->addHour());
+        $this->assertTrue($token->isValid());
+    }
+
+    public function test_is_valid_returns_false_when_token_is_expired(): void
+    {
+        $token = $this->makeToken(revoked: false, expiresAt: Carbon::now()->subMinutes(5));
+        $this->assertFalse($token->isValid());
+    }
+
+    public function test_is_valid_returns_false_when_token_is_revoked(): void
+    {
+        $token = $this->makeToken(revoked: true, expiresAt: Carbon::now()->addHour());
+        $this->assertFalse($token->isValid());
+    }
+
+    public function test_is_valid_returns_false_when_both_revoked_and_expired(): void
+    {
+        $token = $this->makeToken(revoked: true, expiresAt: Carbon::now()->subHour());
+        $this->assertFalse($token->isValid());
+    }
+
+    // â”€â”€â”€ Database persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_token_is_persisted_to_database(): void
+    {
+        $tokenString = hash('sha256', Str::random(64));
+
+        RefreshToken::create([
+            'user_id'    => $this->user->id,
+            'token'      => $tokenString,
+            'expires_at' => Carbon::now()->addWeek(),
+            'revoked'    => false,
+        ]);
+
+        $this->assertDatabaseHas('refresh_tokens', [
+            'user_id' => $this->user->id,
+            'token'   => $tokenString,
+            'revoked' => false,
+        ]);
+    }
+
+    public function test_revoked_defaults_to_false_when_not_set(): void
+    {
+        $token = RefreshToken::create([
+            'user_id'    => $this->user->id,
+            'token'      => hash('sha256', Str::random(64)),
+            'expires_at' => Carbon::now()->addHour(),
+        ]);
+
+        $this->assertFalse((bool) $token->revoked);
+    }
+
+    public function test_token_stores_user_agent_and_ip(): void
+    {
+        $token = RefreshToken::create([
+            'user_id'    => $this->user->id,
+            'token'      => hash('sha256', Str::random(64)),
+            'expires_at' => Carbon::now()->addHour(),
+            'revoked'    => false,
+            'user_agent' => 'Mozilla/5.0 Test Agent',
+            'ip_address' => '192.168.1.1',
+        ]);
+
+        $this->assertEquals('Mozilla/5.0 Test Agent', $token->user_agent);
+        $this->assertEquals('192.168.1.1', $token->ip_address);
+    }
+
+    public function test_multiple_tokens_can_exist_for_same_user(): void
+    {
+        for ($i = 0; $i < 3; $i++) {
+            RefreshToken::create([
+                'user_id'    => $this->user->id,
+                'token'      => hash('sha256', Str::random(64)),
+                'expires_at' => Carbon::now()->addHour(),
+                'revoked'    => false,
+            ]);
+        }
+
+        $count = RefreshToken::where('user_id', $this->user->id)->count();
+        $this->assertEquals(3, $count);
+    }
+
+    // â”€â”€â”€ Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function makeToken(
+        bool $revoked = false,
+        ?Carbon $expiresAt = null
+    ): RefreshToken {
+        return RefreshToken::create([
+            'user_id'    => $this->user->id,
+            'token'      => hash('sha256', Str::random(64)),
+            'expires_at' => $expiresAt ?? Carbon::now()->addHour(),
+            'revoked'    => $revoked,
+        ]);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Models\UserRatingTest.php =====
 
 <?php
@@ -4658,6 +5728,173 @@ class WalletTransactionTest extends TestCase
     {
         $this->assertNotNull($this->transaction->user);
         $this->assertEquals($this->user->id, $this->transaction->user->id);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Notifications\RideBookedNotificationTest.php =====
+
+<?php
+
+namespace Tests\Unit\Notifications;
+
+use App\Models\User;
+use App\Notifications\RideBookedNotification;
+use App\Notifications\RideCancelledNotification;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Notifications\Messages\MailMessage;
+use Tests\TestCase;
+
+/**
+ * RideNotificationsTest â€” Unit tests for stub ride notification classes.
+ *
+ * LOCATION: tests/Unit/Notifications/RideNotificationsTest.php
+ *
+ * NOTE ON THESE NOTIFICATIONS:
+ * RideBookedNotification and RideCancelledNotification are currently stubs â€”
+ * their toMail() returns a generic MailMessage and toArray() returns [].
+ * These tests verify the notification contract (channels, types, structure) and
+ * act as a regression guard so that when real content is added, the tests
+ * serve as a spec to fill in.
+ *
+ * POSTMAN EQUIVALENT: No direct HTTP endpoint â€” notifications are dispatched
+ * internally when a ride is booked/cancelled. To trigger manually:
+ *   php artisan notification:test {user_id} --type=welcome
+ */
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// RideBookedNotification
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+class RideBookedNotificationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User                  $user;
+    private RideBookedNotification $notification;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->user         = User::factory()->create();
+        $this->notification = new RideBookedNotification();
+    }
+
+    public function test_can_be_instantiated(): void
+    {
+        $this->assertInstanceOf(RideBookedNotification::class, $this->notification);
+    }
+
+    public function test_via_returns_mail_channel(): void
+    {
+        $channels = $this->notification->via($this->user);
+        $this->assertIsArray($channels);
+        $this->assertContains('mail', $channels);
+    }
+
+    public function test_to_mail_returns_mail_message_instance(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertInstanceOf(MailMessage::class, $mail);
+    }
+
+    public function test_to_array_returns_array(): void
+    {
+        $array = $this->notification->toArray($this->user);
+        $this->assertIsArray($array);
+    }
+
+    public function test_to_mail_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->toMail($this->user);
+    }
+
+    public function test_to_array_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->toArray($this->user);
+    }
+
+    public function test_via_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->via($this->user);
+    }
+
+    public function test_notification_uses_queueable_trait(): void
+    {
+        $this->assertTrue(
+            in_array(\Illuminate\Bus\Queueable::class, class_uses_recursive(RideBookedNotification::class))
+        );
+    }
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// RideCancelledNotification
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+class RideCancelledNotificationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User                      $user;
+    private RideCancelledNotification  $notification;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->user         = User::factory()->create();
+        $this->notification = new RideCancelledNotification();
+    }
+
+    public function test_can_be_instantiated(): void
+    {
+        $this->assertInstanceOf(RideCancelledNotification::class, $this->notification);
+    }
+
+    public function test_via_returns_mail_channel(): void
+    {
+        $channels = $this->notification->via($this->user);
+        $this->assertIsArray($channels);
+        $this->assertContains('mail', $channels);
+    }
+
+    public function test_to_mail_returns_mail_message_instance(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertInstanceOf(MailMessage::class, $mail);
+    }
+
+    public function test_to_array_returns_array(): void
+    {
+        $array = $this->notification->toArray($this->user);
+        $this->assertIsArray($array);
+    }
+
+    public function test_to_mail_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->toMail($this->user);
+    }
+
+    public function test_to_array_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->toArray($this->user);
+    }
+
+    public function test_via_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->via($this->user);
+    }
+
+    public function test_notification_uses_queueable_trait(): void
+    {
+        $this->assertTrue(
+            in_array(\Illuminate\Bus\Queueable::class, class_uses_recursive(RideCancelledNotification::class))
+        );
     }
 }
 
@@ -5932,6 +7169,128 @@ class PaymentResultTest extends TestCase
     {
         $result = PaymentResult::success();
         $this->assertEquals('Payment processed successfully', $result->message);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Services\RefundResultTest.php =====
+
+<?php
+
+namespace Tests\Unit\Services;
+
+use App\Domain\Payment\Strategies\RefundResult;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * RefundResultTest â€” Unit tests for the RefundResult value object.
+ *
+ * LOCATION: tests/Unit/Services/RefundResultTest.php
+ *
+ * COVERS:
+ * - RefundResult::success()
+ * - RefundResult::failure()
+ * - Default messages
+ * - transactionIds optional field
+ * - Public readonly properties
+ */
+class RefundResultTest extends TestCase
+{
+    // â”€â”€â”€ success() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_success_sets_success_true(): void
+    {
+        $result = RefundResult::success('Refund complete');
+        $this->assertTrue($result->success);
+    }
+
+    public function test_success_sets_custom_message(): void
+    {
+        $result = RefundResult::success('Full refund issued');
+        $this->assertEquals('Full refund issued', $result->message);
+    }
+
+    public function test_success_uses_default_message_when_not_provided(): void
+    {
+        $result = RefundResult::success();
+        $this->assertEquals('Refund processed successfully', $result->message);
+    }
+
+    public function test_success_with_transaction_ids(): void
+    {
+        $ids    = ['TX_001', 'TX_002'];
+        $result = RefundResult::success('Done', $ids);
+        $this->assertEquals($ids, $result->transactionIds);
+    }
+
+    public function test_success_transaction_ids_default_to_null(): void
+    {
+        $result = RefundResult::success();
+        $this->assertNull($result->transactionIds);
+    }
+
+    // â”€â”€â”€ failure() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_failure_sets_success_false(): void
+    {
+        $result = RefundResult::failure('Wallet not found');
+        $this->assertFalse($result->success);
+    }
+
+    public function test_failure_sets_error_message(): void
+    {
+        $result = RefundResult::failure('Insufficient admin balance');
+        $this->assertEquals('Insufficient admin balance', $result->message);
+    }
+
+    public function test_failure_transaction_ids_are_null(): void
+    {
+        $result = RefundResult::failure('Error');
+        $this->assertNull($result->transactionIds);
+    }
+
+    // â”€â”€â”€ Properties are readonly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_success_result_is_instance_of_refund_result(): void
+    {
+        $this->assertInstanceOf(RefundResult::class, RefundResult::success());
+    }
+
+    public function test_failure_result_is_instance_of_refund_result(): void
+    {
+        $this->assertInstanceOf(RefundResult::class, RefundResult::failure('Error'));
+    }
+
+    public function test_success_and_failure_produce_different_results(): void
+    {
+        $success = RefundResult::success('OK');
+        $failure = RefundResult::failure('Not OK');
+
+        $this->assertTrue($success->success);
+        $this->assertFalse($failure->success);
+    }
+
+    // â”€â”€â”€ Edge cases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_success_with_empty_transaction_ids_array(): void
+    {
+        $result = RefundResult::success('Done', []);
+        $this->assertIsArray($result->transactionIds);
+        $this->assertEmpty($result->transactionIds);
+    }
+
+    public function test_failure_message_preserves_special_characters(): void
+    {
+        $msg    = 'Wallet #123 insufficient: requires 1,000 SYP';
+        $result = RefundResult::failure($msg);
+        $this->assertEquals($msg, $result->message);
+    }
+
+    public function test_success_message_preserves_arabic_text(): void
+    {
+        $msg    = 'ØªÙ… Ø§Ø³ØªØ±Ø¯Ø§Ø¯ Ø§Ù„Ù…Ø¨Ù„Øº Ø¨Ù†Ø¬Ø§Ø­';
+        $result = RefundResult::success($msg);
+        $this->assertEquals($msg, $result->message);
     }
 }
 

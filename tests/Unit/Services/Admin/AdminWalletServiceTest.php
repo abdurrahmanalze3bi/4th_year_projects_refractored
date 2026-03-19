@@ -331,16 +331,13 @@ class AdminWalletServiceTest extends TestCase
     private function createUserWallet(string $phone, float $balance): Wallet
     {
         $user = User::factory()->create(['password' => bcrypt('password123')]);
-
         $wallet = Wallet::create([
             'user_id'       => $user->id,
             'phone_number'  => $phone,
-            'wallet_number' => 'WLT-' . strtoupper(uniqid()),
+            'wallet_number' => 'WLT' . rand(1000000, 9999999),  // ← 10 chars, fits in VARCHAR(16)
             'balance'       => $balance,
         ]);
-
         $user->update(['wallet_id' => $wallet->id]);
-
         return $wallet;
     }
 }

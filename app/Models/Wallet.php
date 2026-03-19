@@ -12,6 +12,7 @@ class Wallet extends Model
 
     protected $fillable = [
         'user_id',
+        'wallet_number',   // ← ADD THIS
         'stripe_customer_id',
         'stripe_payment_method_id',
         'balance',
