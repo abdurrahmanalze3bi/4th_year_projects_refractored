@@ -1,0 +1,20 @@
+$exclude = @("vendor", "storage", "public", "node_modules", ".git")
+$extensions = @("*.js", "*.ts", "*.php", "*.py")
+
+Get-ChildItem -Recurse -Include $extensions | Where-Object {
+    $path = $_.FullName
+    -not ($exclude | Where-Object { $path -like "*\$_\*" })
+} | ForEach-Object {
+    "`n`n===== FILE: $($_.FullName) =====`n"
+    Get-Content $_.FullName
+} | Out-File -FilePath "all_code.txt" -Encoding utf8
+
+
+
+
+
+// FOR THE TESTS
+Get-ChildItem -Path "tests" -Recurse -Include "*.php" | ForEach-Object {
+    "`n`n===== FILE: $($_.FullName) =====`n"
+    Get-Content $_.FullName
+} | Out-File -FilePath "tests_code.txt" -Encoding utf8

@@ -40,12 +40,14 @@ class AdminWalletService
             $adminUser = User::firstOrCreate(
                 ['email' => $adminConfig['email']],
                 [
-                    'first_name' => $adminConfig['first_name'],
-                    'last_name' => $adminConfig['last_name'],
-                    'phone_number' => $adminConfig['phone'],
+                    'first_name'        => $adminConfig['first_name'],
+                    'last_name'         => $adminConfig['last_name'],
+                    'phone_number'      => $adminConfig['phone'],
                     'email_verified_at' => now(),
-                    'password' => bcrypt($adminConfig['password']),
-                    'status' => 1
+                    'password'          => bcrypt($adminConfig['password']),
+                    'status'            => 1,
+                    'gender'            => 'M',
+                    'address'           => $adminConfig['address'] ?? 'دمشق',
                 ]
             );
 
@@ -193,7 +195,9 @@ class AdminWalletService
                 'wallet_number' => $wallet->wallet_number,
                 'phone_number' => $wallet->phone_number,
                 'balance' => Money::from($wallet->balance)->formatted(),
-                'owner' => $wallet->user->first_name . ' ' . $wallet->user->last_name,
+                'owner' => $wallet->user
+                    ? $wallet->user->first_name . ' ' . $wallet->user->last_name
+                    : 'Unknown',
                 'admin_type' => $adminType,
                 'created_at' => $wallet->created_at,
                 'updated_at' => $wallet->updated_at

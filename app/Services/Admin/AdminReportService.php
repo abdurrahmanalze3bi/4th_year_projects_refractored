@@ -163,11 +163,11 @@ class AdminReportService
                 ->limit(10)
                 ->get()
                 ->map(fn($t) => [
-                    'id' => $t->id,
-                    'wallet_number' => $t->wallet->wallet_number,
-                    'type' => $t->type,
-                    'amount' => Money::from($t->amount)->formatted(),
-                    'created_at' => $t->created_at->toDateTimeString()
+                    'id'             => $t->id,
+                    'wallet_number'  => $t->wallet?->wallet_number ?? 'N/A',
+                    'type'           => $t->type,
+                    'amount'         => Money::from(abs((float) $t->amount))->formatted(),
+                    'created_at'     => $t->created_at->toDateTimeString()
                 ])
                 ->toArray()
         ];

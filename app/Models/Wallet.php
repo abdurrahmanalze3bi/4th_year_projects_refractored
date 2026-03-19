@@ -22,13 +22,13 @@ class Wallet extends Model
         'balance' => 'decimal:2'
     ];
 // app/Models/Wallet.php
-    protected static function booted()
-    {
+    protected static function booted() {
         static::creating(function ($wallet) {
-            $wallet->wallet_number = self::generateWalletNumber();
+            if (empty($wallet->wallet_number)) {
+                $wallet->wallet_number = self::generateWalletNumber();
+            }
         });
     }
-
     private static function generateWalletNumber()
     {
         do {

@@ -196,6 +196,13 @@ class AdminDashboardController extends Controller
                     'new_balance' => $result['new_balance']->formatted(),
                 ]
             ]);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'code'    => 'WALLET_NOT_FOUND',
+                'message' => 'No wallet found for this phone number'
+            ], 404);
+
         } catch (\Exception $e) {
             Log::error('Wallet charge failure', [
                 'error' => $e->getMessage(),
@@ -203,8 +210,8 @@ class AdminDashboardController extends Controller
             ]);
 
             return response()->json([
-                'status' => 'error',
-                'code' => 'PROCESSING_ERROR',
+                'status'  => 'error',
+                'code'    => 'PROCESSING_ERROR',
                 'message' => 'Failed to charge wallet'
             ], 500);
         }

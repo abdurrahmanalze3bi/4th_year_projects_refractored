@@ -12,7 +12,7 @@ Route::prefix('admin')->group(function () {
     // Login/Logout
     Route::get('/login', [AdminDashboardController::class, 'showLoginForm'])->name('admin.login');
     Route::post('/login', [AdminDashboardController::class, 'login']);
-    Route::get('/logout', [AdminDashboardController::class, 'logout'])->name('admin.logout');
+    Route::post('/logout', [AdminDashboardController::class, 'logout'])->name('admin.logout');
 
     // Dashboard
     Route::get('/dashboard', [AdminDashboardController::class, 'showDashboard'])->name('admin.dashboard');
