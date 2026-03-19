@@ -3,12 +3,12 @@
 namespace App\Events;
 
 use App\Models\Ride;
-use Illuminate\Broadcasting\Channel;
+use Illuminate\Broadcasting\Channel;          // ← add
+use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
-
 class RideCreated implements ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;

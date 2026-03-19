@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Models\Wallet;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class RideTest extends TestCase
@@ -16,10 +17,13 @@ class RideTest extends TestCase
 
     private User   $driver;
     private string $token;
+    private string $driverPhone;
 
     protected function setUp(): void
     {
         parent::setUp();
+
+        $this->driverPhone = '091' . rand(1000000, 9999999);
 
         $this->driver = User::factory()->create([
             'is_verified_driver'  => true,
@@ -27,12 +31,10 @@ class RideTest extends TestCase
             'password'            => bcrypt('password123'),
         ]);
 
-        // Profile
         if (!$this->driver->profile) {
             $this->driver->profile()->create(['full_name' => 'Test Driver', 'number_of_rides' => 0]);
         }
 
-        // Required verification documents — without these, ride creation returns 422
         foreach (['face_id', 'back_id', 'license', 'mechanic_card'] as $type) {
             Photo::create([
                 'user_id' => $this->driver->id,
@@ -45,16 +47,14 @@ class RideTest extends TestCase
 
         $wallet = Wallet::create([
             'user_id'       => $this->driver->id,
-            'phone_number'  => '0912345678',
-            'wallet_number' => 'WLT-DRIVER-001',
+            'phone_number'  => $this->driverPhone,
+            'wallet_number' => 'WLT-DRV-' . Str::random(6),
             'balance'       => 1_000_000,
         ]);
         $this->driver->update(['wallet_id' => $wallet->id]);
 
         $this->token = $this->getToken($this->driver);
     }
-
-    // ── Create ride ───────────────────────────────────────────────────────────
 
     public function test_verified_driver_can_create_ride(): void
     {
@@ -70,9 +70,10 @@ class RideTest extends TestCase
             'password'           => bcrypt('password123'),
         ]);
 
+        // Controller returns 422 (InvalidArgumentException) not 500
         $this->withToken($this->getToken($unverified))
             ->postJson('/api/rides/create-with-route', $this->validRidePayload())
-            ->assertStatus(500);
+            ->assertStatus(422);
     }
 
     public function test_ride_creation_charges_5_percent_fee(): void
@@ -86,9 +87,7 @@ class RideTest extends TestCase
             ]))->assertStatus(201);
 
         $walletAfter = (float) Wallet::where('user_id', $this->driver->id)->value('balance');
-        $expectedFee = 10_000 * 4 * 0.05; // 2000
-
-        $this->assertEquals($walletBefore - $expectedFee, $walletAfter);
+        $this->assertEquals($walletBefore - (10_000 * 4 * 0.05), $walletAfter);
     }
 
     public function test_ride_creation_fails_with_past_departure_time(): void
@@ -108,22 +107,16 @@ class RideTest extends TestCase
             ->assertStatus(401);
     }
 
-    // ── Get rides ─────────────────────────────────────────────────────────────
-
     public function test_driver_can_get_own_rides(): void
     {
         $this->insertRide();
-
         $this->withToken($this->token)->getJson('/api/rides')->assertStatus(200);
     }
 
     public function test_can_get_ride_details(): void
     {
         $ride = $this->insertRide();
-
-        $this->withToken($this->token)
-            ->getJson("/api/rides/{$ride->id}")
-            ->assertStatus(200);
+        $this->withToken($this->token)->getJson("/api/rides/{$ride->id}")->assertStatus(200);
     }
 
     public function test_get_nonexistent_ride_returns_404(): void
@@ -131,16 +124,10 @@ class RideTest extends TestCase
         $this->withToken($this->token)->getJson('/api/rides/99999')->assertStatus(404);
     }
 
-    // ── Cancel ride ───────────────────────────────────────────────────────────
-
     public function test_driver_can_cancel_own_ride(): void
     {
         $ride = $this->insertRide();
-
-        $this->withToken($this->token)
-            ->patchJson("/api/rides/{$ride->id}/cancel")
-            ->assertStatus(200);
-
+        $this->withToken($this->token)->patchJson("/api/rides/{$ride->id}/cancel")->assertStatus(200);
         $this->assertDatabaseHas('rides', ['id' => $ride->id, 'status' => 'cancelled']);
     }
 
@@ -148,66 +135,54 @@ class RideTest extends TestCase
     {
         $other = User::factory()->create();
         $ride  = $this->insertRide(['driver_id' => $other->id]);
-
-        $this->withToken($this->token)
-            ->patchJson("/api/rides/{$ride->id}/cancel")
-            ->assertStatus(422);
+        $this->withToken($this->token)->patchJson("/api/rides/{$ride->id}/cancel")->assertStatus(422);
     }
 
     public function test_already_cancelled_ride_cannot_be_cancelled_again(): void
     {
         $ride = $this->insertRide(['status' => 'cancelled']);
-
-        $this->withToken($this->token)
-            ->patchJson("/api/rides/{$ride->id}/cancel")
-            ->assertStatus(422);
+        $this->withToken($this->token)->patchJson("/api/rides/{$ride->id}/cancel")->assertStatus(422);
     }
-
-    // ── Finish ride ───────────────────────────────────────────────────────────
 
     public function test_driver_can_finish_active_ride(): void
     {
         $ride = $this->insertRide(['departure_time' => now()->subMinutes(10)]);
-
-        $this->withToken($this->token)
-            ->postJson("/api/rides/{$ride->id}/finish")
-            ->assertSuccessful();
+        $this->withToken($this->token)->postJson("/api/rides/{$ride->id}/finish")->assertSuccessful();
     }
 
     public function test_cannot_finish_ride_before_departure_time(): void
     {
         $ride = $this->insertRide(['departure_time' => now()->addHours(2)]);
-
-        $this->withToken($this->token)
-            ->postJson("/api/rides/{$ride->id}/finish")
-            ->assertStatus(400);
+        $this->withToken($this->token)->postJson("/api/rides/{$ride->id}/finish")->assertStatus(400);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────────
 
     private function insertRide(array $overrides = []): Ride
     {
-        $driverId      = $overrides['driver_id']      ?? $this->driver->id;
-        $status        = $overrides['status']         ?? 'active';
-        $departureTime = $overrides['departure_time'] ?? now()->addHours(3);
+        $driverId  = $overrides['driver_id']      ?? $this->driver->id;
+        $status    = $overrides['status']         ?? 'active';
+        $departure = $overrides['departure_time'] ?? now()->addHours(3);
+        $depStr    = $departure instanceof \Carbon\Carbon
+            ? $departure->format('Y-m-d H:i:s')
+            : $departure;
 
-        $departureStr = $departureTime instanceof \Carbon\Carbon
-            ? $departureTime->format('Y-m-d H:i:s')
-            : $departureTime;
-
+        // FIX: added SRID 4326 to ST_GeomFromText so MySQL 8.0 ST_Distance_Sphere
+        // can operate on these points without throwing ER_NOT_IMPLEMENTED_FOR_CARTESIAN_SRS
         DB::statement("
-            INSERT INTO rides
-                (driver_id, pickup_address, destination_address,
-                 pickup_location, destination_location,
-                 departure_time, available_seats, price_per_seat,
-                 payment_method, booking_type, status,
-                 distance, duration, communication_number,
-                 created_at, updated_at)
-            VALUES (?, ?, ?,
-                 ST_GeomFromText('POINT(33.5138 36.2765)'),
-                 ST_GeomFromText('POINT(36.2021 37.1343)'),
-                 ?, 4, 50000, 'cash', 'direct', ?, 320.5, 240, '0912345678', NOW(), NOW())
-        ", [$driverId, 'دمشق', 'حلب', $departureStr, $status]);
+            INSERT INTO rides (
+                driver_id, pickup_address, destination_address,
+                pickup_location, destination_location,
+                departure_time, available_seats, price_per_seat,
+                payment_method, booking_type, status, distance, duration,
+                communication_number, created_at, updated_at
+            ) VALUES (
+                ?, ?, ?,
+                ST_GeomFromText('POINT(33.5138 36.2765)', 4326),
+                ST_GeomFromText('POINT(36.2021 37.1343)', 4326),
+                ?, 4, 50000, 'cash', 'direct', ?, 320.5, 240, ?, NOW(), NOW()
+            )
+        ", [$driverId, 'دمشق', 'حلب', $depStr, $status, $this->driverPhone]);
 
         return Ride::latest('id')->first();
     }
@@ -218,22 +193,34 @@ class RideTest extends TestCase
             $cfg  = config("admin.{$type}");
             $user = User::firstOrCreate(
                 ['email' => $cfg['email']],
-                ['first_name' => $type, 'last_name' => 'Admin',
-                    'password' => bcrypt($cfg['password']),
-                    'gender' => 'M', 'address' => 'دمشق', 'status' => true]
+                [
+                    'first_name' => $type,
+                    'last_name'  => 'Admin',
+                    'password'   => bcrypt($cfg['password']),
+                    'gender'     => 'M',
+                    'address'    => 'دمشق',
+                    'status'     => true,
+                ]
             );
-            if (!$user->wallet_id) {
+
+            if (!Wallet::where('phone_number', $cfg['phone'])->exists()) {
                 $w = Wallet::create([
                     'user_id'       => $user->id,
                     'phone_number'  => $cfg['phone'],
-                    'wallet_number' => 'WLT-' . strtoupper($type) . '-001',
+                    'wallet_number' => 'WLT-' . strtoupper($type) . '-' . Str::random(4),
                     'balance'       => 10_000_000,
                 ]);
                 $user->update(['wallet_id' => $w->id]);
+            } else {
+                Wallet::where('phone_number', $cfg['phone'])->update(['balance' => 10_000_000]);
             }
         }
     }
 
+    /**
+     * FIX: added vehicle_type — required field in createRideWithRoute validator.
+     * Without it, Laravel returns 422 before any business logic runs.
+     */
     private function validRidePayload(): array
     {
         return [
@@ -246,9 +233,10 @@ class RideTest extends TestCase
             'departure_time'       => now()->addHours(48)->toISOString(),
             'available_seats'      => 3,
             'price_per_seat'       => 50_000,
+            'vehicle_type'         => 'Toyota Camry',   // ← FIX: was missing
             'payment_method'       => 'cash',
             'booking_type'         => 'direct',
-            'communication_number' => '0912345678',
+            'communication_number' => $this->driverPhone,
             'route_index'          => 0,
         ];
     }

@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Console\Commands;
 
 use App\Models\User;
@@ -13,32 +14,58 @@ class TestNotificationCommand extends Command
     public function handle(NotificationService $notificationService)
     {
         $userId = $this->argument('user_id') ?? User::first()?->id;
-        $type = $this->option('type');
+        $type   = $this->option('type');
 
         if (!$userId) {
             $this->error('No user found to send notification to');
             return 1;
         }
 
+        $user = User::find($userId);
+
+        if (!$user) {
+            $this->error("User with ID {$userId} not found");
+            return 1;
+        }
+
         try {
+            // ✅ FIXED: createWelcomeNotification() and createSystemNotification()
+            // do not exist on NotificationService. Use createNotification() directly.
             switch ($type) {
                 case 'welcome':
-                    $notification = $notificationService->createWelcomeNotification($userId);
-                    break;
-                case 'system':
-                    $notification = $notificationService->createSystemNotification(
-                        'Test System Notification',
-                        'This is a test system notification sent from the command line.',
-                        [$userId]
+                    $notification = $notificationService->createNotification(
+                        $user,
+                        'welcome',
+                        'Welcome to SyRide!',
+                        'Thank you for joining SyRide. Start exploring rides today!',
+                        ['user_id' => $userId],
+                        'normal',
+                        'general'
                     );
                     break;
+
+                case 'system':
+                    $notification = $notificationService->createNotification(
+                        $user,
+                        'system',
+                        'Test System Notification',
+                        'This is a test system notification sent from the command line.',
+                        ['user_id' => $userId],
+                        'high',
+                        'system'
+                    );
+                    break;
+
                 default:
-                    $notification = $notificationService->create([
-                        'title' => 'Test Notification',
-                        'message' => 'This is a test notification!',
-                        'type' => 'test',
-                        'user_id' => $userId
-                    ]);
+                    $notification = $notificationService->createNotification(
+                        $user,
+                        'test',
+                        'Test Notification',
+                        'This is a test notification!',
+                        ['user_id' => $userId],
+                        'normal',
+                        'general'
+                    );
             }
 
             $this->info("Test notification sent successfully! ID: {$notification->id}");

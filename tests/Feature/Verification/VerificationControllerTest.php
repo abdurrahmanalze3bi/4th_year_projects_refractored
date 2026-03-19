@@ -8,13 +8,6 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
-/**
- * VerificationControllerTest
- *
- * Covers:
- * - VerificationController (passenger + driver submission + status)
- * - VerificationRepository (verifyPassenger / verifyDriver called by admin)
- */
 class VerificationControllerTest extends TestCase
 {
     use RefreshDatabase;
@@ -35,11 +28,12 @@ class VerificationControllerTest extends TestCase
 
     public function test_passenger_can_submit_verification_request(): void
     {
+        // Use post() not postJson() — file uploads require multipart/form-data
         $response = $this->withToken($this->token)
-            ->postJson('/api/profile/verify/passenger', [
+            ->post('/api/profile/verify/passenger', [
                 'face_id_pic' => UploadedFile::fake()->image('face.jpg'),
                 'back_id_pic' => UploadedFile::fake()->image('back.jpg'),
-            ]);
+            ], ['Accept' => 'application/json']);
 
         $response->assertStatus(201)
             ->assertJsonPath('success', true);
@@ -52,7 +46,6 @@ class VerificationControllerTest extends TestCase
 
     public function test_passenger_verification_without_files_still_submits(): void
     {
-        // Files are nullable — submitting with no files is allowed
         $response = $this->withToken($this->token)
             ->postJson('/api/profile/verify/passenger', []);
 
@@ -61,11 +54,9 @@ class VerificationControllerTest extends TestCase
 
     public function test_passenger_cannot_submit_twice_while_pending(): void
     {
-        // First submission
         $this->withToken($this->token)
             ->postJson('/api/profile/verify/passenger', []);
 
-        // Second submission should be rejected
         $response = $this->withToken($this->token)
             ->postJson('/api/profile/verify/passenger', []);
 
@@ -81,8 +72,9 @@ class VerificationControllerTest extends TestCase
 
     public function test_driver_can_submit_verification_request(): void
     {
+        // Use post() for file uploads
         $response = $this->withToken($this->token)
-            ->postJson('/api/profile/verify/driver', [
+            ->post('/api/profile/verify/driver', [
                 'face_id_pic'         => UploadedFile::fake()->image('face.jpg'),
                 'back_id_pic'         => UploadedFile::fake()->image('back.jpg'),
                 'driving_license_pic' => UploadedFile::fake()->image('license.jpg'),
@@ -91,7 +83,7 @@ class VerificationControllerTest extends TestCase
                 'type_of_car'         => 'Toyota Camry',
                 'color_of_car'        => 'White',
                 'number_of_seats'     => 4,
-            ]);
+            ], ['Accept' => 'application/json']);
 
         $response->assertStatus(201)
             ->assertJsonPath('success', true);
@@ -112,9 +104,9 @@ class VerificationControllerTest extends TestCase
     public function test_driver_verification_rejects_invalid_file_type(): void
     {
         $response = $this->withToken($this->token)
-            ->postJson('/api/profile/verify/driver', [
+            ->post('/api/profile/verify/driver', [
                 'face_id_pic' => UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf'),
-            ]);
+            ], ['Accept' => 'application/json']);
 
         $response->assertStatus(422);
     }
@@ -141,21 +133,19 @@ class VerificationControllerTest extends TestCase
         $this->withToken($this->token)
             ->postJson('/api/profile/verify/passenger', []);
 
-        $response = $this->withToken($this->token)
-            ->getJson("/api/profile/verify/status/{$this->user->id}");
-
-        $response->assertJsonPath('status', 'pending');
+        $this->withToken($this->token)
+            ->getJson("/api/profile/verify/status/{$this->user->id}")
+            ->assertJsonPath('status', 'pending');
     }
 
     public function test_status_for_nonexistent_user_returns_error(): void
     {
-        $response = $this->withToken($this->token)
-            ->getJson('/api/profile/verify/status/99999');
-
-        $response->assertStatus(500);
+        $this->withToken($this->token)
+            ->getJson('/api/profile/verify/status/99999')
+            ->assertStatus(500);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Helper ────────────────────────────────────────────────────────────────
 
     private function getToken(User $user): string
     {

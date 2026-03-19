@@ -7,58 +7,14 @@ use App\Models\Ride;
 use App\Models\User;
 
 /**
- * Payment Result - Returned from payment operations
- */
-final class PaymentResult
-{
-    public function __construct(
-        public readonly bool $success,
-        public readonly string $message,
-        public readonly ?array $transactionIds = null,
-        public readonly ?array $metadata = null,
-    ) {}
-
-    public static function success(string $message = 'Payment processed successfully', ?array $transactionIds = null): self
-    {
-        return new self(true, $message, $transactionIds);
-    }
-
-    public static function failure(string $message): self
-    {
-        return new self(false, $message);
-    }
-}
-
-/**
- * Refund Result - Returned from refund operations
- */
-final class RefundResult
-{
-    public function __construct(
-        public readonly bool $success,
-        public readonly string $message,
-        public readonly ?array $transactionIds = null,
-    ) {}
-
-    public static function success(string $message = 'Refund processed successfully', ?array $transactionIds = null): self
-    {
-        return new self(true, $message, $transactionIds);
-    }
-
-    public static function failure(string $message): self
-    {
-        return new self(false, $message);
-    }
-}
-
-/**
  * Payment Strategy Interface
- * 
+ *
  * Defines the contract for all payment methods.
- * Each payment method (cash, e-pay, credit card, etc.) implements this interface.
- * 
- * This is the Strategy Pattern - it allows you to select payment logic at runtime
- * without if-else chains.
+ * Each payment method (cash, e-pay, etc.) implements this interface.
+ *
+ * PaymentResult and RefundResult are now in their own files:
+ *   - App\Domain\Payment\Strategies\PaymentResult
+ *   - App\Domain\Payment\Strategies\RefundResult
  */
 interface PaymentStrategy
 {

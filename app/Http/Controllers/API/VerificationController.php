@@ -60,7 +60,6 @@ class VerificationController extends Controller
             ];
 
             $profileData = [];
-
             foreach ($map as $inputName => $enumType) {
                 if ($request->hasFile($inputName)) {
                     $ext      = $request->file($inputName)->getClientOriginalExtension();
@@ -70,13 +69,13 @@ class VerificationController extends Controller
 
                     $this->photoRepo->deleteDocumentsByType($user->id, $enumType);
                     $this->photoRepo->storeDocument($user->id, $enumType, $path);
-
                     $profileData[$inputName] = $path;
                 }
             }
 
+            // FIX: was $profile->id (profile PK) — must be $user->id (FK used in WHERE clause)
             if (!empty($profileData)) {
-                $this->profileRepo->updateProfile($profile->id, $profileData);
+                $this->profileRepo->updateProfile($user->id, $profileData);
             }
 
             $user->update([
@@ -140,7 +139,6 @@ class VerificationController extends Controller
             ];
 
             $profileData = [];
-
             foreach ($map as $inputName => $folder) {
                 if ($request->hasFile($inputName)) {
                     $ext      = $request->file($inputName)->getClientOriginalExtension();
@@ -164,7 +162,12 @@ class VerificationController extends Controller
                 }
             }
 
-            $this->profileRepo->updateProfile($profile->id, array_merge($profileData, $vehicleData));
+            $merged = array_merge($profileData, $vehicleData);
+
+            // FIX: was $profile->id (profile PK) — must be $user->id (FK used in WHERE clause)
+            if (!empty($merged)) {
+                $this->profileRepo->updateProfile($user->id, $merged);
+            }
 
             $user->update([
                 'verification_status'   => 'pending',
@@ -216,7 +219,6 @@ class VerificationController extends Controller
                     'driver'    => (bool) $user->is_verified_driver,
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,

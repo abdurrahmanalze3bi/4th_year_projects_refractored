@@ -18,8 +18,8 @@ class WhatsAppOtpService
     public function __construct(OtpRepositoryInterface $otpRepository)
     {
         $this->otpRepository = $otpRepository;
-        $this->client = new Client();
-        $this->apiKey = env('CALLMEBOT_API_KEY');
+        $this->client        = new Client();
+        $this->apiKey        = env('CALLMEBOT_API_KEY');
     }
 
     /**
@@ -33,11 +33,12 @@ class WhatsAppOtpService
             if (!$this->canSendOtp($validatedPhone)) {
                 return [
                     'success' => false,
-                    'message' => 'Too many OTP requests. Please try again later.'
+                    'message' => 'Too many OTP requests. Please try again later.',
                 ];
             }
 
             $this->otpRepository->deleteByPhone($validatedPhone);
+
             $otpCode = Otp::generateCode();
 
             $otp = $this->otpRepository->create([
@@ -46,25 +47,28 @@ class WhatsAppOtpService
                 'type'         => $type,
                 'expires_at'   => Carbon::now()->addMinutes(10),
                 'is_verified'  => false,
-                'attempts'     => 0
+                'attempts'     => 0,
             ]);
 
-            // ── TESTING MODE ────────────────────────────────────────────
+            // ── TESTING MODE ─────────────────────────────────────────────────────
+            // FIX: also check app()->environment('testing') so phpunit runs always
+            // land here regardless of config-cache state on the very first request.
             if ($this->isTestingMode()) {
                 Log::info("OTP (testing mode) for $validatedPhone: $otpCode");
+
                 return [
                     'success'    => true,
                     'message'    => 'OTP generated (testing mode — use the code below)',
-                    'otp_code'   => $otpCode,          // ← returned to caller
-                    'expires_at' => $otp->expires_at->toDateTimeString()
+                    'otp_code'   => $otpCode,
+                    'expires_at' => $otp->expires_at->toDateTimeString(),
                 ];
             }
 
-            // ── PRODUCTION MODE ─────────────────────────────────────────
+            // ── PRODUCTION MODE ───────────────────────────────────────────────────
             if (empty($this->apiKey)) {
                 return [
                     'success' => false,
-                    'message' => 'No API key configured for production OTP sending.'
+                    'message' => 'No API key configured for production OTP sending.',
                 ];
             }
 
@@ -72,35 +76,35 @@ class WhatsAppOtpService
 
             if (!$sent) {
                 Log::error("Failed to send OTP to $validatedPhone");
+
                 return [
                     'success' => false,
-                    'message' => 'Failed to send OTP. Please try again.'
+                    'message' => 'Failed to send OTP. Please try again.',
                 ];
             }
 
             Log::info("OTP sent (production) to $validatedPhone");
+
             return [
                 'success'    => true,
                 'message'    => 'OTP sent successfully via WhatsApp',
-                'expires_at' => $otp->expires_at->toDateTimeString()
-                // ← otp_code is NOT returned in production
+                'expires_at' => $otp->expires_at->toDateTimeString(),
             ];
-
         } catch (\Exception $e) {
             Log::error('OTP send error: ' . $e->getMessage());
+
             return ['success' => false, 'message' => 'Failed to send OTP. Please try again.'];
         }
     }
 
     /**
-     * Verify OTP - MODIFIED TO ACCEPT ANY 6-DIGIT CODE
+     * Verify OTP
      */
     public function verifyOtp(string $phoneNumber, string $code): array
     {
         try {
             $validatedPhone = $this->validateSyrianPhone($phoneNumber);
 
-            // Both modes verify against the stored DB record — no bypass
             $otp = $this->otpRepository->findByPhoneAndCode($validatedPhone, $code);
 
             if (!$otp) {
@@ -118,31 +122,36 @@ class WhatsAppOtpService
                 'message' => 'OTP verified successfully',
                 'data'    => [
                     'phone_number' => $validatedPhone,
-                    'verified_at'  => $otp->verified_at->toDateTimeString()
-                ]
+                    'verified_at'  => $otp->verified_at->toDateTimeString(),
+                ],
             ];
-
         } catch (\Exception $e) {
             Log::error('OTP verification error: ' . $e->getMessage());
+
             return ['success' => false, 'message' => 'OTP verification failed'];
         }
     }
 
-// ── private helper ───────────────────────────────────────────────────────────
+    // ── private helpers ───────────────────────────────────────────────────────────
 
+    /**
+     * FIX: also check app()->environment('testing') so the first request in a
+     * phpunit process always enters testing mode even when the config cache has
+     * a stale WALLET_OTP_MODE value from a previous production cache run.
+     */
     private function isTestingMode(): bool
     {
-        return env('WALLET_OTP_MODE', 'production') === 'testing';
+        return env('WALLET_OTP_MODE', 'production') === 'testing'
+            || app()->environment('testing');
     }
 
     /**
      * Check if bypass mode is enabled
-     * You can control this with an environment variable
      */
     private function isBypassMode(): bool
     {
-        // Enable bypass in development or when explicitly set
-        return env('OTP_BYPASS_ENABLED', false) || app()->environment(['local', 'testing']);
+        return env('OTP_BYPASS_ENABLED', false)
+            || app()->environment(['local', 'testing']);
     }
 
     /**
@@ -159,18 +168,16 @@ class WhatsAppOtpService
     private function createBypassOtpRecord(string $phoneNumber, string $code): void
     {
         try {
-            // Delete any existing OTPs for this phone
             $this->otpRepository->deleteByPhone($phoneNumber);
 
-            // Create a verified OTP record for consistency
             $this->otpRepository->create([
                 'phone_number' => $phoneNumber,
-                'otp_code' => $code,
-                'type' => 'BYPASS',
-                'expires_at' => Carbon::now()->addHour(), // Long expiry for bypass
-                'is_verified' => true,
-                'verified_at' => Carbon::now(),
-                'attempts' => 0
+                'otp_code'     => $code,
+                'type'         => 'BYPASS',
+                'expires_at'   => Carbon::now()->addHour(),
+                'is_verified'  => true,
+                'verified_at'  => Carbon::now(),
+                'attempts'     => 0,
             ]);
         } catch (\Exception $e) {
             Log::warning('Failed to create bypass OTP record: ' . $e->getMessage());
@@ -184,32 +191,32 @@ class WhatsAppOtpService
     {
         try {
             $normalizedPhone = $this->normalizeForCallMeBot($phoneNumber);
+
             $message = "Your verification code is: $otpCode\n\nThis code will expire in 5 minutes.\n\nDo not share this code with anyone.";
 
             $url = "https://api.callmebot.com/whatsapp.php?" . http_build_query([
-                    'phone' => $normalizedPhone,
-                    'text' => $message,
-                    'apikey' => $this->apiKey
+                    'phone'  => $normalizedPhone,
+                    'text'   => $message,
+                    'apikey' => $this->apiKey,
                 ]);
 
-            // Create client with disabled SSL verification
             $insecureClient = new Client(['verify' => false]);
+            $response       = $insecureClient->get($url);
+            $statusCode     = $response->getStatusCode();
+            $responseBody   = $response->getBody()->getContents();
 
-            $response = $insecureClient->get($url);
-            $statusCode = $response->getStatusCode();
-            $responseBody = $response->getBody()->getContents();
-
-            // Consider 200 or 203 as success regardless of response body
             if ($statusCode === 200 || $statusCode === 203) {
                 Log::info("OTP sent successfully to $phoneNumber. Response status: $statusCode");
+
                 return true;
             }
 
             Log::error("CallMeBot failed. Status: $statusCode | Response: $responseBody");
-            return false;
 
+            return false;
         } catch (RequestException $e) {
             Log::error('CallMeBot API error: ' . $e->getMessage());
+
             return false;
         }
     }
@@ -223,11 +230,11 @@ class WhatsAppOtpService
         $clean = ltrim($clean, '0');
 
         if (str_starts_with($clean, '9639') && strlen($clean) === 12) {
-            return $clean; // Already in 9639XXXXXXXX format
+            return $clean;
         }
 
         if (str_starts_with($clean, '9') && strlen($clean) === 9) {
-            return '963' . $clean; // 9XXXXXXXX → 9639XXXXXXXX
+            return '963' . $clean;
         }
 
         return $clean;
@@ -236,7 +243,6 @@ class WhatsAppOtpService
     /**
      * Validate Syrian phone number
      */
-    // Replace with in both files
     private function validateSyrianPhone(string $phoneNumber): string
     {
         return (string) \App\Domain\ValueObjects\PhoneNumber::from($phoneNumber);
@@ -248,6 +254,7 @@ class WhatsAppOtpService
     private function canSendOtp(string $phoneNumber): bool
     {
         $recentAttempts = $this->otpRepository->getRecentAttempts($phoneNumber, 5);
-        return $recentAttempts < 3; // Max 3 attempts per 5 minutes
+
+        return $recentAttempts < 3;
     }
 }
