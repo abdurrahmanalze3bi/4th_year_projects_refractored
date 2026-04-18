@@ -37,7 +37,7 @@ namespace App\Console\Commands;
 use App\Interfaces\OtpRepositoryInterface;
 use Illuminate\Console\Command;
 
-class CleanupExpiredOtps extends Command
+class CleanupExpiredOtps extendsa Command
 {
     /**
      * The name and signature of the console command.
@@ -383,7 +383,7 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Cash Payment Strategy
- * 
+ *
  * Handles cash payments (offline).
  * No wallet transactions needed - payment happens in person.
  */
@@ -393,7 +393,7 @@ final class CashPaymentStrategy implements PaymentStrategy
     {
         // Cash payment - no immediate transaction needed
         // Payment will be collected offline
-        
+
         Log::info('Cash payment recorded', [
             'booking_id' => $booking->id,
             'ride_id' => $ride->id,
@@ -407,7 +407,7 @@ final class CashPaymentStrategy implements PaymentStrategy
     public function processRefund(Booking $booking, Ride $ride, User $passenger): RefundResult
     {
         // Cash refunds handled offline
-        
+
         Log::info('Cash refund recorded', [
             'booking_id' => $booking->id,
             'passenger_id' => $passenger->id,
@@ -3032,214 +3032,6 @@ class ChatController extends Controller
 }
 
 
-===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\debricated BookingController.php =====
-
-<?php
-
-namespace App\Http\Controllers\API;
-
-use App\Http\Controllers\Controller;
-use App\Http\Requests\BookRideRequest;
-use App\Http\Resources\BookingResource;
-use App\Services\Ride\BookingService;
-use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
-
-/**
- * BookingController - Handles all booking operations
- *
- * Extracted from RideController to follow Single Responsibility Principle
- */
-final class BookingController extends Controller
-{
-    public function __construct(
-        private readonly BookingService $bookingService,
-    ) {}
-
-    /**
-     * Book a ride
-     * POST /api/rides/{rideId}/bookings
-     */
-    public function store(BookRideRequest $request, int $rideId): JsonResponse
-    {
-        try {
-            $booking = $this->bookingService->bookRide(
-                $rideId,
-                $request->user(),
-                $request->validated()
-            );
-
-            return response()->json([
-                'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Ride booked successfully',
-            ], 201);
-
-        } catch (\Exception $e) {
-            Log::error('Booking failed', [
-                'ride_id' => $rideId,
-                'user_id' => $request->user()->id,
-                'error' => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], 400);
-        }
-    }
-
-    /**
-     * Accept a booking request (driver only)
-     * POST /api/bookings/{bookingId}/accept
-     */
-    public function accept(Request $request, int $bookingId): JsonResponse
-    {
-        try {
-            $booking = $this->bookingService->acceptBooking(
-                $bookingId,
-                $request->user()
-            );
-
-            return response()->json([
-                'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Booking accepted successfully',
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Accept booking failed', [
-                'booking_id' => $bookingId,
-                'user_id' => $request->user()->id,
-                'error' => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], 400);
-        }
-    }
-
-    /**
-     * Reject a booking request (driver only)
-     * POST /api/bookings/{bookingId}/reject
-     */
-    public function reject(Request $request, int $bookingId): JsonResponse
-    {
-        try {
-            $booking = $this->bookingService->rejectBooking(
-                $bookingId,
-                $request->user()
-            );
-
-            return response()->json([
-                'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Booking rejected',
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], 400);
-        }
-    }
-
-    /**
-     * Get user's bookings (as passenger)
-     * GET /api/my-bookings
-     */
-    public function myBookings(Request $request): JsonResponse
-    {
-        $bookings = $request->user()
-            ->bookings()
-            ->with(['ride.driver.profile'])
-            ->orderBy('created_at', 'desc')
-            ->get();
-
-        return response()->json([
-            'success' => true,
-            'data' => BookingResource::collection($bookings),
-        ]);
-    }
-    /**
-     * Passenger confirms ride completion
-     */
-    public function passengerConfirmCompletion(Request $request, int $bookingId): JsonResponse
-    {
-        try {
-            $result = $this->bookingService->passengerConfirmCompletion(
-                $bookingId,
-                $request->user()
-            );
-
-            return response()->json([
-                'status'  => 'success',
-                'message' => $result['message'],
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Passenger confirmation failed', [
-                'booking_id' => $bookingId,
-                'user_id'    => $request->user()->id,
-                'error'      => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 400);
-        }
-    }
-    public function bookRide(Request $request, int $rideId): JsonResponse
-    {
-        $validated = $request->validate([
-            'seats'                => 'required|integer|min:1|max:10',
-            'communication_number' => 'required|string|regex:/^09\d{8}$/',
-        ]);
-
-        try {
-            $dto = new \App\DTOs\Ride\BookRideDTO(
-                passengerId:         $request->user()->id,
-                rideId:              $rideId,
-                seats:               $validated['seats'],
-                communicationNumber: \App\Domain\ValueObjects\PhoneNumber::from($validated['communication_number']),
-                idempotencyKey:      'book-' . $request->user()->id . '-' . $rideId . '-' . $validated['seats'],
-            );
-
-            $booking = $this->bookingService->bookRide($dto, $request->user());
-
-            return response()->json([
-                'status'  => 'success',
-                'message' => 'Ride booked successfully',
-                'booking' => $booking,
-            ], 201);
-
-        } catch (\InvalidArgumentException $e) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 422);
-
-        } catch (\Exception $e) {
-            Log::error('Booking failed', [
-                'ride_id'    => $rideId,
-                'user_id'    => $request->user()->id,
-                'error'      => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 400);
-        }
-    }
-}
-
-
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\DocumentController.php =====
 
 <?php
@@ -4398,17 +4190,16 @@ class RideController extends Controller
         try {
             $ride = $this->rideService->getRideById($rideId);
 
+            // âœ… FIXED: load the count so RideResource can compute seats.booked
+            $ride->loadCount(['bookings as total_booked_seats' => function ($query) {
+                $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
+            }]);
+
             return response()->json([
                 'success' => true,
-                'data'    => $ride,
+                'data'    => new RideResource($ride),  // â† was: $ride (raw model)
             ]);
-
         } catch (\Exception $e) {
-            Log::error('Failed to fetch ride details', [
-                'ride_id' => $rideId,
-                'error'   => $e->getMessage(),
-            ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'Ride not found: ' . $e->getMessage(),
@@ -5989,17 +5780,17 @@ class CreateRideRequest extends FormRequest
             'pickup_address' => 'required_without_all:pickup_lat,pickup_lng|string|max:255',
             'pickup_lat' => 'required_with:pickup_lng|numeric|between:-90,90',
             'pickup_lng' => 'required_with:pickup_lat|numeric|between:-180,180',
-            
+
             'destination_address' => 'required_without_all:destination_lat,destination_lng|string|max:255',
             'destination_lat' => 'required_with:destination_lng|numeric|between:-90,90',
             'destination_lng' => 'required_with:destination_lat|numeric|between:-180,180',
-            
+
             'departure_time' => [
                 'required',
                 'date',
                 'after:' . now()->addMinutes(5)->toDateTimeString(),
             ],
-            
+
             'available_seats' => 'required|integer|min:1|max:8',
             'price_per_seat' => 'required|numeric|min:100|max:100000',
             'payment_method' => 'required|in:cash,e-pay',
@@ -6007,7 +5798,7 @@ class CreateRideRequest extends FormRequest
             'communication_number' => 'required|regex:/^09\d{8}$/',
             'vehicle_type' => 'required|string|max:100',
             'notes' => 'nullable|string|max:500',
-            
+
             // Optional route data
             'route_index' => 'nullable|integer|min:0',
             'route_geometry' => 'nullable|array',
@@ -7957,6 +7748,7 @@ class Wallet extends Model
 
     protected $fillable = [
         'user_id',
+        'wallet_number',   // â† ADD THIS
         'stripe_customer_id',
         'stripe_payment_method_id',
         'balance',
@@ -15364,78 +15156,78 @@ class WhatsAppOtpService
 ===== FILE: C:\wamp64\www\4th_year_project\bootstrap\cache\packages.php =====
 
 <?php return array (
-  'laravel/sail' => 
+  'laravel/sail' =>
   array (
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Laravel\\Sail\\SailServiceProvider',
     ),
   ),
-  'laravel/sanctum' => 
+  'laravel/sanctum' =>
   array (
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Laravel\\Sanctum\\SanctumServiceProvider',
     ),
   ),
-  'laravel/socialite' => 
+  'laravel/socialite' =>
   array (
-    'aliases' => 
+    'aliases' =>
     array (
       'Socialite' => 'Laravel\\Socialite\\Facades\\Socialite',
     ),
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Laravel\\Socialite\\SocialiteServiceProvider',
     ),
   ),
-  'laravel/tinker' => 
+  'laravel/tinker' =>
   array (
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Laravel\\Tinker\\TinkerServiceProvider',
     ),
   ),
-  'nesbot/carbon' => 
+  'nesbot/carbon' =>
   array (
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Carbon\\Laravel\\ServiceProvider',
     ),
   ),
-  'nunomaduro/collision' => 
+  'nunomaduro/collision' =>
   array (
-    'providers' => 
+    'providers' =>
     array (
       0 => 'NunoMaduro\\Collision\\Adapters\\Laravel\\CollisionServiceProvider',
     ),
   ),
-  'nunomaduro/termwind' => 
+  'nunomaduro/termwind' =>
   array (
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Termwind\\Laravel\\TermwindServiceProvider',
     ),
   ),
-  'php-open-source-saver/jwt-auth' => 
+  'php-open-source-saver/jwt-auth' =>
   array (
-    'aliases' => 
+    'aliases' =>
     array (
       'JWTAuth' => 'PHPOpenSourceSaver\\JWTAuth\\Facades\\JWTAuth',
       'JWTFactory' => 'PHPOpenSourceSaver\\JWTAuth\\Facades\\JWTFactory',
     ),
-    'providers' => 
+    'providers' =>
     array (
       0 => 'PHPOpenSourceSaver\\JWTAuth\\Providers\\LaravelServiceProvider',
     ),
   ),
-  'spatie/laravel-ignition' => 
+  'spatie/laravel-ignition' =>
   array (
-    'aliases' => 
+    'aliases' =>
     array (
       'Flare' => 'Spatie\\LaravelIgnition\\Facades\\Flare',
     ),
-    'providers' => 
+    'providers' =>
     array (
       0 => 'Spatie\\LaravelIgnition\\IgnitionServiceProvider',
     ),
@@ -15446,7 +15238,7 @@ class WhatsAppOtpService
 ===== FILE: C:\wamp64\www\4th_year_project\bootstrap\cache\services.php =====
 
 <?php return array (
-  'providers' => 
+  'providers' =>
   array (
     0 => 'Illuminate\\Auth\\AuthServiceProvider',
     1 => 'Illuminate\\Broadcasting\\BroadcastServiceProvider',
@@ -15484,7 +15276,7 @@ class WhatsAppOtpService
     33 => 'App\\Providers\\EventServiceProvider',
     34 => 'App\\Providers\\RouteServiceProvider',
   ),
-  'eager' => 
+  'eager' =>
   array (
     0 => 'Illuminate\\Auth\\AuthServiceProvider',
     1 => 'Illuminate\\Cookie\\CookieServiceProvider',
@@ -15507,7 +15299,7 @@ class WhatsAppOtpService
     18 => 'App\\Providers\\EventServiceProvider',
     19 => 'App\\Providers\\RouteServiceProvider',
   ),
-  'deferred' => 
+  'deferred' =>
   array (
     'Illuminate\\Broadcasting\\BroadcastManager' => 'Illuminate\\Broadcasting\\BroadcastServiceProvider',
     'Illuminate\\Contracts\\Broadcasting\\Factory' => 'Illuminate\\Broadcasting\\BroadcastServiceProvider',
@@ -15653,51 +15445,51 @@ class WhatsAppOtpService
     'Laravel\\Socialite\\Contracts\\Factory' => 'Laravel\\Socialite\\SocialiteServiceProvider',
     'command.tinker' => 'Laravel\\Tinker\\TinkerServiceProvider',
   ),
-  'when' => 
+  'when' =>
   array (
-    'Illuminate\\Broadcasting\\BroadcastServiceProvider' => 
+    'Illuminate\\Broadcasting\\BroadcastServiceProvider' =>
     array (
     ),
-    'Illuminate\\Bus\\BusServiceProvider' => 
+    'Illuminate\\Bus\\BusServiceProvider' =>
     array (
     ),
-    'Illuminate\\Cache\\CacheServiceProvider' => 
+    'Illuminate\\Cache\\CacheServiceProvider' =>
     array (
     ),
-    'Illuminate\\Foundation\\Providers\\ConsoleSupportServiceProvider' => 
+    'Illuminate\\Foundation\\Providers\\ConsoleSupportServiceProvider' =>
     array (
     ),
-    'Illuminate\\Hashing\\HashServiceProvider' => 
+    'Illuminate\\Hashing\\HashServiceProvider' =>
     array (
     ),
-    'Illuminate\\Mail\\MailServiceProvider' => 
+    'Illuminate\\Mail\\MailServiceProvider' =>
     array (
     ),
-    'Illuminate\\Auth\\Passwords\\PasswordResetServiceProvider' => 
+    'Illuminate\\Auth\\Passwords\\PasswordResetServiceProvider' =>
     array (
     ),
-    'Illuminate\\Pipeline\\PipelineServiceProvider' => 
+    'Illuminate\\Pipeline\\PipelineServiceProvider' =>
     array (
     ),
-    'Illuminate\\Queue\\QueueServiceProvider' => 
+    'Illuminate\\Queue\\QueueServiceProvider' =>
     array (
     ),
-    'Illuminate\\Redis\\RedisServiceProvider' => 
+    'Illuminate\\Redis\\RedisServiceProvider' =>
     array (
     ),
-    'Illuminate\\Translation\\TranslationServiceProvider' => 
+    'Illuminate\\Translation\\TranslationServiceProvider' =>
     array (
     ),
-    'Illuminate\\Validation\\ValidationServiceProvider' => 
+    'Illuminate\\Validation\\ValidationServiceProvider' =>
     array (
     ),
-    'Laravel\\Sail\\SailServiceProvider' => 
+    'Laravel\\Sail\\SailServiceProvider' =>
     array (
     ),
-    'Laravel\\Socialite\\SocialiteServiceProvider' => 
+    'Laravel\\Socialite\\SocialiteServiceProvider' =>
     array (
     ),
-    'Laravel\\Tinker\\TinkerServiceProvider' => 
+    'Laravel\\Tinker\\TinkerServiceProvider' =>
     array (
     ),
   ),
@@ -20917,6 +20709,263 @@ class ChatTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Console\CleanupExpiredOtpsCommandTest.php =====
+
+<?php
+
+namespace Tests\Feature\Console;
+
+use App\Models\Otp;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class CleanupExpiredOtpsCommandTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_command_exits_zero_with_no_otps(): void
+    {
+        $this->artisan('otp:cleanup')->assertExitCode(0);
+    }
+
+    public function test_command_outputs_cleaned_count_message(): void
+    {
+        $this->artisan('otp:cleanup')
+            ->expectsOutputToContain('Cleaned up')
+            ->assertExitCode(0);
+    }
+
+    public function test_command_outputs_zero_when_nothing_to_clean(): void
+    {
+        $this->artisan('otp:cleanup')
+            ->expectsOutputToContain('0')
+            ->assertExitCode(0);
+    }
+
+    public function test_command_deletes_expired_otps(): void
+    {
+        Otp::create([
+            'phone_number' => '+963911111111',
+            'otp_code'     => '111111',
+            'type'         => 'E-PAYMENT',
+            'expires_at'   => Carbon::now()->subHours(2),
+            'is_verified'  => false,
+            'attempts'     => 0,
+        ]);
+
+        Otp::create([
+            'phone_number' => '+963922222222',
+            'otp_code'     => '222222',
+            'type'         => 'E-PAYMENT',
+            'expires_at'   => Carbon::now()->subMinutes(10),
+            'is_verified'  => false,
+            'attempts'     => 0,
+        ]);
+
+        $this->artisan('otp:cleanup')->assertExitCode(0);
+
+        $this->assertDatabaseMissing('otps', ['phone_number' => '+963911111111']);
+        $this->assertDatabaseMissing('otps', ['phone_number' => '+963922222222']);
+    }
+
+    public function test_command_preserves_active_otps(): void
+    {
+        // Active OTP â€” should NOT be deleted
+        Otp::create([
+            'phone_number' => '+963933333333',
+            'otp_code'     => '333333',
+            'type'         => 'E-PAYMENT',
+            'expires_at'   => Carbon::now()->addMinutes(5),
+            'is_verified'  => false,
+            'attempts'     => 0,
+        ]);
+
+        $this->artisan('otp:cleanup')->assertExitCode(0);
+
+        $this->assertDatabaseHas('otps', ['phone_number' => '+963933333333']);
+    }
+
+    public function test_command_deletes_expired_but_keeps_active(): void
+    {
+        // Expired
+        Otp::create([
+            'phone_number' => '+963911111111',
+            'otp_code'     => '111111',
+            'type'         => 'E-PAYMENT',
+            'expires_at'   => Carbon::now()->subHour(),
+            'is_verified'  => false,
+            'attempts'     => 0,
+        ]);
+        // Active
+        Otp::create([
+            'phone_number' => '+963922222222',
+            'otp_code'     => '222222',
+            'type'         => 'E-PAYMENT',
+            'expires_at'   => Carbon::now()->addHour(),
+            'is_verified'  => false,
+            'attempts'     => 0,
+        ]);
+
+        $this->artisan('otp:cleanup')->assertExitCode(0);
+
+        $this->assertEquals(1, Otp::count());
+        $this->assertDatabaseHas('otps', ['phone_number' => '+963922222222']);
+    }
+
+    public function test_command_reports_correct_deleted_count(): void
+    {
+        for ($i = 1; $i <= 3; $i++) {
+            Otp::create([
+                'phone_number' => "+96391111111{$i}",
+                'otp_code'     => str_pad($i, 6, '0', STR_PAD_LEFT),
+                'type'         => 'E-PAYMENT',
+                'expires_at'   => Carbon::now()->subHours($i),
+                'is_verified'  => false,
+                'attempts'     => 0,
+            ]);
+        }
+
+        $this->artisan('otp:cleanup')
+            ->expectsOutputToContain('3')
+            ->assertExitCode(0);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Console\CleanupExpiredTokensCommandTest.php =====
+
+<?php
+
+namespace Tests\Feature\Console;
+
+use App\Models\RefreshToken;
+use App\Models\User;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class CleanupExpiredTokensCommandTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_command_exits_zero_with_no_tokens(): void
+    {
+        $this->artisan('tokens:cleanup')->assertExitCode(0);
+    }
+
+    public function test_command_outputs_cleanup_message(): void
+    {
+        $this->artisan('tokens:cleanup')
+            ->expectsOutputToContain('expired/revoked tokens')
+            ->assertExitCode(0);
+    }
+
+    public function test_command_deletes_expired_tokens(): void
+    {
+        $user = User::factory()->create();
+
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'expired_token'),
+            'expires_at' => Carbon::now()->subDays(2),
+            'revoked'    => false,
+        ]);
+
+        $this->artisan('tokens:cleanup')->assertExitCode(0);
+
+        $this->assertEquals(0, RefreshToken::count());
+    }
+
+    public function test_command_deletes_revoked_tokens(): void
+    {
+        $user = User::factory()->create();
+
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'revoked_token'),
+            'expires_at' => Carbon::now()->addDay(), // not expired but revoked
+            'revoked'    => true,
+        ]);
+
+        $this->artisan('tokens:cleanup')->assertExitCode(0);
+
+        $this->assertEquals(0, RefreshToken::count());
+    }
+
+    public function test_command_preserves_active_valid_tokens(): void
+    {
+        $user = User::factory()->create();
+
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'active_token'),
+            'expires_at' => Carbon::now()->addDays(7),
+            'revoked'    => false,
+        ]);
+
+        $this->artisan('tokens:cleanup')->assertExitCode(0);
+
+        $this->assertEquals(1, RefreshToken::count());
+    }
+
+    public function test_command_deletes_expired_and_revoked_keeps_active(): void
+    {
+        $user = User::factory()->create();
+
+        // Expired
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'expired'),
+            'expires_at' => Carbon::now()->subDays(2),
+            'revoked'    => false,
+        ]);
+        // Revoked
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'revoked'),
+            'expires_at' => Carbon::now()->addDay(),
+            'revoked'    => true,
+        ]);
+        // Active
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'active'),
+            'expires_at' => Carbon::now()->addDays(7),
+            'revoked'    => false,
+        ]);
+
+        $this->artisan('tokens:cleanup')->assertExitCode(0);
+
+        $this->assertEquals(1, RefreshToken::count());
+        $this->assertDatabaseHas('refresh_tokens', ['token' => hash('sha256', 'active')]);
+    }
+
+    public function test_command_outputs_cleaning_info(): void
+    {
+        $this->artisan('tokens:cleanup')
+            ->expectsOutputToContain('Cleaning up expired tokens')
+            ->assertExitCode(0);
+    }
+
+    public function test_command_outputs_deleted_count(): void
+    {
+        $user = User::factory()->create();
+
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', 'expired_1'),
+            'expires_at' => Carbon::now()->subDay(),
+            'revoked'    => false,
+        ]);
+
+        $this->artisan('tokens:cleanup')
+            ->expectsOutputToContain('1')
+            ->assertExitCode(0);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Console\TestNotificationCommandTest.php =====
 
 <?php
@@ -20982,6 +21031,231 @@ class TestNotificationCommandTest extends TestCase
             'user_id' => $this->user->id,
             '--type'  => 'system',
         ])->assertExitCode(0);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Feature\Documents\DocumentControllerTest.php =====
+
+<?php
+
+namespace Tests\Feature\Documents;
+
+use App\Models\Photo;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
+use Tests\TestCase;
+
+class DocumentControllerTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User   $user;
+    private string $token;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('public');
+
+        $this->user = User::factory()->create(['password' => bcrypt('password123')]);
+
+        $this->token = $this->postJson('/api/auth/login', [
+            'email'    => $this->user->email,
+            'password' => 'password123',
+        ])->json('tokens.access_token');
+    }
+
+    // â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_upload_requires_authentication(): void
+    {
+        $this->postJson('/api/documents')->assertStatus(401);
+    }
+
+    // â”€â”€ Successful uploads â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_upload_face_id_succeeds(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'face_id',
+                'file' => UploadedFile::fake()->image('face.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(200)
+            ->assertJsonPath('success', true);
+    }
+
+    public function test_upload_back_id_succeeds(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'back_id',
+                'file' => UploadedFile::fake()->image('back.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(200);
+    }
+
+    public function test_upload_license_succeeds(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'license',
+                'file' => UploadedFile::fake()->image('license.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(200);
+    }
+
+    public function test_upload_mechanic_card_succeeds(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'mechanic_card',
+                'file' => UploadedFile::fake()->image('card.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(200);
+    }
+
+    // â”€â”€ Validation failures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_upload_with_invalid_type_fails_with_422(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'passport',
+                'file' => UploadedFile::fake()->image('doc.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(422);
+    }
+
+    public function test_upload_without_file_fails_with_422(): void
+    {
+        $this->withToken($this->token)
+            ->postJson('/api/documents', ['type' => 'face_id'])
+            ->assertStatus(422);
+    }
+
+    public function test_upload_without_type_fails_with_422(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'file' => UploadedFile::fake()->image('doc.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(422);
+    }
+
+    public function test_upload_pdf_file_is_rejected(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'face_id',
+                'file' => UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(422);
+    }
+
+    // â”€â”€ Business logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_upload_persists_photo_to_database(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'face_id',
+                'file' => UploadedFile::fake()->image('face.jpg'),
+            ], ['Accept' => 'application/json']);
+
+        $this->assertDatabaseHas('photos', [
+            'user_id' => $this->user->id,
+            'type'    => 'face_id',
+        ]);
+    }
+
+    public function test_uploading_same_type_twice_replaces_previous(): void
+    {
+        $this->withToken($this->token)->post('/api/documents', [
+            'type' => 'face_id',
+            'file' => UploadedFile::fake()->image('face1.jpg'),
+        ], ['Accept' => 'application/json']);
+
+        $this->withToken($this->token)->post('/api/documents', [
+            'type' => 'face_id',
+            'file' => UploadedFile::fake()->image('face2.jpg'),
+        ], ['Accept' => 'application/json']);
+
+        $this->assertEquals(
+            1,
+            Photo::where('user_id', $this->user->id)->where('type', 'face_id')->count()
+        );
+    }
+
+    public function test_upload_resets_verification_status_to_none(): void
+    {
+        $this->user->update([
+            'verification_status'   => 'approved',
+            'is_verified_driver'    => true,
+            'is_verified_passenger' => true,
+        ]);
+
+        $this->withToken($this->token)->post('/api/documents', [
+            'type' => 'face_id',
+            'file' => UploadedFile::fake()->image('face.jpg'),
+        ], ['Accept' => 'application/json']);
+
+        $this->user->refresh();
+        $this->assertEquals('none', $this->user->verification_status);
+        $this->assertFalse((bool) $this->user->is_verified_driver);
+        $this->assertFalse((bool) $this->user->is_verified_passenger);
+    }
+
+    public function test_upload_blocked_while_verification_pending(): void
+    {
+        $this->user->update(['verification_status' => 'pending']);
+
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'face_id',
+                'file' => UploadedFile::fake()->image('face.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(403);
+    }
+
+    // â”€â”€ Response shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_response_contains_data_with_id_url_type(): void
+    {
+        $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'face_id',
+                'file' => UploadedFile::fake()->image('face.jpg'),
+            ], ['Accept' => 'application/json'])
+            ->assertStatus(200)
+            ->assertJsonStructure([
+                'data' => ['id', 'url', 'type'],
+            ]);
+    }
+
+    public function test_response_type_matches_requested_type(): void
+    {
+        $response = $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'back_id',
+                'file' => UploadedFile::fake()->image('back.jpg'),
+            ], ['Accept' => 'application/json']);
+
+        $this->assertEquals('back_id', $response->json('data.type'));
+    }
+
+    public function test_response_url_is_a_string(): void
+    {
+        $response = $this->withToken($this->token)
+            ->post('/api/documents', [
+                'type' => 'face_id',
+                'file' => UploadedFile::fake()->image('face.jpg'),
+            ], ['Accept' => 'application/json']);
+
+        $this->assertIsString($response->json('data.url'));
     }
 }
 
@@ -24090,6 +24364,161 @@ class ExampleTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Domain\CashPaymentStrategyTest.php =====
+
+<?php
+
+namespace Tests\Unit\Domain;
+
+use App\Domain\Payment\Strategies\CashPaymentStrategy;
+use App\Domain\Payment\Strategies\PaymentResult;
+use App\Domain\Payment\Strategies\RefundResult;
+use App\Models\Booking;
+use App\Models\Ride;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class CashPaymentStrategyTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private CashPaymentStrategy $strategy;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->strategy = new CashPaymentStrategy();
+    }
+
+    // â”€â”€ canProcess â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_can_process_returns_true_for_cash(): void
+    {
+        $this->assertTrue($this->strategy->canProcess('cash'));
+    }
+
+    public function test_can_process_returns_false_for_epay(): void
+    {
+        $this->assertFalse($this->strategy->canProcess('e-pay'));
+    }
+
+    public function test_can_process_returns_false_for_empty_string(): void
+    {
+        $this->assertFalse($this->strategy->canProcess(''));
+    }
+
+    public function test_can_process_returns_false_for_unknown_method(): void
+    {
+        $this->assertFalse($this->strategy->canProcess('bitcoin'));
+    }
+
+    // â”€â”€ getPaymentMethod â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_get_payment_method_returns_cash(): void
+    {
+        $this->assertEquals('cash', $this->strategy->getPaymentMethod());
+    }
+
+    // â”€â”€ processBookingPayment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_process_booking_payment_returns_payment_result_instance(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $result = $this->strategy->processBookingPayment($booking, $ride, $user);
+        $this->assertInstanceOf(PaymentResult::class, $result);
+    }
+
+    public function test_process_booking_payment_returns_success(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $result = $this->strategy->processBookingPayment($booking, $ride, $user);
+        $this->assertTrue($result->success);
+    }
+
+    public function test_process_booking_payment_message_mentions_offline(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $result = $this->strategy->processBookingPayment($booking, $ride, $user);
+        $this->assertStringContainsString('offline', strtolower($result->message));
+    }
+
+    public function test_process_booking_payment_does_not_modify_wallet_balances(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        // Cash strategy should NOT touch any wallet â€” no exception should be thrown
+        // and no WalletTransaction records should be created
+        $before = \App\Models\WalletTransaction::count();
+        $this->strategy->processBookingPayment($booking, $ride, $user);
+        $this->assertEquals($before, \App\Models\WalletTransaction::count());
+    }
+
+    // â”€â”€ processRefund â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_process_refund_returns_refund_result_instance(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $result = $this->strategy->processRefund($booking, $ride, $user);
+        $this->assertInstanceOf(RefundResult::class, $result);
+    }
+
+    public function test_process_refund_returns_success(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $result = $this->strategy->processRefund($booking, $ride, $user);
+        $this->assertTrue($result->success);
+    }
+
+    public function test_process_refund_message_mentions_offline(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $result = $this->strategy->processRefund($booking, $ride, $user);
+        $this->assertStringContainsString('offline', strtolower($result->message));
+    }
+
+    public function test_process_refund_does_not_create_wallet_transactions(): void
+    {
+        [$user, $booking, $ride] = $this->makeScenario();
+        $before = \App\Models\WalletTransaction::count();
+        $this->strategy->processRefund($booking, $ride, $user);
+        $this->assertEquals($before, \App\Models\WalletTransaction::count());
+    }
+
+    // â”€â”€ Strategy implements interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_strategy_implements_payment_strategy_interface(): void
+    {
+        $this->assertInstanceOf(
+            \App\Domain\Payment\Strategies\PaymentStrategy::class,
+            $this->strategy
+        );
+    }
+
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function makeScenario(): array
+    {
+        $user = User::factory()->create();
+
+        $booking     = new Booking();
+        $booking->id = 1;
+        $booking->setAttribute('seats', 2);
+        $booking->setAttribute('status', 'confirmed');
+
+        $ride                      = new Ride();
+        $ride->driver_id           = $user->id;
+        $ride->pickup_address      = 'Damascus';
+        $ride->destination_address = 'Aleppo';
+        $ride->price_per_seat      = 50000;
+        $ride->available_seats     = 4;
+        $ride->payment_method      = 'cash';
+        $ride->booking_type        = 'direct';
+
+        return [$user, $booking, $ride];
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Domain\LocationTest.php =====
 
 <?php
@@ -24719,6 +25148,84 @@ class RideStatusTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Events\ConversationCreatedTest.php =====
+
+<?php
+
+namespace Tests\Unit\Events;
+
+use App\Events\ConversationCreated;
+use Illuminate\Broadcasting\PrivateChannel;
+use PHPUnit\Framework\TestCase;
+
+class ConversationCreatedTest extends TestCase
+{
+    public function test_event_can_be_instantiated(): void
+    {
+        $event = new ConversationCreated();
+        $this->assertInstanceOf(ConversationCreated::class, $event);
+    }
+
+    public function test_broadcast_on_returns_array(): void
+    {
+        $channels = (new ConversationCreated())->broadcastOn();
+        $this->assertIsArray($channels);
+    }
+
+    public function test_broadcast_on_returns_non_empty_array(): void
+    {
+        $channels = (new ConversationCreated())->broadcastOn();
+        $this->assertNotEmpty($channels);
+    }
+
+    public function test_broadcast_on_returns_private_channel(): void
+    {
+        $channels = (new ConversationCreated())->broadcastOn();
+        $this->assertInstanceOf(PrivateChannel::class, $channels[0]);
+    }
+
+    public function test_event_uses_dispatchable_trait(): void
+    {
+        $this->assertTrue(
+            in_array(
+                \Illuminate\Foundation\Events\Dispatchable::class,
+                class_uses_recursive(ConversationCreated::class)
+            )
+        );
+    }
+
+    public function test_event_uses_serializes_models_trait(): void
+    {
+        $this->assertTrue(
+            in_array(
+                \Illuminate\Queue\SerializesModels::class,
+                class_uses_recursive(ConversationCreated::class)
+            )
+        );
+    }
+
+    public function test_event_uses_interacts_with_sockets_trait(): void
+    {
+        $this->assertTrue(
+            in_array(
+                \Illuminate\Broadcasting\InteractsWithSockets::class,
+                class_uses_recursive(ConversationCreated::class)
+            )
+        );
+    }
+
+    public function test_event_class_exists(): void
+    {
+        $this->assertTrue(class_exists(ConversationCreated::class));
+    }
+
+    public function test_event_has_broadcast_on_method(): void
+    {
+        $this->assertTrue(method_exists(ConversationCreated::class, 'broadcastOn'));
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Events\UserVerifiedTest.php =====
 
 <?php
@@ -24807,6 +25314,149 @@ class UserVerifiedTest extends TestCase
 
         $this->assertIsString($data['message']);
         $this->assertNotEmpty($data['message']);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Http\Requests\CreateRideRequestTest.php =====
+
+<?php
+
+namespace Tests\Unit\Http\Requests;
+
+use App\Http\Requests\CreateRideRequest;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class CreateRideRequestTest extends TestCase
+{
+    use RefreshDatabase;
+
+    // â”€â”€ authorize() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_authorize_returns_true(): void
+    {
+        $this->assertTrue((new CreateRideRequest())->authorize());
+    }
+
+    // â”€â”€ rules() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_rules_contains_departure_time(): void
+    {
+        $this->assertArrayHasKey('departure_time', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_available_seats(): void
+    {
+        $this->assertArrayHasKey('available_seats', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_price_per_seat(): void
+    {
+        $this->assertArrayHasKey('price_per_seat', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_payment_method(): void
+    {
+        $this->assertArrayHasKey('payment_method', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_booking_type(): void
+    {
+        $this->assertArrayHasKey('booking_type', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_communication_number(): void
+    {
+        $this->assertArrayHasKey('communication_number', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_vehicle_type(): void
+    {
+        $this->assertArrayHasKey('vehicle_type', (new CreateRideRequest())->rules());
+    }
+
+    public function test_rules_contains_notes(): void
+    {
+        $this->assertArrayHasKey('notes', (new CreateRideRequest())->rules());
+    }
+
+    // â”€â”€ messages() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_messages_returns_non_empty_array(): void
+    {
+        $messages = (new CreateRideRequest())->messages();
+        $this->assertIsArray($messages);
+        $this->assertNotEmpty($messages);
+    }
+
+    public function test_messages_contains_departure_time_after_message(): void
+    {
+        $this->assertArrayHasKey('departure_time.after', (new CreateRideRequest())->messages());
+    }
+
+    public function test_messages_contains_communication_number_regex_message(): void
+    {
+        $this->assertArrayHasKey('communication_number.regex', (new CreateRideRequest())->messages());
+    }
+
+    public function test_messages_contains_price_per_seat_min_message(): void
+    {
+        $this->assertArrayHasKey('price_per_seat.min', (new CreateRideRequest())->messages());
+    }
+
+    // â”€â”€ HTTP validation via API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_api_create_ride_requires_authentication(): void
+    {
+        $this->postJson('/api/rides', [])->assertStatus(401);
+    }
+
+    public function test_api_create_ride_fails_with_invalid_payment_method(): void
+    {
+        $user  = User::factory()->create(['is_verified_driver' => true, 'password' => bcrypt('pass123')]);
+        $token = $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'pass123'])
+            ->json('tokens.access_token');
+
+        $this->withToken($token)->postJson('/api/rides', [
+            'payment_method'  => 'crypto',
+            'available_seats' => 3,
+            'departure_time'  => now()->addHours(2)->toDateTimeString(),
+        ])->assertStatus(422);
+    }
+
+    public function test_api_create_ride_fails_with_past_departure_time(): void
+    {
+        $user  = User::factory()->create(['is_verified_driver' => true, 'password' => bcrypt('pass123')]);
+        $token = $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'pass123'])
+            ->json('tokens.access_token');
+
+        $this->withToken($token)->postJson('/api/rides', [
+            'departure_time'  => now()->subHour()->toDateTimeString(),
+            'available_seats' => 3,
+            'payment_method'  => 'cash',
+            'booking_type'    => 'direct',
+        ])->assertStatus(422);
+    }
+
+    public function test_api_create_ride_fails_with_too_many_seats(): void
+    {
+        $user  = User::factory()->create(['is_verified_driver' => true, 'password' => bcrypt('pass123')]);
+        $token = $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'pass123'])
+            ->json('tokens.access_token');
+
+        $this->withToken($token)->postJson('/api/rides', [
+            'departure_time'       => now()->addHours(2)->toDateTimeString(),
+            'available_seats'      => 20,   // max is 8
+            'price_per_seat'       => 5000,
+            'payment_method'       => 'cash',
+            'booking_type'         => 'direct',
+            'communication_number' => '0912345678',
+            'vehicle_type'         => 'Toyota',
+            'pickup_address'       => 'Damascus',
+            'destination_address'  => 'Aleppo',
+        ])->assertStatus(422);
     }
 }
 
@@ -24923,6 +25573,70 @@ class SendScheduledNotificationTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Middleware\AuthenticateMiddlewareTest.php =====
+
+<?php
+
+namespace Tests\Unit\Middleware;
+
+use App\Http\Middleware\Authenticate;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class AuthenticateMiddlewareTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_unauthenticated_api_request_returns_401(): void
+    {
+        $this->getJson('/api/user')->assertStatus(401);
+    }
+
+    public function test_unauthenticated_api_request_is_not_a_redirect(): void
+    {
+        $response = $this->getJson('/api/user');
+        $this->assertNotEquals(302, $response->status());
+    }
+
+    public function test_authenticated_api_request_passes_through(): void
+    {
+        $user = User::factory()->create(['password' => bcrypt('password123')]);
+
+        $token = $this->postJson('/api/auth/login', [
+            'email'    => $user->email,
+            'password' => 'password123',
+        ])->json('tokens.access_token');
+
+        $this->withToken($token)->getJson('/api/user')->assertStatus(200);
+    }
+
+    public function test_middleware_class_can_be_resolved_from_container(): void
+    {
+        $middleware = $this->app->make(Authenticate::class);
+        $this->assertInstanceOf(Authenticate::class, $middleware);
+    }
+
+    public function test_api_request_with_invalid_token_returns_401(): void
+    {
+        $this->withToken('invalid.token.here')
+            ->getJson('/api/user')
+            ->assertStatus(401);
+    }
+
+    public function test_api_request_without_bearer_prefix_returns_401(): void
+    {
+        $this->getJson('/api/user', ['Authorization' => 'Basic abc123'])
+            ->assertStatus(401);
+    }
+
+    public function test_missing_authorization_header_returns_401(): void
+    {
+        $this->getJson('/api/user')->assertStatus(401);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Middleware\TrustHostsTest.php =====
 
 <?php
@@ -24971,6 +25685,140 @@ class VerifyOtpMiddlewareTest extends TestCase
         });
 
         $this->assertTrue($called);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Models\ConversationParticipantTest.php =====
+
+<?php
+
+namespace Tests\Unit\Models;
+
+use App\Models\Conversation;
+use App\Models\ConversationParticipant;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class ConversationParticipantTest extends TestCase
+{
+    use RefreshDatabase;
+
+    // â”€â”€ Fillable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_fillable_contains_conversation_id(): void
+    {
+        $this->assertContains('conversation_id', (new ConversationParticipant())->getFillable());
+    }
+
+    public function test_fillable_contains_user_id(): void
+    {
+        $this->assertContains('user_id', (new ConversationParticipant())->getFillable());
+    }
+
+    public function test_fillable_contains_role(): void
+    {
+        $this->assertContains('role', (new ConversationParticipant())->getFillable());
+    }
+
+    public function test_fillable_contains_joined_at(): void
+    {
+        $this->assertContains('joined_at', (new ConversationParticipant())->getFillable());
+    }
+
+    public function test_fillable_contains_last_read_at(): void
+    {
+        $this->assertContains('last_read_at', (new ConversationParticipant())->getFillable());
+    }
+
+    // â”€â”€ Casts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_joined_at_is_cast_to_datetime(): void
+    {
+        $casts = (new ConversationParticipant())->getCasts();
+        $this->assertArrayHasKey('joined_at', $casts);
+        $this->assertEquals('datetime', $casts['joined_at']);
+    }
+
+    public function test_last_read_at_is_cast_to_datetime(): void
+    {
+        $casts = (new ConversationParticipant())->getCasts();
+        $this->assertArrayHasKey('last_read_at', $casts);
+        $this->assertEquals('datetime', $casts['last_read_at']);
+    }
+
+    // â”€â”€ Relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_has_conversation_relationship_method(): void
+    {
+        $this->assertTrue(method_exists(ConversationParticipant::class, 'conversation'));
+    }
+
+    public function test_has_user_relationship_method(): void
+    {
+        $this->assertTrue(method_exists(ConversationParticipant::class, 'user'));
+    }
+
+    // â”€â”€ Persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_participant_can_be_created_in_database(): void
+    {
+        $user         = User::factory()->create();
+        $conversation = Conversation::create(['type' => 'private']);
+
+        ConversationParticipant::create([
+            'conversation_id' => $conversation->id,
+            'user_id'         => $user->id,
+            'role'            => 'member',
+            'joined_at'       => now(),
+        ]);
+
+        $this->assertDatabaseHas('conversation_participants', [
+            'conversation_id' => $conversation->id,
+            'user_id'         => $user->id,
+        ]);
+    }
+
+    public function test_user_relationship_returns_correct_user(): void
+    {
+        $user         = User::factory()->create();
+        $conversation = Conversation::create(['type' => 'private']);
+
+        $participant = ConversationParticipant::create([
+            'conversation_id' => $conversation->id,
+            'user_id'         => $user->id,
+            'joined_at'       => now(),
+        ]);
+
+        $this->assertEquals($user->id, $participant->user->id);
+    }
+
+    public function test_conversation_relationship_returns_correct_conversation(): void
+    {
+        $user         = User::factory()->create();
+        $conversation = Conversation::create(['type' => 'private']);
+
+        $participant = ConversationParticipant::create([
+            'conversation_id' => $conversation->id,
+            'user_id'         => $user->id,
+            'joined_at'       => now(),
+        ]);
+
+        $this->assertEquals($conversation->id, $participant->conversation->id);
+    }
+
+    public function test_multiple_participants_can_join_same_conversation(): void
+    {
+        $user1        = User::factory()->create();
+        $user2        = User::factory()->create();
+        $conversation = Conversation::create(['type' => 'private']);
+
+        ConversationParticipant::create(['conversation_id' => $conversation->id, 'user_id' => $user1->id, 'joined_at' => now()]);
+        ConversationParticipant::create(['conversation_id' => $conversation->id, 'user_id' => $user2->id, 'joined_at' => now()]);
+
+        $count = ConversationParticipant::where('conversation_id', $conversation->id)->count();
+        $this->assertEquals(2, $count);
     }
 }
 
@@ -25328,6 +26176,130 @@ class WalletTransactionTest extends TestCase
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Notifications\CustomResetPasswordTest.php =====
+
+<?php
+
+namespace Tests\Unit\Notifications;
+
+use App\Models\User;
+use App\Notifications\CustomResetPassword;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Notifications\Messages\MailMessage;
+use Tests\TestCase;
+
+class CustomResetPasswordTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User                $user;
+    private CustomResetPassword $notification;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->user         = User::factory()->create(['email' => 'test@example.com']);
+        $this->notification = new CustomResetPassword('fake-reset-token-abc123');
+    }
+
+    // â”€â”€ Instantiation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_notification_can_be_instantiated(): void
+    {
+        $this->assertInstanceOf(CustomResetPassword::class, $this->notification);
+    }
+
+    public function test_notification_stores_token(): void
+    {
+        $n = new CustomResetPassword('my-secret-token');
+        $this->assertEquals('my-secret-token', $n->token);
+    }
+
+    // â”€â”€ toMail() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_to_mail_returns_mail_message_instance(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertInstanceOf(MailMessage::class, $mail);
+    }
+
+    public function test_to_mail_subject_contains_reset(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertStringContainsString('Reset', $mail->subject);
+    }
+
+    public function test_to_mail_action_url_contains_token(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertStringContainsString('fake-reset-token-abc123', $mail->actionUrl);
+    }
+
+    public function test_to_mail_action_url_contains_email(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertStringContainsString(urlencode('test@example.com'), $mail->actionUrl);
+    }
+
+    public function test_to_mail_has_action_text(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $this->assertNotEmpty($mail->actionText);
+    }
+
+    public function test_to_mail_mentions_expiry_in_lines(): void
+    {
+        $mail = $this->notification->toMail($this->user);
+        $allLines = array_merge(
+            $mail->introLines ?? [],
+            $mail->outroLines ?? []
+        );
+        $text = implode(' ', $allLines);
+        // Should mention 60 minutes expiry
+        $this->assertStringContainsString('60', $text);
+    }
+
+    public function test_to_mail_does_not_throw(): void
+    {
+        $this->expectNotToPerformAssertions();
+        $this->notification->toMail($this->user);
+    }
+
+    // â”€â”€ Different tokens produce different URLs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_different_tokens_produce_different_action_urls(): void
+    {
+        $n1 = new CustomResetPassword('token-one');
+        $n2 = new CustomResetPassword('token-two');
+
+        $url1 = $n1->toMail($this->user)->actionUrl;
+        $url2 = $n2->toMail($this->user)->actionUrl;
+
+        $this->assertNotEquals($url1, $url2);
+    }
+
+    // â”€â”€ Traits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function test_notification_uses_queueable_trait(): void
+    {
+        $this->assertTrue(
+            in_array(
+                \Illuminate\Bus\Queueable::class,
+                class_uses_recursive(CustomResetPassword::class)
+            )
+        );
+    }
+
+    public function test_notification_extends_reset_password_notification(): void
+    {
+        $this->assertInstanceOf(
+            \Illuminate\Auth\Notifications\ResetPassword::class,
+            $this->notification
+        );
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Notifications\RideBookedNotificationTest.php =====
 
 <?php
@@ -25537,6 +26509,227 @@ class UserVerifiedNotificationTest extends TestCase
     {
         $array = $this->notification->toArray($this->user);
         $this->assertIsArray($array);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Providers\AppServiceProviderTest.php =====
+
+<?php
+
+namespace Tests\Unit\Providers;
+
+use App\Providers\AppServiceProvider;
+use App\Interfaces\UserRepositoryInterface;
+use App\Interfaces\ProfileRepositoryInterface;
+use App\Interfaces\OtpRepositoryInterface;
+use App\Interfaces\PhotoRepositoryInterface;
+use App\Interfaces\ChatRepositoryInterface;
+use App\Interfaces\VerificationRepositoryInterface;
+use App\Interfaces\PasswordResetRepositoryInterface;
+use App\Interfaces\RideRepositoryInterface;
+use App\Services\Geocoding\GeocodingService;
+use App\Services\Geocoding\ArabicPlaceNameService;
+use App\Services\PushNotification\FcmSenderService;
+use App\Services\PushNotification\PushNotificationService;
+use App\Services\Ride\RideService;
+use App\Services\Ride\BookingService;
+use App\Services\Admin\AdminAuthService;
+use App\Services\Admin\AdminWalletService;
+use App\Services\NotificationService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class AppServiceProviderTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_user_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            UserRepositoryInterface::class,
+            $this->app->make(UserRepositoryInterface::class)
+        );
+    }
+
+    public function test_profile_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            ProfileRepositoryInterface::class,
+            $this->app->make(ProfileRepositoryInterface::class)
+        );
+    }
+
+    public function test_otp_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            OtpRepositoryInterface::class,
+            $this->app->make(OtpRepositoryInterface::class)
+        );
+    }
+
+    public function test_photo_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            PhotoRepositoryInterface::class,
+            $this->app->make(PhotoRepositoryInterface::class)
+        );
+    }
+
+    public function test_chat_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            ChatRepositoryInterface::class,
+            $this->app->make(ChatRepositoryInterface::class)
+        );
+    }
+
+    public function test_verification_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            VerificationRepositoryInterface::class,
+            $this->app->make(VerificationRepositoryInterface::class)
+        );
+    }
+
+    public function test_password_reset_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            PasswordResetRepositoryInterface::class,
+            $this->app->make(PasswordResetRepositoryInterface::class)
+        );
+    }
+
+    public function test_ride_repository_is_bound(): void
+    {
+        $this->assertInstanceOf(
+            RideRepositoryInterface::class,
+            $this->app->make(RideRepositoryInterface::class)
+        );
+    }
+
+    public function test_geocoding_service_is_singleton(): void
+    {
+        $a = $this->app->make(GeocodingService::class);
+        $b = $this->app->make(GeocodingService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_arabic_place_name_service_is_singleton(): void
+    {
+        $a = $this->app->make(ArabicPlaceNameService::class);
+        $b = $this->app->make(ArabicPlaceNameService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_push_notification_service_is_singleton(): void
+    {
+        $a = $this->app->make(PushNotificationService::class);
+        $b = $this->app->make(PushNotificationService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_fcm_sender_service_is_singleton(): void
+    {
+        $a = $this->app->make(FcmSenderService::class);
+        $b = $this->app->make(FcmSenderService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_ride_service_is_singleton(): void
+    {
+        $a = $this->app->make(RideService::class);
+        $b = $this->app->make(RideService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_booking_service_is_singleton(): void
+    {
+        $a = $this->app->make(BookingService::class);
+        $b = $this->app->make(BookingService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_admin_auth_service_is_singleton(): void
+    {
+        $a = $this->app->make(AdminAuthService::class);
+        $b = $this->app->make(AdminAuthService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_admin_wallet_service_is_singleton(): void
+    {
+        $a = $this->app->make(AdminWalletService::class);
+        $b = $this->app->make(AdminWalletService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_notification_service_is_singleton(): void
+    {
+        $a = $this->app->make(NotificationService::class);
+        $b = $this->app->make(NotificationService::class);
+        $this->assertSame($a, $b);
+    }
+
+    public function test_provider_is_registered(): void
+    {
+        $provider = $this->app->getProvider(AppServiceProvider::class);
+        $this->assertNotNull($provider);
+        $this->assertInstanceOf(AppServiceProvider::class, $provider);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\tests\Unit\Providers\BroadcastServiceProviderTest.php =====
+
+<?php
+
+namespace Tests\Unit\Providers;
+
+use App\Providers\BroadcastServiceProvider;
+use Illuminate\Broadcasting\BroadcastManager;
+use Tests\TestCase;
+
+class BroadcastServiceProviderTest extends TestCase
+{
+    public function test_broadcast_service_provider_class_exists(): void
+    {
+        $this->assertTrue(class_exists(BroadcastServiceProvider::class));
+    }
+
+    public function test_broadcast_manager_is_resolvable(): void
+    {
+        $manager = $this->app->make(BroadcastManager::class);
+        $this->assertInstanceOf(BroadcastManager::class, $manager);
+    }
+
+    public function test_broadcast_service_provider_is_registered_in_app(): void
+    {
+        // The app boots without throwing â€” channels.php is loaded
+        $provider = $this->app->getProvider(BroadcastServiceProvider::class);
+        $this->assertNotNull($provider);
+    }
+
+    public function test_broadcast_manager_has_default_driver(): void
+    {
+        $manager = $this->app->make(BroadcastManager::class);
+        // Accessing the driver should not throw
+        $this->assertNotNull($manager);
+    }
+
+    public function test_broadcast_service_provider_extends_service_provider(): void
+    {
+        $this->assertTrue(
+            is_subclass_of(
+                BroadcastServiceProvider::class,
+                \Illuminate\Support\ServiceProvider::class
+            )
+        );
+    }
+
+    public function test_provider_has_boot_method(): void
+    {
+        $this->assertTrue(method_exists(BroadcastServiceProvider::class, 'boot'));
     }
 }
 
@@ -25911,16 +27104,13 @@ class AdminWalletServiceTest extends TestCase
     private function createUserWallet(string $phone, float $balance): Wallet
     {
         $user = User::factory()->create(['password' => bcrypt('password123')]);
-
         $wallet = Wallet::create([
             'user_id'       => $user->id,
             'phone_number'  => $phone,
-            'wallet_number' => 'WLT-' . strtoupper(uniqid()),
+            'wallet_number' => 'WLT' . rand(1000000, 9999999),  // â† 10 chars, fits in VARCHAR(16)
             'balance'       => $balance,
         ]);
-
         $user->update(['wallet_id' => $wallet->id]);
-
         return $wallet;
     }
 }
