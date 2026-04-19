@@ -18,6 +18,8 @@ use App\Repositories\RideRepository;
 use App\Services\TextMeBotOtpService;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
+use App\Interfaces\EmailOtpServiceInterface;
+use App\Services\EmailOtpService;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -36,7 +38,12 @@ class AppServiceProvider extends ServiceProvider
                 $app->make(\App\Services\Geocoding\ArabicPlaceNameService::class)
             );
         });
-
+        $this->app->singleton(\App\Services\Score\ScoreService::class, function ($app) {
+            return new \App\Services\Score\ScoreService(
+                $app->make(\App\Domain\Score\ScorePolicyFactory::class)
+            );
+        });
+        $this->app->singleton(\App\Domain\Score\ScorePolicyFactory::class);
         $this->app->singleton(\App\Services\Geocoding\RouteCalculationService::class);
 
         // ========================================
@@ -106,7 +113,10 @@ class AppServiceProvider extends ServiceProvider
             ProfileRepositoryInterface::class,
             ProfileRepository::class
         );
-
+        $this->app->bind(
+            EmailOtpServiceInterface::class,
+            EmailOtpService::class,
+        );
         $this->app->bind(
             \App\Interfaces\OtpRepositoryInterface::class,
             \App\Repositories\OtpRepository::class
@@ -152,5 +162,6 @@ class AppServiceProvider extends ServiceProvider
     {
         Schema::defaultStringLength(191);
         User::observe(UserObserver::class);
+
     }
 }

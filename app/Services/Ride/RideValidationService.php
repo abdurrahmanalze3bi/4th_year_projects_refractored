@@ -1,28 +1,21 @@
 <?php
-
 namespace App\Services\Ride;
 
 use App\Models\User;
+use App\Models\UserScore;
 use App\Services\Verification\DocumentVerificationService;
 use Carbon\Carbon;
 
-/**
- * Ride Validation Service
- *
- * All business rule violations throw \InvalidArgumentException so the
- * controller can map them cleanly to 422 responses.
- */
 final class RideValidationService
 {
+    // Score thresholds from SRS v5
+    private const MIN_SCORE_CREATE_RIDE = 50;
+    private const MIN_SCORE_BOOK_RIDE   = 40;
+
     public function __construct(
         private readonly DocumentVerificationService $documentService
     ) {}
 
-    /**
-     * Validate driver can create rides
-     *
-     * @throws \InvalidArgumentException if validation fails
-     */
     public function validateDriverCanCreateRide(User $driver): void
     {
         if (!$driver->is_verified_driver) {
@@ -34,25 +27,34 @@ final class RideValidationService
         }
 
         $this->documentService->validateDriverDocuments($driver);
+
+        // Score gate
+        $score = UserScore::where('user_id', $driver->id)->value('score') ?? 70;
+        if ($score < self::MIN_SCORE_CREATE_RIDE) {
+            throw new \InvalidArgumentException(
+                "Your trust score ({$score}) is too low to create rides. " .
+                "Minimum required: " . self::MIN_SCORE_CREATE_RIDE . ". " .
+                "Complete rides without cancelling to raise your score."
+            );
+        }
     }
 
-    /**
-     * Validate passenger can book rides
-     *
-     * @throws \InvalidArgumentException if validation fails
-     */
     public function validatePassengerCanBook(User $passenger): void
     {
         if (!$passenger->is_verified_passenger) {
             throw new \InvalidArgumentException('You must be verified as a passenger to book rides');
         }
+
+        // Score gate
+        $score = UserScore::where('user_id', $passenger->id)->value('score') ?? 70;
+        if ($score < self::MIN_SCORE_BOOK_RIDE) {
+            throw new \InvalidArgumentException(
+                "Your trust score ({$score}) is too low to book rides. " .
+                "Minimum required: " . self::MIN_SCORE_BOOK_RIDE . "."
+            );
+        }
     }
 
-    /**
-     * Validate departure time is acceptable
-     *
-     * @throws \InvalidArgumentException if departure time is invalid
-     */
     public function validateDepartureTime(Carbon $departureTime): void
     {
         $now         = Carbon::now('Asia/Damascus');
@@ -65,29 +67,21 @@ final class RideValidationService
             );
         }
 
-        $maxFutureTime = $now->copy()->addDays(30);
-        if ($departureTime->gte($maxFutureTime)) {
+        if ($departureTime->gte($now->copy()->addDays(30))) {
             throw new \InvalidArgumentException(
                 'Departure time cannot be more than 30 days in the future'
             );
         }
     }
 
-    /**
-     * Validate requested seats are available
-     *
-     * @throws \InvalidArgumentException if seat count is invalid
-     */
     public function validateSeatsAvailable(int $requested, int $available): void
     {
         if ($requested < 1) {
             throw new \InvalidArgumentException('Must request at least 1 seat');
         }
-
         if ($requested > 8) {
             throw new \InvalidArgumentException('Cannot request more than 8 seats per booking');
         }
-
         if ($requested > $available) {
             throw new \InvalidArgumentException(
                 "Not enough seats available. Requested: {$requested}, Available: {$available}"
@@ -95,34 +89,20 @@ final class RideValidationService
         }
     }
 
-    /**
-     * Validate ride can be cancelled
-     *
-     * @throws \InvalidArgumentException if ride cannot be cancelled
-     */
     public function validateCanCancelRide(Carbon $departureTime): void
     {
-        $now                = Carbon::now('Asia/Damascus');
-        $timeUntilDeparture = $now->diffInHours($departureTime, false);
-
-        if ($timeUntilDeparture < 1) {
+        $now = Carbon::now('Asia/Damascus');
+        if ($now->diffInHours($departureTime, false) < 1) {
             throw new \InvalidArgumentException(
                 'Cannot cancel ride less than 1 hour before departure time'
             );
         }
     }
 
-    /**
-     * Validate booking can be cancelled
-     *
-     * @throws \InvalidArgumentException if booking cannot be cancelled
-     */
     public function validateCanCancelBooking(Carbon $rideDepartureTime): void
     {
-        $now                = Carbon::now('Asia/Damascus');
-        $timeUntilDeparture = $now->diffInHours($rideDepartureTime, false);
-
-        if ($timeUntilDeparture < 2) {
+        $now = Carbon::now('Asia/Damascus');
+        if ($now->diffInHours($rideDepartureTime, false) < 2) {
             throw new \InvalidArgumentException(
                 'Cannot cancel booking less than 2 hours before departure time'
             );

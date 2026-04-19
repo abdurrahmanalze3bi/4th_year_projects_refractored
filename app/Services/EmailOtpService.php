@@ -1,0 +1,122 @@
+<?php
+namespace App\Services;
+
+use App\DTOs\Auth\SendEmailOtpDTO;
+use App\DTOs\Auth\VerifyEmailOtpDTO;
+use App\Interfaces\EmailOtpServiceInterface;
+use App\Interfaces\OtpRepositoryInterface;
+use App\Mail\OtpVerificationMail;
+use App\Models\Otp;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+
+final class EmailOtpService implements EmailOtpServiceInterface
+{
+    private const EXPIRY_MINUTES    = 10;
+    private const MAX_ATTEMPTS      = 3;
+    private const RATE_LIMIT_WINDOW = 5;
+
+    public function __construct(
+        private readonly OtpRepositoryInterface $otpRepository,
+    ) {}
+
+    public function sendOtp(SendEmailOtpDTO $dto): array
+    {
+        try {
+            $identifier = $dto->email->address();
+
+            if ($this->isRateLimited($identifier)) {
+                return [
+                    'success' => false,
+                    'message' => 'Too many requests. Please wait a few minutes.',
+                ];
+            }
+
+            $this->otpRepository->deleteByPhone($identifier);
+
+            $otpCode = Otp::generateCode();
+
+            $otp = $this->otpRepository->create([
+                'phone_number' => $identifier,
+                'otp_code'     => $otpCode,
+                'type'         => $dto->type,
+                'expires_at'   => Carbon::now()->addMinutes(self::EXPIRY_MINUTES),
+                'is_verified'  => false,
+                'attempts'     => 0,
+            ]);
+
+            if ($this->isTestingMode()) {
+                Log::info("Email OTP (testing) for {$identifier}: {$otpCode}");
+                return [
+                    'success'    => true,
+                    'message'    => 'OTP generated (testing mode).',
+                    'otp_code'   => $otpCode,
+                    'expires_at' => $otp->expires_at->toDateTimeString(),
+                ];
+            }
+
+            Mail::to($identifier)->send(
+                new OtpVerificationMail($otpCode, $dto->userName, self::EXPIRY_MINUTES)
+            );
+
+            Log::info("Email OTP sent to {$identifier}");
+
+            return [
+                'success'    => true,
+                'message'    => 'Verification code sent to your email.',
+                'expires_at' => $otp->expires_at->toDateTimeString(),
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("EmailOtpService::sendOtp failed: {$e->getMessage()}");
+            return [
+                'success' => false,
+                'message' => 'Failed to send verification email. Please try again.',
+            ];
+        }
+    }
+
+    public function verifyOtp(VerifyEmailOtpDTO $dto): array
+    {
+        try {
+            $identifier = $dto->email->address();
+
+            $otp = $this->otpRepository->findByPhoneAndCode(
+                $identifier,
+                $dto->otpCode
+            );
+
+            if (!$otp || !$otp->isValid()) {
+                return [
+                    'success' => false,
+                    'message' => 'Invalid or expired verification code.',
+                ];
+            }
+
+            $otp->markAsVerified();
+
+            return [
+                'success'     => true,
+                'message'     => 'Email verified successfully.',
+                'verified_at' => $otp->verified_at->toDateTimeString(),
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("EmailOtpService::verifyOtp failed: {$e->getMessage()}");
+            return ['success' => false, 'message' => 'Verification failed.'];
+        }
+    }
+
+    private function isRateLimited(string $identifier): bool
+    {
+        return $this->otpRepository->getRecentAttempts(
+                $identifier,
+                self::RATE_LIMIT_WINDOW
+            ) >= self::MAX_ATTEMPTS;
+    }
+
+    private function isTestingMode(): bool {
+        return env('EMAIL_OTP_MODE', 'production') === 'testing';
+    }
+}

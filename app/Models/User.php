@@ -34,7 +34,8 @@ class User extends Authenticatable
         'is_verified_passenger',
         'is_verified_driver',
         'verification_status',
-        'wallet_id'
+        'wallet_id',
+        'email_verified_at'
     ];
 
     protected $casts = [

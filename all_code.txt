@@ -37,7 +37,7 @@ namespace App\Console\Commands;
 use App\Interfaces\OtpRepositoryInterface;
 use Illuminate\Console\Command;
 
-class CleanupExpiredOtps extendsa Command
+class CleanupExpiredOtps extends Command
 {
     /**
      * The name and signature of the console command.
@@ -383,7 +383,7 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Cash Payment Strategy
- *
+ * 
  * Handles cash payments (offline).
  * No wallet transactions needed - payment happens in person.
  */
@@ -393,7 +393,7 @@ final class CashPaymentStrategy implements PaymentStrategy
     {
         // Cash payment - no immediate transaction needed
         // Payment will be collected offline
-
+        
         Log::info('Cash payment recorded', [
             'booking_id' => $booking->id,
             'ride_id' => $ride->id,
@@ -407,7 +407,7 @@ final class CashPaymentStrategy implements PaymentStrategy
     public function processRefund(Booking $booking, Ride $ride, User $passenger): RefundResult
     {
         // Cash refunds handled offline
-
+        
         Log::info('Cash refund recorded', [
             'booking_id' => $booking->id,
             'passenger_id' => $passenger->id,
@@ -672,6 +672,491 @@ final class RefundResult
     public static function failure(string $message): self
     {
         return new self(false, $message);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\DriverCancelRidePolicy.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Driver Cancel Ride Policy
+ *
+ * Scoring grid (driver, cancel whole ride):
+ *
+ *  Elapsed     | cancel rate < 50 % | cancel rate â‰¥ 50 %
+ *  0â€“30 %      |        0 pts        |      âˆ’15 pts
+ *  30â€“50 %     |       âˆ’7 pts        |      âˆ’15 pts
+ *  50â€“100 %    |      âˆ’12 pts        |      âˆ’15 pts
+ *
+ * When cancel rate â‰¥ 50 %, the rate always overrides the time tier.
+ */
+final class DriverCancelRidePolicy implements ScorePolicyInterface
+{
+    private const HIGH_RATE_THRESHOLD = 50.0; // â‰¥ 50 % triggers the override
+
+    private const BASE_POINTS = [
+        'driver_cancel_ride_early' => 0,
+        'driver_cancel_ride_mid'   => -7,
+        'driver_cancel_ride_late'  => -12,
+    ];
+
+    private const HIGH_RATE_POINTS = -15;
+
+    public function supports(ScoreAction $action): bool
+    {
+        return in_array($action, [
+            ScoreAction::DRIVER_CANCEL_RIDE_EARLY,
+            ScoreAction::DRIVER_CANCEL_RIDE_MID,
+            ScoreAction::DRIVER_CANCEL_RIDE_LATE,
+        ]);
+    }
+
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
+    {
+        $highRate = $userScore->cancel_rate >= self::HIGH_RATE_THRESHOLD;
+
+        if ($highRate) {
+            return ScoreResult::of(
+                points: self::HIGH_RATE_POINTS,
+                action: $action,
+                reason: "Driver cancelled ride ({$action->label()}) â€” high cancel rate overrides time tier",
+                highCancelRateApplied: true,
+            );
+        }
+
+        $points = self::BASE_POINTS[$action->value];
+
+        return ScoreResult::of(
+            points: $points,
+            action: $action,
+            reason: "Driver cancelled ride ({$action->label()})" . ($points === 0 ? ' â€” no penalty' : ''),
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\DriverCancelSeatPolicy.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Driver Cancel Seat Policy
+ *
+ * Fixed âˆ’5 pts regardless of elapsed time or cancel rate.
+ */
+final class DriverCancelSeatPolicy implements ScorePolicyInterface
+{
+    private const POINTS = -5;
+
+    public function supports(ScoreAction $action): bool
+    {
+        return $action === ScoreAction::DRIVER_CANCEL_SEAT;
+    }
+
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
+    {
+        return ScoreResult::of(
+            points: self::POINTS,
+            action: $action,
+            reason: 'Driver removed a passenger seat â€” fixed penalty applied',
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\DriverNoShowPolicy.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Driver No-Show Policy
+ *
+ * Fixed âˆ’15 pts regardless of elapsed time or cancel rate.
+ */
+final class DriverNoShowPolicy implements ScorePolicyInterface
+{
+    private const POINTS = -15;
+
+    public function supports(ScoreAction $action): bool
+    {
+        return $action === ScoreAction::DRIVER_NO_SHOW;
+    }
+
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
+    {
+        return ScoreResult::of(
+            points: self::POINTS,
+            action: $action,
+            reason: 'Driver absent at departure â€” no-show penalty applied',
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\PassengerCancelPolicy.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Passenger Cancel Policy
+ *
+ * Scoring grid (passenger, cancel seat(s)):
+ *
+ *  Elapsed     | cancel rate â‰¤ 50 % | cancel rate > 50 %
+ *  0â€“30 %      |        0 pts        |      âˆ’10 pts
+ *  30â€“50 %     |       âˆ’5 pts        |      âˆ’10 pts
+ *  50â€“100 %    |      âˆ’10 pts        |      âˆ’10 pts
+ */
+final class PassengerCancelPolicy implements ScorePolicyInterface
+{
+    private const HIGH_RATE_THRESHOLD = 50.0; // > 50 % triggers the penalty tier
+
+    // Base points per time tier (normal cancel rate)
+    private const BASE_POINTS = [
+        'passenger_cancel_early' => 0,
+        'passenger_cancel_mid'   => -5,
+        'passenger_cancel_late'  => -10,
+    ];
+    private const HIGH_RATE_POINTS = -10; // flat penalty when rate exceeded
+
+    public function supports(ScoreAction $action): bool
+    {
+        return in_array($action, [
+            ScoreAction::PASSENGER_CANCEL_EARLY,
+            ScoreAction::PASSENGER_CANCEL_MID,
+            ScoreAction::PASSENGER_CANCEL_LATE,
+        ]);
+    }
+
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
+    {
+        $highRate = $userScore->cancel_rate > self::HIGH_RATE_THRESHOLD;
+
+        if ($highRate) {
+            return ScoreResult::of(
+                points: self::HIGH_RATE_POINTS,
+                action: $action,
+                reason: "Passenger cancelled ({$action->label()}) â€” high cancel rate penalty applied",
+                highCancelRateApplied: true,
+            );
+        }
+
+        $points = self::BASE_POINTS[$action->value];
+
+        return ScoreResult::of(
+            points: $points,
+            action: $action,
+            reason: "Passenger cancelled ({$action->label()})" . ($points === 0 ? ' â€” no penalty' : ''),
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\PassengerNoShowPolicy.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Passenger No-Show Policy
+ *
+ * Fixed âˆ’15 pts regardless of elapsed time or cancel rate.
+ */
+final class PassengerNoShowPolicy implements ScorePolicyInterface
+{
+    private const POINTS = -15;
+
+    public function supports(ScoreAction $action): bool
+    {
+        return $action === ScoreAction::PASSENGER_NO_SHOW;
+    }
+
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
+    {
+        return ScoreResult::of(
+            points: self::POINTS,
+            action: $action,
+            reason: 'Passenger absent at pickup â€” no-show penalty applied',
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\RideCompletionPolicy.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Ride Completion Policy
+ *
+ * Awards +10 points to every party on a successfully completed ride.
+ * Not affected by cancel rate.
+ */
+final class RideCompletionPolicy implements ScorePolicyInterface
+{
+    private const POINTS = 10;
+
+    public function supports(ScoreAction $action): bool
+    {
+        return $action === ScoreAction::RIDE_COMPLETED;
+    }
+
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
+    {
+        return ScoreResult::of(
+            points: self::POINTS,
+            action: $action,
+            reason: 'Ride completed successfully â€” all parties rewarded',
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\Policies\ScorePolicyInterface.php =====
+
+<?php
+
+namespace App\Domain\Score\Policies;
+
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\UserScore;
+
+/**
+ * Score Policy Interface
+ *
+ * OCP: open for new actions, closed for modification.
+ * Each policy is responsible for ONE action family only (SRP).
+ */
+interface ScorePolicyInterface
+{
+    /**
+     * Whether this policy handles the given action.
+     */
+    public function supports(ScoreAction $action): bool;
+
+    /**
+     * Calculate the ScoreResult for this action.
+     *
+     * @param UserScore $userScore  Current score stats (used for cancel-rate check)
+     * @param array     $context    Additional data the policy may need
+     *                              (e.g. ['elapsed_pct' => 35.0])
+     */
+    public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult;
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\ScorePolicyFactory.php =====
+
+<?php
+
+namespace App\Domain\Score;
+
+use App\Domain\Score\Policies\DriverCancelRidePolicy;
+use App\Domain\Score\Policies\DriverCancelSeatPolicy;
+use App\Domain\Score\Policies\DriverNoShowPolicy;
+use App\Domain\Score\Policies\PassengerCancelPolicy;
+use App\Domain\Score\Policies\PassengerNoShowPolicy;
+use App\Domain\Score\Policies\RideCompletionPolicy;
+use App\Domain\Score\Policies\ScorePolicyInterface;
+use App\Enums\ScoreAction;
+use InvalidArgumentException;
+
+/**
+ * Score Policy Factory
+ *
+ * OCP: add a new policy by registering it in $policies â€” nothing else changes.
+ * DIP: consumers depend on ScorePolicyInterface, not concrete classes.
+ */
+final class ScorePolicyFactory
+{
+    /** @var ScorePolicyInterface[] */
+    private array $policies;
+
+    public function __construct()
+    {
+        $this->policies = [
+            new RideCompletionPolicy(),
+            new PassengerCancelPolicy(),
+            new PassengerNoShowPolicy(),
+            new DriverCancelSeatPolicy(),
+            new DriverCancelRidePolicy(),
+            new DriverNoShowPolicy(),
+        ];
+    }
+
+    /**
+     * Resolve the policy that handles the given action.
+     *
+     * @throws InvalidArgumentException if no policy is registered for the action
+     */
+    public function make(ScoreAction $action): ScorePolicyInterface
+    {
+        foreach ($this->policies as $policy) {
+            if ($policy->supports($action)) {
+                return $policy;
+            }
+        }
+
+        throw new InvalidArgumentException(
+            "No score policy registered for action: {$action->value}"
+        );
+    }
+
+    /**
+     * Register an additional policy at runtime (e.g. from tests or extensions).
+     */
+    public function register(ScorePolicyInterface $policy): void
+    {
+        array_unshift($this->policies, $policy); // higher priority wins
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\Score\ScoreResult.php =====
+
+<?php
+
+namespace App\Domain\Score;
+
+use App\Enums\ScoreAction;
+
+/**
+ * Score Result â€” immutable Value Object
+ *
+ * Returned by every policy so callers never deal with raw integers.
+ */
+final class ScoreResult
+{
+    public function __construct(
+        public readonly int         $points,
+        public readonly ScoreAction $action,
+        public readonly string      $reason,
+        public readonly bool        $highCancelRateApplied = false,
+    ) {}
+
+    public static function of(
+        int         $points,
+        ScoreAction $action,
+        string      $reason,
+        bool        $highCancelRateApplied = false,
+    ): self {
+        return new self($points, $action, $reason, $highCancelRateApplied);
+    }
+
+    public function isPositive(): bool
+    {
+        return $this->points > 0;
+    }
+
+    public function isNegative(): bool
+    {
+        return $this->points < 0;
+    }
+
+    public function isNeutral(): bool
+    {
+        return $this->points === 0;
+    }
+
+    public function toArray(): array
+    {
+        return [
+            'points'                   => $this->points,
+            'action'                   => $this->action->value,
+            'reason'                   => $this->reason,
+            'high_cancel_rate_applied' => $this->highCancelRateApplied,
+        ];
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Domain\ValueObjects\Email.php =====
+
+<?php
+namespace App\Domain\ValueObjects;
+
+use InvalidArgumentException;
+
+final class Email
+{
+    private string $address;
+
+    private function __construct(string $address)
+    {
+        $this->address = $this->normalize($address);
+        $this->validate();
+    }
+
+    public static function from(string $address): self
+    {
+        return new self($address);
+    }
+
+    public function address(): string
+    {
+        return $this->address;
+    }
+
+    public function equals(Email $other): bool
+    {
+        return $this->address === $other->address;
+    }
+
+    private function normalize(string $address): string
+    {
+        return strtolower(trim($address));
+    }
+
+    private function validate(): void
+    {
+        if (!filter_var($this->address, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException(
+                "Invalid email address: {$this->address}"
+            );
+        }
+    }
+
+    public function __toString(): string
+    {
+        return $this->address;
     }
 }
 
@@ -1159,6 +1644,65 @@ class PhoneNumber
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\app\DTOs\Auth\SendEmailOtpDTO.php =====
+
+<?php
+namespace App\DTOs\Auth;
+
+use App\Domain\ValueObjects\Email;
+use App\Models\User;
+
+final class SendEmailOtpDTO
+{
+    public function __construct(
+        public readonly Email  $email,
+        public readonly string $userName,
+        public readonly string $type = 'EMAIL_VERIFICATION',
+    ) {}
+
+    public static function fromRequest(array $validated, string $userName): self
+    {
+        return new self(
+            email:    Email::from($validated['email']),
+            userName: $userName,
+            type:     $validated['type'] ?? 'EMAIL_VERIFICATION',
+        );
+    }
+
+    public static function fromUser(User $user): self
+    {
+        return new self(
+            email:    Email::from($user->email),
+            userName: $user->first_name,
+        );
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\DTOs\Auth\VerifyEmailOtpDTO.php =====
+
+<?php
+namespace App\DTOs\Auth;
+
+use App\Domain\ValueObjects\Email;
+
+final class VerifyEmailOtpDTO
+{
+    public function __construct(
+        public readonly Email  $email,
+        public readonly string $otpCode,
+    ) {}
+
+    public static function fromRequest(array $validated): self
+    {
+        return new self(
+            email:   Email::from($validated['email']),
+            otpCode: $validated['otp_code'],
+        );
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\app\DTOs\Ride\BookRideDTO.php =====
 
 <?php
@@ -1596,6 +2140,95 @@ enum RideStatus: string
             self::FINISHED => 'blue',
             self::AWAITING_CONFIRMATION => 'yellow',
         };
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Enums\ScoreAction.php =====
+
+<?php
+
+namespace App\Enums;
+
+/**
+ * Score Action Enum
+ *
+ * Every event that triggers a score change.
+ * Keeping actions explicit eliminates magic strings throughout the system.
+ */
+enum ScoreAction: string
+{
+    // â”€â”€ Positive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    case RIDE_COMPLETED = 'ride_completed';              // +10 all parties
+
+    // â”€â”€ Passenger negative â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    case PASSENGER_CANCEL_EARLY  = 'passenger_cancel_early';  // 0-30 % elapsed
+    case PASSENGER_CANCEL_MID    = 'passenger_cancel_mid';    // 30-50 % elapsed
+    case PASSENGER_CANCEL_LATE   = 'passenger_cancel_late';   // 50-100 % elapsed
+    case PASSENGER_NO_SHOW       = 'passenger_no_show';       // -15 fixed
+
+    // â”€â”€ Driver negative â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    case DRIVER_CANCEL_SEAT      = 'driver_cancel_seat';      // -5 fixed
+    case DRIVER_CANCEL_RIDE_EARLY = 'driver_cancel_ride_early'; // 0-30 %
+    case DRIVER_CANCEL_RIDE_MID   = 'driver_cancel_ride_mid';   // 30-50 %
+    case DRIVER_CANCEL_RIDE_LATE  = 'driver_cancel_ride_late';  // 50-100 %
+    case DRIVER_NO_SHOW           = 'driver_no_show';           // -15 fixed
+
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /** Human-readable label for logs / admin UI */
+    public function label(): string
+    {
+        return match ($this) {
+            self::RIDE_COMPLETED          => 'Ride completed',
+            self::PASSENGER_CANCEL_EARLY  => 'Passenger cancelled (early)',
+            self::PASSENGER_CANCEL_MID    => 'Passenger cancelled (mid)',
+            self::PASSENGER_CANCEL_LATE   => 'Passenger cancelled (late)',
+            self::PASSENGER_NO_SHOW       => 'Passenger no-show',
+            self::DRIVER_CANCEL_SEAT      => 'Driver cancelled seat',
+            self::DRIVER_CANCEL_RIDE_EARLY => 'Driver cancelled ride (early)',
+            self::DRIVER_CANCEL_RIDE_MID   => 'Driver cancelled ride (mid)',
+            self::DRIVER_CANCEL_RIDE_LATE  => 'Driver cancelled ride (late)',
+            self::DRIVER_NO_SHOW           => 'Driver no-show',
+        };
+    }
+
+    /** Resolve the appropriate action from time-elapsed percentage for a passenger cancellation */
+    public static function passengerCancelAction(float $elapsedPct): self
+    {
+        return match (true) {
+            $elapsedPct <= 30 => self::PASSENGER_CANCEL_EARLY,
+            $elapsedPct <= 50 => self::PASSENGER_CANCEL_MID,
+            default           => self::PASSENGER_CANCEL_LATE,
+        };
+    }
+
+    /** Resolve the appropriate action from time-elapsed percentage for a driver ride cancellation */
+    public static function driverCancelRideAction(float $elapsedPct): self
+    {
+        return match (true) {
+            $elapsedPct <= 30 => self::DRIVER_CANCEL_RIDE_EARLY,
+            $elapsedPct <= 50 => self::DRIVER_CANCEL_RIDE_MID,
+            default           => self::DRIVER_CANCEL_RIDE_LATE,
+        };
+    }
+
+    /** Whether this action is a positive event */
+    public function isPositive(): bool
+    {
+        return $this === self::RIDE_COMPLETED;
+    }
+
+    /** Whether this action is driver-specific */
+    public function isDriverAction(): bool
+    {
+        return in_array($this, [
+            self::DRIVER_CANCEL_SEAT,
+            self::DRIVER_CANCEL_RIDE_EARLY,
+            self::DRIVER_CANCEL_RIDE_MID,
+            self::DRIVER_CANCEL_RIDE_LATE,
+            self::DRIVER_NO_SHOW,
+        ]);
     }
 }
 
@@ -3098,6 +3731,106 @@ class DocumentController extends Controller
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\EmailVerificationController.php =====
+
+<?php
+namespace App\Http\Controllers\API;
+
+use App\DTOs\Auth\SendEmailOtpDTO;
+use App\DTOs\Auth\VerifyEmailOtpDTO;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\SendEmailOtpRequest;
+use App\Http\Requests\VerifyEmailOtpRequest;
+use App\Interfaces\EmailOtpServiceInterface;
+use App\Interfaces\UserRepositoryInterface;
+use App\Models\User;
+use App\Services\JwtService;
+use Illuminate\Http\JsonResponse;
+
+class EmailVerificationController extends Controller
+{
+    public function __construct(
+        private readonly EmailOtpServiceInterface $emailOtpService,
+        private readonly UserRepositoryInterface  $userRepository,
+        private readonly JwtService               $jwtService,
+    ) {}
+
+    /**
+     * POST /api/email-verification/send
+     */
+    public function send(SendEmailOtpRequest $request): JsonResponse
+    {
+        $userName = $request->user()?->first_name ?? 'User';
+        $dto      = SendEmailOtpDTO::fromRequest($request->validated(), $userName);
+        $result   = $this->emailOtpService->sendOtp($dto);
+
+        return response()->json($result, $result['success'] ? 200 : 400);
+    }
+
+    /**
+     * POST /api/email-verification/verify
+     * Verifies OTP then returns JWT tokens
+     */
+    public function verify(VerifyEmailOtpRequest $request): JsonResponse
+    {
+        $dto    = VerifyEmailOtpDTO::fromRequest($request->validated());
+        $result = $this->emailOtpService->verifyOtp($dto);
+
+        if (!$result['success']) {
+            return response()->json($result, 400);
+        }
+
+        $user = User::where('email', $dto->email->address())->firstOrFail();
+        $user->update(['email_verified_at' => now()]);
+        $user->refresh();
+
+        $tokens = $this->jwtService->generateTokenPair($user);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Email verified. You are now logged in.',
+            'user'    => [
+                'id'                    => $user->id,
+                'first_name'            => $user->first_name,
+                'last_name'             => $user->last_name,
+                'email'                 => $user->email,
+                'email_verified_at'     => $user->email_verified_at,
+                'is_verified_passenger' => $user->is_verified_passenger,
+                'is_verified_driver'    => $user->is_verified_driver,
+            ],
+            'tokens'  => $tokens,
+        ]);
+    }
+
+    /**
+     * POST /api/email-verification/resend
+     */
+    public function resend(SendEmailOtpRequest $request): JsonResponse
+    {
+        $user = $this->userRepository->findByEmail($request->validated('email'));
+
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No account found with this email.',
+            ], 404);
+        }
+
+        if ($user->email_verified_at) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This email is already verified.',
+            ], 409);
+        }
+
+        $dto    = SendEmailOtpDTO::fromUser($user);
+        $result = $this->emailOtpService->sendOtp($dto);
+
+        return response()->json($result, $result['success'] ? 200 : 400);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\ForgotPasswordController.php =====
 
 <?php
@@ -3527,6 +4260,7 @@ use App\Services\Profile\ProfileUpdateService;
 use App\Services\Profile\ProfileInteractionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use App\Http\Controllers\API\ScoreController;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -3751,6 +4485,11 @@ class ProfileController extends Controller
             'smoking' => $profile->smoking,
             'number_of_rides' => $profile->number_of_rides,
             'documents' => $docs,
+            'score' => (function () use ($user) {
+                $scoreService = app(\App\Services\Score\ScoreService::class);
+                $userScore    = $scoreService->getScore($user);
+                return ScoreController::formatScore($userScore);
+            })(),
             'comments' => $comments,
             'rating' => $ratingStats,
         ];
@@ -4003,6 +4742,7 @@ use App\Services\Ride\RideService;
 use App\Services\Ride\BookingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use App\Services\Score\ScoreService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
@@ -4043,10 +4783,15 @@ class RideController extends Controller
                 'message' => 'Ride created successfully'
             ], 201);
         } catch (\Exception $e) {
+            // In create() method, change the return to:
+            $score = app(ScoreService::class)->getScore($request->user());
+
             return response()->json([
-                'success' => false,
-                'message' => $e->getMessage()
-            ], 422);
+                'success' => true,
+                'data'    => new RideResource($ride),
+                'message' => 'Ride created successfully',
+                'driver_score' => ScoreController::formatScore($score),
+            ], 201);
         }
     }
 
@@ -4734,16 +5479,114 @@ class RideController extends Controller
             'data'    => BookingResource::collection($bookings),
         ]);
     }
+
+
+
+    public function reportPassengerNoShow(Request $request, int $bookingId): JsonResponse
+    {
+        try {
+            $result = $this->bookingService->reportPassengerNoShow($bookingId, $request->user());
+            return response()->json(['status' => 'success', 'message' => $result['message']]);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * Passenger reports driver as no-show.
+     * POST /rides/{rideId}/driver-no-show
+     */
+    public function reportDriverNoShow(Request $request, int $rideId): JsonResponse
+    {
+        try {
+            $result = $this->rideService->reportDriverNoShow($rideId, $request->user());
+            return response()->json(['status' => 'success', 'message' => $result['message']]);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        }
+    }
+
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\ScoreController.php =====
+
+<?php
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use App\Services\Score\ScoreService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+
+class ScoreController extends Controller
+{
+    public function __construct(private readonly ScoreService $scoreService) {}
+
+    /**
+     * GET /api/score
+     * Returns the authenticated user's current score, tier, and stats.
+     */
+    public function show(Request $request): JsonResponse
+    {
+        $userScore = $this->scoreService->getScore($request->user());
+
+        return response()->json([
+            'success' => true,
+            'data'    => $this->formatScore($userScore),
+        ]);
+    }
+
+    /**
+     * GET /api/score/history?limit=20
+     * Returns recent score transaction history.
+     */
+    public function history(Request $request): JsonResponse
+    {
+        $limit   = min((int) $request->get('limit', 20), 50);
+        $history = $this->scoreService->getHistory($request->user(), $limit);
+
+        return response()->json([
+            'success' => true,
+            'data'    => $history->map(fn($tx) => [
+                'id'                       => $tx->id,
+                'action'                   => $tx->action,
+                'points'                   => $tx->formatted_points,
+                'previous_score'           => $tx->previous_score,
+                'new_score'                => $tx->new_score,
+                'reason'                   => $tx->reason,
+                'high_cancel_rate_applied' => $tx->high_cancel_rate_applied,
+                'reference_type'           => class_basename($tx->reference_type ?? ''),
+                'reference_id'             => $tx->reference_id,
+                'created_at'               => $tx->created_at->toIso8601String(),
+            ]),
+        ]);
+    }
+
+    /** Reusable score formatter used by other controllers. */
+    public static function formatScore(\App\Models\UserScore $userScore): array
+    {
+        return [
+            'score'               => $userScore->score,
+            'tier'                => $userScore->tier,
+            'cancel_rate'         => round($userScore->cancel_rate, 2),
+            'total_rides'         => $userScore->total_rides,
+            'total_cancellations' => $userScore->total_cancellations,
+            'can_create_rides'    => $userScore->score >= 50,
+            'can_book_rides'      => $userScore->score >= 40,
+        ];
+    }
 }
 
 
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\SignupController.php =====
 
 <?php
-
 namespace App\Http\Controllers\API;
 
+use App\DTOs\Auth\SendEmailOtpDTO;
 use App\Http\Controllers\Controller;
+use App\Interfaces\EmailOtpServiceInterface;
 use App\Interfaces\UserRepositoryInterface;
 use App\Services\JwtService;
 use Illuminate\Http\Request;
@@ -4754,87 +5597,84 @@ use Illuminate\Support\Facades\Log;
 
 class SignupController extends Controller
 {
-    private UserRepositoryInterface $userRepository;
-    private JwtService $jwtService;
-
     public function __construct(
-        UserRepositoryInterface $userRepository,
-        JwtService $jwtService
-    ) {
-        $this->userRepository = $userRepository;
-        $this->jwtService = $jwtService;
-    }
+        private readonly UserRepositoryInterface  $userRepository,
+        private readonly JwtService               $jwtService,
+        private readonly EmailOtpServiceInterface $emailOtpService,
+    ) {}
 
     public function register(Request $request)
     {
-        // Validate request
         $validator = Validator::make($request->all(), [
             'first_name' => 'required|string|max:255',
-            'last_name' => 'required|string|max:255',
-            'email' => 'required|email|unique:users,email',
-            'password' => 'required|string|confirmed|min:8',
-            'gender' => 'required|in:M,F',
-            'address' => 'required|in:Ø¯Ù…Ø´Ù‚,Ø¯Ø±Ø¹Ø§,Ø§Ù„Ù‚Ù†ÙŠØ·Ø±Ø©,Ø§Ù„Ø³ÙˆÙŠØ¯Ø§Ø¡,Ø±ÙŠÙ Ø¯Ù…Ø´Ù‚,Ø­Ù…Øµ,Ø­Ù…Ø§Ø©,Ø§Ù„Ù„Ø§Ø°Ù‚ÙŠØ©,Ø·Ø±Ø·ÙˆØ³,Ø­Ù„Ø¨,Ø§Ø¯Ù„Ø¨,Ø§Ù„Ø­Ø³ÙƒØ©,Ø§Ù„Ø±Ù‚Ø©,Ø¯ÙŠØ± Ø§Ù„Ø²ÙˆØ±'
+            'last_name'  => 'required|string|max:255',
+            'email'      => 'required|email|unique:users,email',
+            'password'   => 'required|string|confirmed|min:8',
+            'gender'     => 'required|in:M,F',
+            'address'    => 'required|in:Ø¯Ù…Ø´Ù‚,Ø¯Ø±Ø¹Ø§,Ø§Ù„Ù‚Ù†ÙŠØ·Ø±Ø©,Ø§Ù„Ø³ÙˆÙŠØ¯Ø§Ø¡,Ø±ÙŠÙ Ø¯Ù…Ø´Ù‚,Ø­Ù…Øµ,Ø­Ù…Ø§Ø©,Ø§Ù„Ù„Ø§Ø°Ù‚ÙŠØ©,Ø·Ø±Ø·ÙˆØ³,Ø­Ù„Ø¨,Ø§Ø¯Ù„Ø¨,Ø§Ù„Ø­Ø³ÙƒØ©,Ø§Ù„Ø±Ù‚Ø©,Ø¯ÙŠØ± Ø§Ù„Ø²ÙˆØ±',
         ], [
-            'email.unique' => 'This email address is already registered.',
-            'password.confirmed' => 'Password confirmation does not match.'
+            'email.unique'       => 'This email address is already registered.',
+            'password.confirmed' => 'Password confirmation does not match.',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
-                'status' => 'error',
+                'status'  => 'error',
                 'message' => 'Validation failed',
-                'errors' => $validator->errors()
+                'errors'  => $validator->errors(),
             ], 422);
         }
 
         DB::beginTransaction();
-
         try {
-            // Create user
             $user = $this->userRepository->createUser([
                 'first_name' => $request->first_name,
-                'last_name' => $request->last_name,
-                'email' => $request->email,
-                'password' => Hash::make($request->password),
-                'gender' => $request->gender,
-                'address' => $request->address,
-                'status' => 1
+                'last_name'  => $request->last_name,
+                'email'      => $request->email,
+                'password'   => Hash::make($request->password),
+                'gender'     => $request->gender,
+                'address'    => $request->address,
+                'status'     => 1,
             ]);
 
-            // Generate JWT token pair
-            $tokens = $this->jwtService->generateTokenPair($user);
+            // Send email OTP â€” tokens returned only after verification
+            $dto       = SendEmailOtpDTO::fromUser($user);
+            $otpResult = $this->emailOtpService->sendOtp($dto);
+
+            if (!$otpResult['success']) {
+                DB::rollBack();
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Registration failed: could not send verification email.',
+                ], 500);
+            }
 
             DB::commit();
 
-            return response()->json([
-                'status' => 'success',
-                'message' => 'Registration successful',
-                'user' => [
-                    'id' => $user->id,
+            $response = [
+                'status'  => 'success',
+                'message' => 'Registration successful. Check your email for a verification code.',
+                'user'    => [
+                    'id'         => $user->id,
                     'first_name' => $user->first_name,
-                    'last_name' => $user->last_name,
-                    'email' => $user->email,
-                    'gender' => $user->gender,
-                    'address' => $user->address,
-                    'status' => $user->status,
-                    'created_at' => $user->created_at->toDateTimeString()
+                    'email'      => $user->email,
                 ],
-                'tokens' => $tokens
-            ], 201);
+            ];
+
+            // Expose OTP code only in testing/local mode
+            if (isset($otpResult['otp_code'])) {
+                $response['otp_code'] = $otpResult['otp_code'];
+            }
+
+            return response()->json($response, 201);
 
         } catch (\Exception $e) {
             DB::rollBack();
-
-            Log::error('Registration failed: ' . $e->getMessage(), [
-                'email' => $request->email,
-                'trace' => $e->getTraceAsString()
-            ]);
-
+            Log::error('Registration failed: ' . $e->getMessage());
             return response()->json([
-                'status' => 'error',
+                'status'  => 'error',
                 'message' => 'Registration failed',
-                'error' => config('app.debug') ? $e->getMessage() : 'An error occurred during registration'
+                'error'   => config('app.debug') ? $e->getMessage() : 'An error occurred',
             ], 500);
         }
     }
@@ -5780,17 +6620,17 @@ class CreateRideRequest extends FormRequest
             'pickup_address' => 'required_without_all:pickup_lat,pickup_lng|string|max:255',
             'pickup_lat' => 'required_with:pickup_lng|numeric|between:-90,90',
             'pickup_lng' => 'required_with:pickup_lat|numeric|between:-180,180',
-
+            
             'destination_address' => 'required_without_all:destination_lat,destination_lng|string|max:255',
             'destination_lat' => 'required_with:destination_lng|numeric|between:-90,90',
             'destination_lng' => 'required_with:destination_lat|numeric|between:-180,180',
-
+            
             'departure_time' => [
                 'required',
                 'date',
                 'after:' . now()->addMinutes(5)->toDateTimeString(),
             ],
-
+            
             'available_seats' => 'required|integer|min:1|max:8',
             'price_per_seat' => 'required|numeric|min:100|max:100000',
             'payment_method' => 'required|in:cash,e-pay',
@@ -5798,7 +6638,7 @@ class CreateRideRequest extends FormRequest
             'communication_number' => 'required|regex:/^09\d{8}$/',
             'vehicle_type' => 'required|string|max:100',
             'notes' => 'nullable|string|max:500',
-
+            
             // Optional route data
             'route_index' => 'nullable|integer|min:0',
             'route_geometry' => 'nullable|array',
@@ -5816,6 +6656,38 @@ class CreateRideRequest extends FormRequest
             'communication_number.regex' => 'Communication number must be a valid Syrian mobile number (09XXXXXXXX)',
             'price_per_seat.min' => 'Price per seat must be at least 100 SYP',
             'available_seats.max' => 'Maximum 8 seats allowed',
+        ];
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Requests\SendEmailOtpRequest.php =====
+
+<?php
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class SendEmailOtpRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'email' => ['required', 'string', 'email', 'max:255'],
+            'type'  => ['sometimes', 'in:EMAIL_VERIFICATION,PASSWORD_RESET'],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'email.required' => 'Email address is required.',
+            'email.email'    => 'Please provide a valid email address.',
         ];
     }
 }
@@ -5863,6 +6735,39 @@ class SendOtpRequest extends FormRequest
             'phone_number.required' => 'Phone number is required',
             'phone_number.regex' => 'Invalid Syrian phone number format. Use format: 09XXXXXXXX or +96309XXXXXXXX',
             'type.in' => 'Invalid OTP type. Must be one of: registration, login, password_reset'
+        ];
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Requests\VerifyEmailOtpRequest.php =====
+
+<?php
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class VerifyEmailOtpRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'email'    => ['required', 'string', 'email', 'exists:users,email'],
+            'otp_code' => ['required', 'string', 'size:6', 'regex:/^[0-9]{6}$/'],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'email.exists'      => 'No account found with this email.',
+            'otp_code.size'     => 'Code must be exactly 6 digits.',
+            'otp_code.regex'    => 'Code must contain numbers only.',
         ];
     }
 }
@@ -6200,6 +7105,21 @@ interface ChatRepositoryInterface
     public function markMessageAsRead(int $messageId, int $userId): bool;
 
     public function deleteMessage(int $messageId, int $userId): bool;
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Interfaces\EmailOtpServiceInterface.php =====
+
+<?php
+namespace App\Interfaces;
+
+use App\DTOs\Auth\SendEmailOtpDTO;
+use App\DTOs\Auth\VerifyEmailOtpDTO;
+
+interface EmailOtpServiceInterface
+{
+    public function sendOtp(SendEmailOtpDTO $dto): array;
+    public function verifyOtp(VerifyEmailOtpDTO $dto): array;
 }
 
 
@@ -6655,6 +7575,34 @@ class SendUserVerifiedNotification
     public function handle(UserVerified $event): void
     {
         //
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Mail\OtpVerificationMail.php =====
+
+<?php
+namespace App\Mail;
+
+use Illuminate\Bus\Queueable;
+use Illuminate\Mail\Mailable;
+use Illuminate\Queue\SerializesModels;
+
+final class OtpVerificationMail extends Mailable
+{
+    use Queueable, SerializesModels;
+
+    public function __construct(
+        public readonly string $otpCode,
+        public readonly string $userName,
+        public readonly int    $expiryMinutes = 10,
+    ) {}
+
+    public function build(): self
+    {
+        return $this
+            ->subject('Your Atarikak Verification Code')
+            ->view('emails.otp-verification');  // â† change markdown() to view()
     }
 }
 
@@ -7456,6 +8404,70 @@ class Ride extends Model
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\app\Models\ScoreTransaction.php =====
+
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+/**
+ * ScoreTransaction Model
+ *
+ * Immutable audit trail for every score change.
+ * Never delete rows â€” only insert.
+ */
+class ScoreTransaction extends Model
+{
+    use HasFactory;
+
+    public const UPDATED_AT = null; // insert-only, no updates
+
+    protected $fillable = [
+        'user_id',
+        'action',
+        'points',
+        'previous_score',
+        'new_score',
+        'reference_type',   // e.g. App\Models\Booking
+        'reference_id',     // e.g. booking_id or ride_id
+        'reason',
+        'high_cancel_rate_applied',
+        'metadata',
+    ];
+
+    protected $casts = [
+        'points'                   => 'integer',
+        'previous_score'           => 'integer',
+        'new_score'                => 'integer',
+        'high_cancel_rate_applied' => 'boolean',
+        'metadata'                 => 'array',
+    ];
+
+    // â”€â”€ Relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    // â”€â”€ Accessors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function getIsPositiveAttribute(): bool
+    {
+        return $this->points > 0;
+    }
+
+    public function getFormattedPointsAttribute(): string
+    {
+        return ($this->points >= 0 ? '+' : '') . $this->points;
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\app\Models\User.php =====
 
 <?php
@@ -7494,7 +8506,8 @@ class User extends Authenticatable
         'is_verified_passenger',
         'is_verified_driver',
         'verification_status',
-        'wallet_id'
+        'wallet_id',
+        'email_verified_at'
     ];
 
     protected $casts = [
@@ -7729,6 +8742,109 @@ class UserRating extends Model
         return $this->belongsTo(User::class, 'rated_user_id');
     }
 
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Models\UserScore.php =====
+
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+/**
+ * UserScore Model
+ *
+ * Maintains each user's live score state.
+ * ScoreTransaction holds the full audit trail.
+ *
+ * @property int   $user_id
+ * @property int   $score                 Current score (starts at 100)
+ * @property int   $total_rides           Completed rides (driver + passenger)
+ * @property int   $total_cancellations   Cancelled bookings / rides
+ * @property float $cancel_rate           Computed: total_cancellations / max(1, total_rides+total_cancellations) * 100
+ */
+class UserScore extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'user_id',
+        'score',
+        'total_rides',
+        'total_cancellations',
+    ];
+
+    protected $casts = [
+        'score'               => 'integer',
+        'total_rides'         => 'integer',
+        'total_cancellations' => 'integer',
+    ];
+
+    // â”€â”€ Relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function transactions(): HasMany
+    {
+        return $this->hasMany(ScoreTransaction::class, 'user_id', 'user_id');
+    }
+
+    // â”€â”€ Computed attributes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Cancel rate as a percentage (0â€“100).
+     * Used by policies to determine the high-cancel-rate tier.
+     */
+    public function getCancelRateAttribute(): float
+    {
+        $total = $this->total_rides + $this->total_cancellations;
+
+        return $total > 0
+            ? round(($this->total_cancellations / $total) * 100, 2)
+            : 0.0;
+    }
+
+    /**
+     * Tier label for the admin dashboard.
+     */
+    public function getTierAttribute(): string
+    {
+        return match (true) {
+            $this->score >= 80  => 'Gold',
+            $this->score >= 60  => 'Silver',
+            $this->score >= 40  => 'Bronze',
+            default             => 'Restricted',
+        };
+    }
+
+    // â”€â”€ Mutators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Apply a delta to the score, clamping to [0, 200].
+     */
+    public function applyDelta(int $delta): void
+    {
+        $this->score = max(0, min(200, $this->score + $delta));
+        $this->save();
+    }
+
+    public function incrementRides(): void
+    {
+        $this->increment('total_rides');
+    }
+
+    public function incrementCancellations(): void
+    {
+        $this->increment('total_cancellations');
+    }
 }
 
 
@@ -8102,22 +9218,26 @@ class UserVerifiedNotification extends Notification
 ===== FILE: C:\wamp64\www\4th_year_project\app\Observers\UserObserver.php =====
 
 <?php
-
 namespace App\Observers;
 
-use App\Models\User; // <-- Fix the import
+use App\Models\User;
 use App\Interfaces\ProfileRepositoryInterface;
+use App\Services\Score\ScoreService;
 
 class UserObserver
 {
     public function __construct(
-        private ProfileRepositoryInterface $profileRepo
+        private ProfileRepositoryInterface $profileRepo,
+        private ScoreService               $scoreService,
     ) {}
 
-    // Fix the type hint to use App\Models\User
-    public function created(User $user) // <-- Correct parameter type
+    public function created(User $user): void
     {
+        // Auto-create profile row
         $this->profileRepo->createFromUser($user);
+
+        // Initialize trust score at 70 (Silver tier) per SRS v5
+        $this->scoreService->initializeScore($user);
     }
 }
 
@@ -8144,6 +9264,8 @@ use App\Repositories\RideRepository;
 use App\Services\TextMeBotOtpService;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
+use App\Interfaces\EmailOtpServiceInterface;
+use App\Services\EmailOtpService;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -8162,7 +9284,12 @@ class AppServiceProvider extends ServiceProvider
                 $app->make(\App\Services\Geocoding\ArabicPlaceNameService::class)
             );
         });
-
+        $this->app->singleton(\App\Services\Score\ScoreService::class, function ($app) {
+            return new \App\Services\Score\ScoreService(
+                $app->make(\App\Domain\Score\ScorePolicyFactory::class)
+            );
+        });
+        $this->app->singleton(\App\Domain\Score\ScorePolicyFactory::class);
         $this->app->singleton(\App\Services\Geocoding\RouteCalculationService::class);
 
         // ========================================
@@ -8232,7 +9359,10 @@ class AppServiceProvider extends ServiceProvider
             ProfileRepositoryInterface::class,
             ProfileRepository::class
         );
-
+        $this->app->bind(
+            EmailOtpServiceInterface::class,
+            EmailOtpService::class,
+        );
         $this->app->bind(
             \App\Interfaces\OtpRepositoryInterface::class,
             \App\Repositories\OtpRepository::class
@@ -8278,6 +9408,7 @@ class AppServiceProvider extends ServiceProvider
     {
         Schema::defaultStringLength(191);
         User::observe(UserObserver::class);
+
     }
 }
 
@@ -11881,6 +13012,128 @@ class WalletTransactionService
             throw new \RuntimeException($message);
         }
     }
+
+    // =========================================================================
+// PASSENGER NO-SHOW (E-PAY only)
+// =========================================================================
+    /**
+     * Passenger didn't show up â€” E-PAY ride.
+     * Admin escrow â†’ 95% Driver, 5% SyCash. Passenger gets 0%.
+     */
+    public function processPassengerNoShow(Booking $booking, Ride $ride, User $passenger): void
+    {
+        $totalAmount  = $booking->seats * $ride->price_per_seat;
+        $driverShare  = round($totalAmount * 0.95, 2);
+        $syCashShare  = round($totalAmount * 0.05, 2);
+
+        $adminWallet  = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $driverWallet = $this->lockWalletByUserId($ride->driver_id);
+        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
+
+        $this->assertSufficientBalance($adminWallet, $totalAmount,
+            "Insufficient admin balance for no-show settlement. Required: {$totalAmount}");
+
+        $adminPrev  = $adminWallet->balance;
+        $driverPrev = $driverWallet->balance;
+        $syCashPrev = $syCashWallet->balance;
+
+        $adminWallet->balance  -= $totalAmount;
+        $driverWallet->balance += $driverShare;
+        $syCashWallet->balance += $syCashShare;
+
+        $adminWallet->save();
+        $driverWallet->save();
+        $syCashWallet->save();
+
+        $txId = 'PASS_NOSHOW_' . time() . '_' . Str::random(6);
+
+        WalletTransaction::create([
+            'wallet_id' => $adminWallet->id, 'user_id' => $adminWallet->user_id,
+            'type' => 'passenger_no_show_settlement', 'amount' => -$totalAmount,
+            'previous_balance' => $adminPrev, 'new_balance' => $adminWallet->balance,
+            'description' => "Passenger no-show: {$booking->seats} seat(s) settled",
+            'transaction_id' => 'ADMIN_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id,
+                'driver_share' => $driverShare, 'sycash_share' => $syCashShare],
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id' => $driverWallet->id, 'user_id' => $ride->driver_id,
+            'type' => 'passenger_no_show_earning', 'amount' => $driverShare,
+            'previous_balance' => $driverPrev, 'new_balance' => $driverWallet->balance,
+            'description' => "No-show compensation: passenger absent ({$booking->seats} seat(s))",
+            'transaction_id' => 'DRIVER_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id' => $syCashWallet->id, 'user_id' => $syCashWallet->user_id,
+            'type' => 'passenger_no_show_fee', 'amount' => $syCashShare,
+            'previous_balance' => $syCashPrev, 'new_balance' => $syCashWallet->balance,
+            'description' => "No-show platform fee (5%): booking #{$booking->id}",
+            'transaction_id' => 'SYCASH_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
+        ]);
+
+        Log::info('Passenger no-show settled (E-PAY)', [
+            'booking_id'   => $booking->id,
+            'driver_share' => $driverShare,
+            'sycash_share' => $syCashShare,
+        ]);
+    }
+
+// =========================================================================
+// DRIVER NO-SHOW (E-PAY only)
+// =========================================================================
+    /**
+     * Driver didn't show up â€” E-PAY ride.
+     * Admin escrow â†’ 100% refund to passenger.
+     */
+    public function processDriverNoShowRefund(Ride $ride, Booking $booking, User $passenger): void
+    {
+        $refundAmount    = $booking->seats * $ride->price_per_seat;
+        $adminWallet     = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $passengerWallet = $this->lockWalletByUserId($passenger->id);
+
+        $this->assertSufficientBalance($adminWallet, $refundAmount,
+            "Insufficient admin balance for driver no-show refund. Required: {$refundAmount}");
+
+        $adminPrev     = $adminWallet->balance;
+        $passengerPrev = $passengerWallet->balance;
+
+        $adminWallet->balance     -= $refundAmount;
+        $passengerWallet->balance += $refundAmount;
+
+        $adminWallet->save();
+        $passengerWallet->save();
+
+        $txId = 'DRIVER_NOSHOW_' . time() . '_' . Str::random(6);
+
+        WalletTransaction::create([
+            'wallet_id' => $adminWallet->id, 'user_id' => $adminWallet->user_id,
+            'type' => 'driver_no_show_refund', 'amount' => -$refundAmount,
+            'previous_balance' => $adminPrev, 'new_balance' => $adminWallet->balance,
+            'description' => "Driver no-show: full refund to passenger for booking #{$booking->id}",
+            'transaction_id' => 'ADMIN_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id' => $passengerWallet->id, 'user_id' => $passenger->id,
+            'type' => 'driver_no_show_refund', 'amount' => $refundAmount,
+            'previous_balance' => $passengerPrev, 'new_balance' => $passengerWallet->balance,
+            'description' => "Full refund â€” driver no-show: {$ride->pickup_address} â†’ {$ride->destination_address}",
+            'transaction_id' => 'PASS_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id,
+                'refund_reason' => 'driver_no_show'],
+        ]);
+
+        Log::info('Driver no-show refund processed', [
+            'booking_id'    => $booking->id,
+            'passenger_id'  => $passenger->id,
+            'refund_amount' => $refundAmount,
+        ]);
+    }
 }
 
 
@@ -12857,12 +14110,11 @@ final class PushTokenManager
 
 namespace App\Services\Ride;
 
-use App\Domain\ValueObjects\PhoneNumber;
 use App\DTOs\Ride\BookRideDTO;
 use App\Enums\BookingStatus;
 use App\Enums\BookingType;
-use App\Enums\RideStatus;
 use App\Enums\PaymentMethod;
+use App\Enums\RideStatus;
 use App\Events\RideBooked;
 use App\Interfaces\RideRepositoryInterface;
 use App\Models\Booking;
@@ -12870,10 +14122,12 @@ use App\Models\Ride;
 use App\Models\User;
 use App\Services\NotificationService;
 use App\Services\Payment\WalletTransactionService;
+use App\Services\Score\ScoreService;
+use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Database\Eloquent\Collection;
 
 final class BookingService
 {
@@ -12882,6 +14136,7 @@ final class BookingService
         private readonly WalletTransactionService $walletService,
         private readonly NotificationService      $notificationService,
         private readonly RideValidationService    $validationService,
+        private readonly ScoreService             $scoreService,
     ) {}
 
     // =========================================================================
@@ -12889,72 +14144,82 @@ final class BookingService
     // =========================================================================
 
     /**
-     * Book a ride.
+     * Create a booking for a ride.
      *
-     * Payment flow (e-pay, direct booking):
-     *   Passenger wallet â†’ Primary Admin wallet (escrow)
+     * Payment flow â€” DIRECT + E-PAY:
+     *   Passenger wallet â†’ Primary Admin escrow (immediately).
      *
-     * Payment flow (e-pay, request booking):
-     *   Payment is deferred until driver accepts.
+     * Payment flow â€” REQUEST + E-PAY:
+     *   Deferred â€” charged only when driver calls acceptBooking().
+     *
+     * Payment flow â€” CASH (any booking type):
+     *   No wallet operations. Payment collected offline at ride time.
+     *
+     * Score gate: passenger score must be â‰¥ 40 (validated in RideValidationService).
      */
-    public function bookRide(BookRideDTO $dto, User $passenger): Booking
+    public function bookRide(BookRideDTO $dto, User $passenger): \Illuminate\Database\Eloquent\Builder|array|Collection|\Illuminate\Database\Eloquent\Model
     {
+        // 1. Validate passenger (verified + score gate â‰¥ 40)
         $this->validationService->validatePassengerCanBook($passenger);
 
-        $cacheKey = "booking:idempotency:{$dto->idempotencyKey}";
-
-        if ($existingBookingId = Cache::get($cacheKey)) {
-            Log::info('Duplicate booking attempt detected', [
+        // 2. Idempotency â€” return existing booking if the same key is replayed
+        $cacheKey = "booking:idem:{$dto->idempotencyKey}";
+        if ($existingId = Cache::get($cacheKey)) {
+            Log::info('Duplicate booking request detected', [
                 'idempotency_key'     => $dto->idempotencyKey,
-                'existing_booking_id' => $existingBookingId,
+                'existing_booking_id' => $existingId,
             ]);
-            /** @var Booking $existing */
-            $existing = Booking::with(['ride', 'user'])->findOrFail($existingBookingId);
-            return $existing;
+            return Booking::with(['ride', 'user'])->findOrFail($existingId);
         }
 
         return DB::transaction(function () use ($dto, $passenger, $cacheKey) {
-            $ride = $this->rideRepository->getRideById($dto->rideId);
+            // 3. Load and lock ride row to prevent race conditions on seat count
+            $ride = Ride::lockForUpdate()->findOrFail($dto->rideId);
 
-            $this->validateBooking($dto, $ride, $passenger);
+            // 4. Business rule validations
+            $this->assertBookingRules($dto, $ride, $passenger);
 
-            $bookingType = BookingType::from($ride->booking_type);
-            $status      = $bookingType->initialBookingStatus();
+            // 5. Determine initial booking status from the ride's booking type
+            $bookingType   = BookingType::from($ride->booking_type);
+            $initialStatus = $bookingType->initialBookingStatus(); // CONFIRMED or PENDING
 
-            /** @var Booking $booking */
+            // 6. Create the booking record
             $booking = Booking::create([
                 'user_id'              => $dto->passengerId,
                 'ride_id'              => $dto->rideId,
                 'seats'                => $dto->seats,
-                'status'               => $status->value,
+                'status'               => $initialStatus->value,
                 'communication_number' => $dto->communicationNumber->number(),
             ]);
 
-            // Charge passenger immediately for direct e-pay bookings only.
-            // Request-type bookings are charged when the driver accepts.
-            if ($status === BookingStatus::CONFIRMED
+            // 7. Charge passenger for DIRECT + E-PAY only.
+            //    REQUEST bookings defer payment until driver accepts.
+            if ($initialStatus === BookingStatus::CONFIRMED
                 && $ride->payment_method === PaymentMethod::E_PAY->value
             ) {
                 $this->walletService->chargePassengerForBooking($booking, $ride, $passenger);
             }
 
-            if ($status === BookingStatus::CONFIRMED) {
-                $this->updateRideSeats($ride, $dto->seats);
+            // 8. Deduct seats from ride only when booking is immediately confirmed
+            if ($initialStatus === BookingStatus::CONFIRMED) {
+                $this->deductSeats($ride, $dto->seats);
             }
 
+            // 9. Cache idempotency key for 24 hours
             Cache::put($cacheKey, $booking->id, 86400);
 
-            $this->notifyBookingCreated($booking, $ride, $passenger, $bookingType);
+            // 10. Notify driver and passenger
+            $this->notifyOnBookingCreated($booking, $ride, $passenger, $bookingType);
 
+            // 11. Broadcast real-time event to all listeners
             broadcast(new RideBooked($ride, $booking, $passenger));
 
             Log::info('Ride booked successfully', [
-                'ride_id'      => $ride->id,
-                'booking_id'   => $booking->id,
-                'passenger_id' => $passenger->id,
-                'seats'        => $dto->seats,
-                'status'       => $status->value,
-                'payment'      => $ride->payment_method,
+                'ride_id'        => $ride->id,
+                'booking_id'     => $booking->id,
+                'passenger_id'   => $passenger->id,
+                'status'         => $initialStatus->value,
+                'payment_method' => $ride->payment_method,
             ]);
 
             return $booking->refresh();
@@ -12962,60 +14227,60 @@ final class BookingService
     }
 
     // =========================================================================
-    // ACCEPT BOOKING (driver action â€” request-type rides)
+    // ACCEPT BOOKING  (driver â€” REQUEST-type rides only)
     // =========================================================================
 
     /**
-     * Driver accepts a pending booking request.
+     * Driver approves a pending booking request.
      *
-     * Payment flow (e-pay):
-     *   Passenger wallet â†’ Primary Admin wallet (escrow)
-     *   (deferred from booking time until acceptance)
+     * Payment flow (E-PAY): Passenger wallet â†’ Admin escrow (deferred from book time).
+     * Payment flow (CASH): No wallet operation.
      */
     public function acceptBooking(int $bookingId, User $driver): Booking
     {
         return DB::transaction(function () use ($bookingId, $driver) {
-            /** @var Booking $booking */
             $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
             $ride    = $booking->ride;
 
             if ($ride->driver_id !== $driver->id) {
-                throw new \Exception('Only the ride driver can accept bookings');
+                throw new \InvalidArgumentException('Only the ride driver can accept bookings');
             }
             if ($ride->booking_type !== BookingType::REQUEST->value) {
-                throw new \Exception('Only request-type bookings can be accepted');
+                throw new \InvalidArgumentException('Only request-type bookings can be accepted');
             }
             if ($booking->status !== BookingStatus::PENDING->value) {
-                throw new \Exception('Booking has already been processed');
+                throw new \InvalidArgumentException('Only pending bookings can be accepted');
             }
-            if ($ride->available_seats < $booking->seats) {
-                throw new \Exception('Not enough available seats');
-            }
+
+            // Re-check seats â€” availability may have changed since the request was made
+            $this->validationService->validateSeatsAvailable($booking->seats, $ride->available_seats);
 
             $booking->status = BookingStatus::CONFIRMED->value;
             $booking->save();
 
-            // Charge passenger now that driver accepted
+            // E-PAY: charge passenger now that driver accepted
             if ($ride->payment_method === PaymentMethod::E_PAY->value) {
                 $this->walletService->chargePassengerForBooking($booking, $ride, $booking->user);
             }
 
-            $this->updateRideSeats($ride, $booking->seats);
+            $this->deductSeats($ride, $booking->seats);
+
+            $paymentNote = $ride->payment_method === PaymentMethod::E_PAY->value
+                ? ' Payment has been deducted from your wallet.'
+                : ' Please pay the driver in cash.';
 
             $this->notificationService->createNotification(
                 $booking->user,
                 'booking_accepted',
-                'Booking Accepted',
-                "Your booking request for {$booking->seats} seat(s) has been accepted",
+                'Booking Accepted âœ“',
+                "{$driver->first_name} {$driver->last_name} accepted your request for {$booking->seats} seat(s).{$paymentNote}",
                 ['booking_id' => $booking->id, 'ride_id' => $ride->id],
-                'high',
-                'ride'
+                'high', 'ride'
             );
 
             Log::info('Booking accepted by driver', [
                 'booking_id' => $booking->id,
                 'driver_id'  => $driver->id,
-                'ride_id'    => $ride->id,
             ]);
 
             return $booking->refresh();
@@ -13023,28 +14288,28 @@ final class BookingService
     }
 
     // =========================================================================
-    // REJECT BOOKING (driver action â€” request-type rides)
+    // REJECT BOOKING  (driver â€” REQUEST-type rides only)
     // =========================================================================
 
     /**
      * Driver rejects a pending booking request.
-     * No payment was taken for pending bookings â€” no refund needed.
+     * No wallet operation â€” passenger was never charged for REQUEST bookings.
+     * No score penalty â€” rejection is within the driver's rights.
      */
     public function rejectBooking(int $bookingId, User $driver): Booking
     {
         return DB::transaction(function () use ($bookingId, $driver) {
-            /** @var Booking $booking */
-            $booking = Booking::with('ride')->lockForUpdate()->findOrFail($bookingId);
+            $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
             $ride    = $booking->ride;
 
             if ($ride->driver_id !== $driver->id) {
-                throw new \Exception('Only the ride driver can reject bookings');
+                throw new \InvalidArgumentException('Only the ride driver can reject bookings');
             }
             if ($ride->booking_type !== BookingType::REQUEST->value) {
-                throw new \Exception('Only request-type bookings can be rejected');
+                throw new \InvalidArgumentException('Only request-type bookings can be rejected');
             }
             if ($booking->status !== BookingStatus::PENDING->value) {
-                throw new \Exception('Booking has already been processed');
+                throw new \InvalidArgumentException('Only pending bookings can be rejected');
             }
 
             $booking->status = BookingStatus::CANCELLED->value;
@@ -13053,17 +14318,16 @@ final class BookingService
             $this->notificationService->createNotification(
                 $booking->user,
                 'booking_rejected',
-                'Booking Rejected',
-                'Your booking request was rejected by the driver',
+                'Booking Request Declined',
+                "Your request for {$booking->seats} seat(s) on the ride from "
+                . "{$ride->pickup_address} to {$ride->destination_address} was declined by the driver.",
                 ['booking_id' => $booking->id, 'ride_id' => $ride->id],
-                'normal',
-                'ride'
+                'normal', 'ride'
             );
 
             Log::info('Booking rejected by driver', [
                 'booking_id' => $booking->id,
                 'driver_id'  => $driver->id,
-                'ride_id'    => $ride->id,
             ]);
 
             return $booking->refresh();
@@ -13071,75 +14335,86 @@ final class BookingService
     }
 
     // =========================================================================
-    // CANCEL FULL BOOKING (passenger action)
+    // CANCEL BOOKING  (passenger â€” full booking)
     // =========================================================================
 
     /**
      * Passenger cancels their entire booking.
      *
-     * Payment flow (confirmed e-pay):
-     *   Primary Admin â†’ Passenger (refund % based on time elapsed)
-     *   Primary Admin â†’ Driver   (non-refundable % based on time elapsed)
+     * CONFIRMED + E-PAY:
+     *   Admin escrow â†’ Passenger (refund%) + Admin â†’ Driver (non-refundable%)
+     *   Tiers: 0â€“30% elapsed = 100% refund Â· 30â€“50% = 70% Â· 50â€“70% = 50% Â· 70â€“100% = 0%
      *
-     * Refund tiers:
-     *   0â€“30%  elapsed â†’ 100% refund to passenger
-     *   30â€“50% elapsed â†’  70% refund to passenger
-     *   50â€“70% elapsed â†’  50% refund to passenger
-     *   70â€“100% elapsed â†’  0% refund (all to driver)
+     * CONFIRMED + CASH:
+     *   No wallet operation. Score penalty applied:
+     *   0â€“30% = 0pts Â· 30â€“50% = âˆ’5pts Â· 50â€“100% = âˆ’10pts
+     *   cancelRate > 50% â†’ always âˆ’10pts regardless of tier.
+     *
+     * PENDING (any payment method):
+     *   No wallet operation (passenger was never charged for REQUEST bookings).
+     *   No score penalty.
      */
     public function cancelBooking(int $bookingId, User $passenger): Booking
     {
         return DB::transaction(function () use ($bookingId, $passenger) {
-            /** @var Booking $booking */
-            $booking = Booking::with('ride')->lockForUpdate()->findOrFail($bookingId);
+            $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
             $ride    = $booking->ride;
 
             if ($booking->user_id !== $passenger->id) {
-                throw new \Exception('You can only cancel your own bookings');
+                throw new \InvalidArgumentException('You can only cancel your own bookings');
             }
 
             $status = BookingStatus::from($booking->status);
             if (!$status->canBeCancelled()) {
-                throw new \Exception("Cannot cancel booking with status: {$status->label()}");
+                throw new \InvalidArgumentException(
+                    "Cannot cancel a booking with status: {$status->label()}"
+                );
             }
 
-            $booking->status       = BookingStatus::CANCELLED->value;
-            $booking->cancelled_at = now();
+            $wasConfirmed = ($status === BookingStatus::CONFIRMED);
+
+            $booking->status = BookingStatus::CANCELLED->value;
             $booking->save();
 
-            // Process time-based refund for confirmed e-pay bookings
-            if ($status === BookingStatus::CONFIRMED
-                && $ride->payment_method === PaymentMethod::E_PAY->value
-            ) {
-                $refundPolicy = $this->walletService->calculateRefundPolicy(
-                    \Carbon\Carbon::parse($ride->departure_time),
-                    $booking->created_at
-                );
+            // Calculate time-elapsed percentage (needed for both wallet and score logic)
+            $refundPolicy = $this->walletService->calculateRefundPolicy(
+                Carbon::parse($ride->departure_time),
+                $booking->created_at
+            );
 
-                $this->walletService->processTimeBasedCancellation(
+            if ($wasConfirmed) {
+                // Wallet refund â€” E-PAY confirmed bookings only
+                if ($ride->payment_method === PaymentMethod::E_PAY->value) {
+                    $this->walletService->processTimeBasedCancellation(
+                        $booking, $ride, $booking->seats, $refundPolicy
+                    );
+                }
+
+                // Score penalty â€” CASH confirmed bookings only
+                $this->scoreService->recordPassengerCancel(
+                    $passenger,
                     $booking,
-                    $ride,
-                    $booking->seats,
-                    $refundPolicy
+                    $refundPolicy['time_elapsed_percentage'],
+                    $ride->payment_method
                 );
 
-                $this->sendCancellationNotification($booking, $ride, $booking->seats, $refundPolicy);
-            }
-
-            // Restore seats on the ride
-            if ($status === BookingStatus::CONFIRMED) {
+                // Restore seats on the ride
                 $ride->increment('available_seats', $booking->seats);
+                $ride->refresh();
 
                 if ($ride->status === RideStatus::FULL->value) {
-                    $ride->status = RideStatus::ACTIVE->value;
-                    $ride->save();
+                    $ride->update(['status' => RideStatus::ACTIVE->value]);
                 }
             }
 
+            $this->notifyCancellation($booking, $ride, $booking->seats, $refundPolicy, $wasConfirmed);
+
             Log::info('Booking cancelled by passenger', [
-                'booking_id'   => $booking->id,
-                'passenger_id' => $passenger->id,
-                'seats'        => $booking->seats,
+                'booking_id'    => $booking->id,
+                'passenger_id'  => $passenger->id,
+                'was_confirmed' => $wasConfirmed,
+                'payment'       => $ride->payment_method,
+                'elapsed_pct'   => $refundPolicy['time_elapsed_percentage'],
             ]);
 
             return $booking->refresh();
@@ -13147,23 +14422,17 @@ final class BookingService
     }
 
     // =========================================================================
-    // CANCEL PARTIAL SEATS (passenger action)
+    // CANCEL PARTIAL SEATS  (passenger)
     // =========================================================================
 
     /**
      * Passenger cancels a subset of their booked seats.
-     *
-     * Payment flow (confirmed e-pay):
-     *   Primary Admin â†’ Passenger (refund % Ã— seats cancelled)
-     *   Primary Admin â†’ Driver   (non-refundable % Ã— seats cancelled)
-     *
-     * If remaining seats > 0: booking stays active with reduced seat count.
-     * If remaining seats = 0: booking is fully cancelled.
+     * Same wallet/score rules as cancelBooking() applied per cancelled seat.
+     * Booking stays active with reduced seat count unless all seats are cancelled.
      */
     public function cancelPartialSeats(int $bookingId, int $seatsToCancel, User $passenger): array
     {
         return DB::transaction(function () use ($bookingId, $seatsToCancel, $passenger) {
-            /** @var Booking $booking */
             $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
             $ride    = $booking->ride;
 
@@ -13171,62 +14440,68 @@ final class BookingService
                 throw new \InvalidArgumentException('You can only cancel your own bookings');
             }
             if (!in_array($booking->status, [BookingStatus::PENDING->value, BookingStatus::CONFIRMED->value])) {
-                throw new \InvalidArgumentException('This booking cannot be cancelled');
+                throw new \InvalidArgumentException('This booking cannot be partially cancelled');
             }
-            if ($seatsToCancel > $booking->seats) {
+            if ($seatsToCancel < 1 || $seatsToCancel > $booking->seats) {
                 throw new \InvalidArgumentException(
-                    "Cannot cancel {$seatsToCancel} seats. You only have {$booking->seats} seats booked."
+                    "Cannot cancel {$seatsToCancel} seat(s). You have {$booking->seats} seat(s) booked."
                 );
             }
 
-            $refundPolicy   = $this->walletService->calculateRefundPolicy(
-                \Carbon\Carbon::parse($ride->departure_time),
-                $booking->created_at
-            );
-            $totalPaid      = $seatsToCancel * $ride->price_per_seat;
-            $refundAmount   = ($totalPaid * $refundPolicy['refund_percentage']) / 100;
+            $wasConfirmed   = ($booking->status === BookingStatus::CONFIRMED->value);
             $remainingSeats = $booking->seats - $seatsToCancel;
 
-            // Process money redistribution for confirmed e-pay bookings
-            if ($booking->status === BookingStatus::CONFIRMED->value
-                && $ride->payment_method === PaymentMethod::E_PAY->value
-            ) {
-                $this->walletService->processTimeBasedCancellation(
+            $refundPolicy = $this->walletService->calculateRefundPolicy(
+                Carbon::parse($ride->departure_time),
+                $booking->created_at
+            );
+            $totalPaid    = $seatsToCancel * $ride->price_per_seat;
+            $refundAmount = ($totalPaid * $refundPolicy['refund_percentage']) / 100;
+
+            if ($wasConfirmed) {
+                // Wallet â€” E-PAY only
+                if ($ride->payment_method === PaymentMethod::E_PAY->value) {
+                    $this->walletService->processTimeBasedCancellation(
+                        $booking, $ride, $seatsToCancel, $refundPolicy
+                    );
+                }
+
+                // Score â€” CASH only
+                $this->scoreService->recordPassengerCancel(
+                    $passenger,
                     $booking,
-                    $ride,
-                    $seatsToCancel,
-                    $refundPolicy
+                    $refundPolicy['time_elapsed_percentage'],
+                    $ride->payment_method
                 );
             }
 
-            // Update booking record
+            // Update booking
             if ($remainingSeats > 0) {
                 $booking->seats = $remainingSeats;
                 $booking->save();
                 $message = "Cancelled {$seatsToCancel} seat(s). You still have {$remainingSeats} seat(s) booked.";
             } else {
-                $booking->status       = BookingStatus::CANCELLED->value;
-                $booking->cancelled_at = now();
+                $booking->seats  = 0;
+                $booking->status = BookingStatus::CANCELLED->value;
                 $booking->save();
-                $message = 'All seats cancelled. Your booking has been cancelled.';
+                $message = 'All seats cancelled. Your booking has been fully cancelled.';
             }
 
-            // Restore seats on the ride
-            $ride->increment('available_seats', $seatsToCancel);
-
-            if ($ride->status === RideStatus::FULL->value) {
-                $ride->status = RideStatus::ACTIVE->value;
-                $ride->save();
+            // Restore seats on ride (only for confirmed â€” pending seats were never deducted)
+            if ($wasConfirmed) {
+                $ride->increment('available_seats', $seatsToCancel);
+                $ride->refresh();
+                if ($ride->status === RideStatus::FULL->value) {
+                    $ride->update(['status' => RideStatus::ACTIVE->value]);
+                }
             }
 
-            $this->sendCancellationNotification($booking, $ride, $seatsToCancel, $refundPolicy);
+            $this->notifyCancellation($booking, $ride, $seatsToCancel, $refundPolicy, $wasConfirmed);
 
-            Log::info('Partial seat cancellation completed', [
+            Log::info('Partial seats cancelled', [
                 'booking_id'      => $booking->id,
                 'seats_cancelled' => $seatsToCancel,
-                'remaining_seats' => $remainingSeats,
-                'refund_amount'   => $refundAmount,
-                'policy_tier'     => $refundPolicy['policy_tier'],
+                'remaining'       => $remainingSeats,
             ]);
 
             return [
@@ -13235,6 +14510,7 @@ final class BookingService
                     'booking_id'      => $booking->id,
                     'seats_cancelled' => $seatsToCancel,
                     'remaining_seats' => $remainingSeats,
+                    'booking_status'  => $booking->status,
                     'refund_policy'   => [
                         'refund_percentage'       => $refundPolicy['refund_percentage'],
                         'refund_amount'           => $refundAmount,
@@ -13242,9 +14518,77 @@ final class BookingService
                         'time_elapsed_percentage' => round($refundPolicy['time_elapsed_percentage'], 2),
                         'policy_tier'             => $refundPolicy['policy_tier'],
                     ],
-                    'booking_status' => $booking->status,
                 ],
             ];
+        });
+    }
+
+    // =========================================================================
+    // REPORT PASSENGER NO-SHOW  (driver reports)
+    // =========================================================================
+
+    /**
+     * Driver reports that a confirmed passenger did not show up (after departure).
+     *
+     * Wallet (E-PAY only):
+     *   Admin escrow â†’ 95% Driver + 5% SyCash. Passenger receives nothing.
+     *
+     * Score (CASH only):
+     *   âˆ’15 pts to passenger.
+     *   E-PAY: no score penalty (wallet settlement acts as the financial penalty).
+     */
+    public function reportPassengerNoShow(int $bookingId, User $driver): array
+    {
+        return DB::transaction(function () use ($bookingId, $driver) {
+            $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
+            $ride    = $booking->ride;
+
+            if ($ride->driver_id !== $driver->id) {
+                throw new \InvalidArgumentException('Only the ride driver can report a passenger no-show');
+            }
+            if ($booking->status !== BookingStatus::CONFIRMED->value) {
+                throw new \InvalidArgumentException('Can only report no-show for confirmed bookings');
+            }
+            if (now()->lessThan(Carbon::parse($ride->departure_time))) {
+                throw new \InvalidArgumentException('Cannot report a no-show before the departure time');
+            }
+
+            $booking->status = Booking::NO_SHOW;
+            $booking->save();
+
+            // E-PAY: split 95% driver / 5% SyCash
+            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
+                $this->walletService->processPassengerNoShow($booking, $ride, $booking->user);
+            }
+
+            // Score: âˆ’15 CASH only; E-PAY uses wallet split as the penalty
+            $this->scoreService->recordPassengerNoShow(
+                $booking->user,
+                $booking,
+                $ride->payment_method
+            );
+
+            $walletNote = $ride->payment_method === PaymentMethod::E_PAY->value
+                ? ' Payment has been transferred to the driver; no refund issued.'
+                : '';
+
+            $this->notificationService->createNotification(
+                $booking->user,
+                'passenger_no_show',
+                'No-Show Recorded',
+                "You were marked as a no-show for the ride from {$ride->pickup_address} "
+                . "to {$ride->destination_address}.{$walletNote}",
+                ['ride_id' => $ride->id, 'booking_id' => $booking->id],
+                'high', 'ride'
+            );
+
+            Log::info('Passenger no-show recorded', [
+                'booking_id'     => $booking->id,
+                'driver_id'      => $driver->id,
+                'payment_method' => $ride->payment_method,
+            ]);
+
+            return ['message' => 'Passenger no-show recorded. Settlement processed.'];
         });
     }
 
@@ -13253,20 +14597,26 @@ final class BookingService
     // =========================================================================
 
     /**
-     * Passenger confirms the ride was completed.
-     * Once ALL passengers and the driver have confirmed, RideService releases payment.
+     * Passenger confirms the ride actually took place.
+     * Once the driver AND all confirmed passengers have confirmed,
+     * RideService::checkAndCompleteRide() releases payment and records scores.
      */
     public function passengerConfirmCompletion(int $bookingId, User $passenger): array
     {
-        /** @var Booking $booking */
         $booking = Booking::with('ride')->findOrFail($bookingId);
         $ride    = $booking->ride;
 
         if ($booking->user_id !== $passenger->id) {
-            throw new \Exception('Only the booking passenger can confirm completion');
+            throw new \InvalidArgumentException('Only the booking passenger can confirm completion');
         }
         if ($ride->status !== RideStatus::AWAITING_CONFIRMATION->value) {
-            throw new \Exception('Ride is not awaiting confirmation');
+            throw new \InvalidArgumentException('Ride is not awaiting confirmation');
+        }
+        if ($booking->status !== BookingStatus::CONFIRMED->value) {
+            throw new \InvalidArgumentException('Only confirmed bookings can be confirmed for completion');
+        }
+        if ($booking->passenger_confirmed_at) {
+            throw new \InvalidArgumentException('You have already confirmed this ride');
         }
 
         DB::transaction(function () use ($booking) {
@@ -13274,14 +14624,13 @@ final class BookingService
             $booking->save();
         });
 
-        // Trigger completion check â€” releases payment if all parties confirmed
-        app(RideService::class)->checkAndCompleteRide($ride->fresh());
-
         Log::info('Passenger confirmed ride completion', [
             'booking_id'   => $booking->id,
             'passenger_id' => $passenger->id,
-            'ride_id'      => $ride->id,
         ]);
+
+        // Trigger check â€” completes ride if all parties have now confirmed
+        app(RideService::class)->checkAndCompleteRide($ride->fresh());
 
         return ['message' => 'Confirmation received. Waiting for all parties to confirm.'];
     }
@@ -13292,9 +14641,13 @@ final class BookingService
 
     public function getUserBookings(int $userId): Collection
     {
-        return Booking::with(['ride', 'ride.driver', 'ride.driver.profile'])
+        return Booking::with([
+            'ride',
+            'ride.driver',
+            'ride.driver.profile',
+        ])
             ->where('user_id', $userId)
-            ->orderBy('created_at', 'desc')
+            ->orderByDesc('created_at')
             ->get();
     }
 
@@ -13302,43 +14655,58 @@ final class BookingService
     // PRIVATE HELPERS
     // =========================================================================
 
-    private function validateBooking(BookRideDTO $dto, Ride $ride, User $passenger): void
+    /**
+     * Run all business rule checks before creating a booking.
+     *
+     * @throws \InvalidArgumentException on any violation
+     */
+    private function assertBookingRules(BookRideDTO $dto, Ride $ride, User $passenger): void
     {
+        // Driver cannot book their own ride
         if ($ride->driver_id === $passenger->id) {
-            throw new \Exception('Drivers cannot book their own rides');
+            throw new \InvalidArgumentException('Drivers cannot book their own rides');
         }
 
+        // Ride must be in a bookable state (ACTIVE or FULL with available seats)
+        $rideStatus = RideStatus::from($ride->status);
+        if (!$rideStatus->canBeBooked()) {
+            throw new \InvalidArgumentException(
+                "This ride is not available for booking (status: {$rideStatus->label()})"
+            );
+        }
+
+        // Sufficient seats must be available
         $this->validationService->validateSeatsAvailable($dto->seats, $ride->available_seats);
 
+        // Passenger must not already have an active booking on this ride
         $alreadyBooked = Booking::where('user_id', $passenger->id)
             ->where('ride_id', $ride->id)
             ->whereIn('status', BookingStatus::activeStatuses())
             ->exists();
 
         if ($alreadyBooked) {
-            throw new \Exception('You already have an active booking for this ride');
-        }
-
-        $rideStatus = RideStatus::from($ride->status);
-        if (!$rideStatus->canBeBooked()) {
-            throw new \Exception("This ride is not available for booking (status: {$rideStatus->label()})");
+            throw new \InvalidArgumentException('You already have an active booking for this ride');
         }
     }
 
-    private function updateRideSeats(Ride $ride, int $seats): void
+    /**
+     * Decrement available_seats on the ride and mark it FULL if none remain.
+     */
+    private function deductSeats(Ride $ride, int $seats): void
     {
         $ride->decrement('available_seats', $seats);
         $ride->refresh();
 
         if ($ride->available_seats <= 0) {
-            $ride->status = RideStatus::FULL->value;
-            $ride->save();
-
+            $ride->update(['status' => RideStatus::FULL->value]);
             Log::info('Ride marked as full', ['ride_id' => $ride->id]);
         }
     }
 
-    private function notifyBookingCreated(
+    /**
+     * Send creation notifications to both driver and passenger.
+     */
+    private function notifyOnBookingCreated(
         Booking     $booking,
         Ride        $ride,
         User        $passenger,
@@ -13350,94 +14718,92 @@ final class BookingService
         $this->notificationService->createNotification(
             $ride->driver,
             $isDirect ? 'ride_booked' : 'booking_requested',
-            $isDirect ? 'New Ride Booking' : 'New Booking Request',
-            "{$passenger->first_name} {$passenger->last_name} has " .
-            ($isDirect ? 'booked' : 'requested') .
-            " {$booking->seats} seat(s) for your ride",
+            $isDirect ? 'New Booking Received' : 'New Booking Request',
+            $isDirect
+                ? "{$passenger->first_name} {$passenger->last_name} booked {$booking->seats} seat(s) on your ride."
+                : "{$passenger->first_name} {$passenger->last_name} requested {$booking->seats} seat(s). Please accept or reject.",
             [
                 'ride_id'      => $ride->id,
                 'booking_id'   => $booking->id,
                 'passenger_id' => $passenger->id,
                 'seats'        => $booking->seats,
             ],
-            'high',
-            'ride'
+            'high', 'ride'
         );
 
         // Notify passenger
         $this->notificationService->createNotification(
             $passenger,
-            $isDirect ? 'booking_confirmed' : 'booking_requested',
-            $isDirect ? 'Booking Confirmed' : 'Request Sent',
+            $isDirect ? 'booking_confirmed' : 'booking_request_sent',
+            $isDirect ? 'Booking Confirmed âœ“' : 'Request Sent',
             $isDirect
-                ? "Your booking for {$booking->seats} seat(s) has been confirmed"
-                : "Your booking request has been sent. Waiting for driver approval",
-            [
-                'ride_id'    => $ride->id,
-                'booking_id' => $booking->id,
-                'seats'      => $booking->seats,
-            ],
-            'normal',
-            'ride'
+                ? "Your {$booking->seats} seat(s) on the ride from {$ride->pickup_address} to {$ride->destination_address} are confirmed."
+                : "Your request for {$booking->seats} seat(s) has been sent. Waiting for driver approval.",
+            ['ride_id' => $ride->id, 'booking_id' => $booking->id, 'seats' => $booking->seats],
+            'normal', 'ride'
         );
     }
 
-    private function sendCancellationNotification(
+    /**
+     * Send cancellation/partial-cancel notifications to both driver and passenger.
+     */
+    private function notifyCancellation(
         Booking $booking,
         Ride    $ride,
         int     $seatsCancelled,
-        array   $refundPolicy
+        array   $refundPolicy,
+        bool    $wasConfirmed
     ): void {
-        $totalPaid      = $seatsCancelled * $ride->price_per_seat;
-        $refundAmount   = ($totalPaid * $refundPolicy['refund_percentage']) / 100;
-        $driverAmount   = $totalPaid - $refundAmount;
-        $remainingSeats = $booking->seats; // already updated at this point
+        $totalPaid    = $seatsCancelled * $ride->price_per_seat;
+        $refundAmount = ($totalPaid * $refundPolicy['refund_percentage']) / 100;
+        $driverAmount = $totalPaid - $refundAmount;
+        $isEpay       = $ride->payment_method === PaymentMethod::E_PAY->value;
 
-        // Passenger notification
-        $passengerMsg = $remainingSeats > 0
-            ? "Cancelled {$seatsCancelled} seat(s). You still have {$remainingSeats} seat(s) booked. "
-            : "Your booking has been fully cancelled. ";
-
-        $passengerMsg .= $refundAmount > 0
-            ? "Refund of " . number_format($refundAmount, 0) . " SYP ({$refundPolicy['refund_percentage']}%) has been processed."
-            : "No refund issued ({$refundPolicy['policy_tier']}).";
+        // Passenger message
+        if ($wasConfirmed && $isEpay) {
+            $passengerDetail = $refundAmount > 0
+                ? "Refund of " . number_format($refundAmount, 0) . " SYP ({$refundPolicy['refund_percentage']}%) issued. ({$refundPolicy['policy_tier']})"
+                : "No refund â€” {$refundPolicy['policy_tier']}.";
+        } elseif ($wasConfirmed) {
+            $passengerDetail = "Cash ride â€” no wallet transaction needed.";
+        } else {
+            $passengerDetail = "Pending request cancelled â€” no payment was taken.";
+        }
 
         $this->notificationService->createNotification(
             $booking->user,
-            'booking_partial_cancellation',
-            'Seats Cancelled',
-            $passengerMsg,
+            'booking_cancelled',
+            'Booking Cancelled',
+            "Cancelled {$seatsCancelled} seat(s) on the ride from {$ride->pickup_address} "
+            . "to {$ride->destination_address}. {$passengerDetail}",
             [
-                'booking_id'              => $booking->id,
-                'seats_cancelled'         => $seatsCancelled,
-                'refund_amount'           => $refundAmount,
-                'time_elapsed_percentage' => round($refundPolicy['time_elapsed_percentage'], 2),
-                'policy_tier'             => $refundPolicy['policy_tier'],
+                'booking_id'      => $booking->id,
+                'ride_id'         => $ride->id,
+                'seats_cancelled' => $seatsCancelled,
             ],
-            'normal',
-            'ride'
+            'normal', 'ride'
         );
 
-        // Driver notification
-        $driverMsg = $driverAmount > 0
-            ? "A passenger cancelled {$seatsCancelled} seat(s) on your ride. " .
-            "You received " . number_format($driverAmount, 0) . " SYP cancellation fee ({$refundPolicy['policy_tier']})."
-            : "A passenger cancelled {$seatsCancelled} seat(s). Full refund was issued to the passenger.";
+        // Driver message â€” only meaningful if booking was confirmed
+        if ($wasConfirmed) {
+            $driverDetail = ($isEpay && $driverAmount > 0)
+                ? "{$booking->user->first_name} cancelled {$seatsCancelled} seat(s). You received "
+                . number_format($driverAmount, 0) . " SYP cancellation fee ({$refundPolicy['policy_tier']})."
+                : "{$booking->user->first_name} cancelled {$seatsCancelled} seat(s) (cash ride â€” no wallet impact).";
 
-        $this->notificationService->createNotification(
-            $ride->driver,
-            'passenger_cancellation_earnings',
-            'Passenger Cancelled Seats',
-            $driverMsg,
-            [
-                'booking_id'            => $booking->id,
-                'seats_cancelled'       => $seatsCancelled,
-                'cancellation_earnings' => $driverAmount,
-                'policy_tier'           => $refundPolicy['policy_tier'],
-            ],
-            'normal',
-            'ride'
-        );
+            $this->notificationService->createNotification(
+                $ride->driver,
+                'passenger_cancelled',
+                'Passenger Cancelled Seats',
+                $driverDetail,
+                [
+                    'booking_id'      => $booking->id,
+                    'ride_id'         => $ride->id,
+                    'seats_cancelled' => $seatsCancelled,
+                ],
+                'normal', 'ride'
+            );
+        }
     }
 }
 
@@ -13605,10 +14971,9 @@ final class RideSearchService
 namespace App\Services\Ride;
 
 use App\DTOs\Ride\CreateRideDTO;
-use App\Domain\ValueObjects\Money;
-use App\Enums\RideStatus;
 use App\Enums\BookingStatus;
 use App\Enums\PaymentMethod;
+use App\Enums\RideStatus;
 use App\Events\RideCreated;
 use App\Events\RideCancelled;
 use App\Interfaces\RideRepositoryInterface;
@@ -13617,9 +14982,11 @@ use App\Models\Ride;
 use App\Models\User;
 use App\Services\NotificationService;
 use App\Services\Payment\WalletTransactionService;
+use App\Services\Score\ScoreService;
+use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Database\Eloquent\Collection;
 
 final class RideService
 {
@@ -13629,134 +14996,175 @@ final class RideService
         private readonly RideSearchService        $searchService,
         private readonly WalletTransactionService $walletService,
         private readonly NotificationService      $notificationService,
+        private readonly ScoreService             $scoreService,
     ) {}
 
     // =========================================================================
     // CREATE RIDE
     // =========================================================================
 
+    /**
+     * Create a new ride and immediately charge the driver the creation fee.
+     *
+     * Fee: 5% of (price_per_seat Ã— available_seats) â€” Driver wallet â†’ SyCash wallet.
+     * Applies to both CASH and E-PAY rides; all drivers need a wallet.
+     *
+     * Score gate: driver score must be â‰¥ 50 (validated in RideValidationService).
+     */
     public function createRide(CreateRideDTO $dto, User $driver): Ride
     {
+        // Validate driver: verified status + score â‰¥ 50 + required documents
         $this->validationService->validateDriverCanCreateRide($driver);
         $this->validationService->validateDepartureTime($dto->departureTime);
 
         return DB::transaction(function () use ($dto, $driver) {
+            // Persist ride with spatial columns (pickup/destination POINT) and route geometry
             $ride = $this->rideRepository->createRideWithGeometry($dto->toArray());
 
+            // Charge 5% creation fee: Driver wallet â†’ SyCash wallet
             $this->walletService->chargeRideCreationFee($ride, $driver);
 
             $feeAmount = $dto->calculateRideCreationFee()->amount();
+
             $this->notificationService->createNotification(
                 $driver,
                 'ride_created',
-                'Ride Created Successfully',
-                "Your ride from {$ride->pickup_address} to {$ride->destination_address} has been created. "
-                . "Creation fee charged: " . number_format($feeAmount, 0) . " SYP",
+                'Ride Created âœ“',
+                "Your ride from {$ride->pickup_address} to {$ride->destination_address} is now live. "
+                . "Creation fee charged: " . number_format($feeAmount, 0) . " SYP.",
                 ['ride_id' => $ride->id, 'fee_charged' => $feeAmount],
-                'normal',
-                'ride'
+                'normal', 'ride'
             );
 
             broadcast(new RideCreated($ride));
+
+            Log::info('Ride created', [
+                'ride_id'   => $ride->id,
+                'driver_id' => $driver->id,
+                'fee'       => $feeAmount,
+            ]);
 
             return $ride->fresh(['driver.profile']);
         });
     }
 
     // =========================================================================
-    // CANCEL RIDE
+    // CANCEL RIDE  (driver cancels entire ride)
     // =========================================================================
 
+    /**
+     * Driver cancels their ride before it departs.
+     *
+     * Wallet â€” CONFIRMED + E-PAY bookings:
+     *   Admin escrow â†’ each passenger (100% full refund, no time-based tier).
+     *
+     * Wallet â€” always (regardless of payment method):
+     *   SyCash â†’ Driver (creation fee refunded in full).
+     *
+     * Score â€” driver:
+     *   Elapsed 0â€“30%   â†’ 0 pts (no penalty)
+     *   Elapsed 30â€“50%  â†’ âˆ’7 pts
+     *   Elapsed 50â€“100% â†’ âˆ’12 pts
+     *   cancelRate â‰¥ 50% overrides tier â†’ âˆ’15 pts always
+     *   Elapsed % = (now âˆ’ ride.created_at) / (departure âˆ’ ride.created_at) Ã— 100
+     *
+     * PENDING bookings are cancelled without financial impact
+     * (REQUEST bookings were never charged).
+     */
     public function cancelRide(int $rideId, User $driver): Ride
     {
         return DB::transaction(function () use ($rideId, $driver) {
-            $ride = $this->rideRepository->getRideById($rideId);
+            $ride = Ride::lockForUpdate()->findOrFail($rideId);
 
-            // âœ… FIXED: throw InvalidArgumentException so controller returns 422 not 500
             if ($ride->driver_id !== $driver->id) {
                 throw new \InvalidArgumentException('Only the ride creator can cancel it');
             }
 
             $rideStatus = RideStatus::from($ride->status);
-
-            // âœ… FIXED: throw InvalidArgumentException so controller returns 422 not 500
             if ($rideStatus->isTerminal()) {
                 throw new \InvalidArgumentException(
-                    "Cannot cancel ride with status: {$rideStatus->label()}"
+                    "Cannot cancel a ride with status: {$rideStatus->label()}"
                 );
             }
 
-            $this->validationService->validateCanCancelRide($ride->departure_time);
+            $this->validationService->validateCanCancelRide(Carbon::parse($ride->departure_time));
 
-            $affectedBookings = $ride->bookings()
+            // Snapshot all active bookings before any status changes
+            $activeBookings = $ride->bookings()
                 ->whereNotIn('status', [
                     BookingStatus::CANCELLED->value,
                     BookingStatus::COMPLETED->value,
+                    Booking::NO_SHOW,
                 ])
                 ->with('user')
                 ->get();
 
-            $originalStatuses = $affectedBookings->keyBy('id')
-                ->map(fn($b) => $b->status);
+            $confirmedBookings = $activeBookings->filter(
+                fn($b) => $b->status === BookingStatus::CONFIRMED->value
+            );
+            $pendingBookings = $activeBookings->filter(
+                fn($b) => $b->status === BookingStatus::PENDING->value
+            );
 
-            $confirmedSeats = $affectedBookings
-                ->filter(fn($b) => $originalStatuses[$b->id] === BookingStatus::CONFIRMED->value)
-                ->sum('seats');
+            // Reconstruct original seat count for creation fee refund calculation
+            $confirmedSeats = $confirmedBookings->sum('seats');
+            $pendingSeats   = $pendingBookings->sum('seats');
+            $originalSeats  = $ride->available_seats + $confirmedSeats + $pendingSeats;
 
-            $pendingSeats = $affectedBookings
-                ->filter(fn($b) => $originalStatuses[$b->id] === BookingStatus::PENDING->value)
-                ->sum('seats');
-
-            $originalSeats = $ride->available_seats + $confirmedSeats + $pendingSeats;
-
+            // 1. Mark ride as cancelled
             $ride->status = RideStatus::CANCELLED->value;
             $ride->save();
 
-            foreach ($affectedBookings as $booking) {
-                $booking->status       = BookingStatus::CANCELLED->value;
-                $booking->cancelled_at = now();
+            // 2. Cancel every active booking
+            foreach ($activeBookings as $booking) {
+                $booking->status = BookingStatus::CANCELLED->value;
                 $booking->save();
             }
 
-            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
-                $confirmedBookings = $affectedBookings->filter(
-                    fn($b) => $originalStatuses[$b->id] === BookingStatus::CONFIRMED->value
-                );
-
-                if ($confirmedBookings->isNotEmpty()) {
-                    $this->walletService->refundPassengersForDriverCancellation(
-                        $ride,
-                        $confirmedBookings
-                    );
-                }
+            // 3. Refund confirmed E-PAY passengers (pending were never charged)
+            if ($confirmedBookings->isNotEmpty()
+                && $ride->payment_method === PaymentMethod::E_PAY->value
+            ) {
+                $this->walletService->refundPassengersForDriverCancellation($ride, $confirmedBookings);
             }
 
+            // 4. Always refund the driver's creation fee
             $this->walletService->refundDriverCreationFeeOnCancellation($ride, $originalSeats);
 
-            $this->notifyRideCancellation($ride, $affectedBookings, $originalStatuses);
+            // 5. Score penalty for driver
+            $elapsedPct = ScoreService::calculateElapsedPct(
+                $ride->created_at,
+                Carbon::parse($ride->departure_time)
+            );
+            $this->scoreService->recordDriverCancelRide($driver, $ride, $elapsedPct);
 
+            // 6. Notify all affected passengers
+            $this->notifyPassengersOnRideCancelled($ride, $confirmedBookings, $pendingBookings);
+
+            // 7. Notify driver that fee was refunded
             $this->notificationService->createNotification(
                 $driver,
-                'ride_cancelled_fee_refunded',
-                'Ride Cancelled â€“ Creation Fee Refunded',
+                'ride_cancelled_driver',
+                'Ride Cancelled',
                 "Your ride from {$ride->pickup_address} to {$ride->destination_address} has been cancelled. "
-                . "Your creation fee has been refunded to your wallet.",
+                . "Your creation fee has been refunded.",
                 [
-                    'ride_id'             => $ride->id,
-                    'passengers_refunded' => $affectedBookings->count(),
-                    'original_seats'      => $originalSeats,
+                    'ride_id'              => $ride->id,
+                    'passengers_notified'  => $activeBookings->count(),
+                    'elapsed_pct'          => round($elapsedPct, 2),
                 ],
-                'normal',
-                'ride'
+                'normal', 'ride'
             );
 
-            broadcast(new RideCancelled($ride, $affectedBookings->toArray(), $driver));
+            broadcast(new RideCancelled($ride, $activeBookings->toArray(), $driver));
 
             Log::info('Ride cancelled by driver', [
-                'ride_id'          => $ride->id,
-                'driver_id'        => $driver->id,
-                'original_seats'   => $originalSeats,
-                'affected_bookings'=> $affectedBookings->count(),
+                'ride_id'    => $ride->id,
+                'driver_id'  => $driver->id,
+                'elapsed_pct'=> round($elapsedPct, 2),
+                'confirmed'  => $confirmedBookings->count(),
+                'pending'    => $pendingBookings->count(),
+                'original_seats' => $originalSeats,
             ]);
 
             return $ride->fresh();
@@ -13764,54 +15172,92 @@ final class RideService
     }
 
     // =========================================================================
-    // FINISH RIDE
+    // FINISH RIDE  (driver signals ride is over)
     // =========================================================================
 
+    /**
+     * Driver marks the ride as finished after departure.
+     *
+     * Case A â€” No confirmed bookings (empty ride):
+     *   â†’ Status: FINISHED immediately.
+     *   â†’ Creation fee refunded (SyCash â†’ Driver).
+     *   â†’ No score event (no passengers completed anything).
+     *
+     * Case B â€” Has confirmed bookings (CASH or E-PAY):
+     *   â†’ Status: AWAITING_CONFIRMATION.
+     *   â†’ All parties (driver + every confirmed passenger) are notified to confirm.
+     *   â†’ Payment release and score are handled in checkAndCompleteRide() once
+     *     every party has confirmed.
+     *
+     * The two-way confirmation step exists for both payment methods because it:
+     *   (a) Verifies the ride actually happened before releasing E-PAY funds.
+     *   (b) Generates trustworthy score events (+10) for both CASH and E-PAY rides.
+     */
     public function finishRide(int $rideId, User $driver): array
     {
-        $ride = $this->rideRepository->getRideById($rideId);
+        $ride = Ride::findOrFail($rideId);
 
         if ($ride->driver_id !== $driver->id) {
-            throw new \Exception('Only the ride driver can finish it');
+            throw new \InvalidArgumentException('Only the ride driver can finish it');
         }
 
-        if (!in_array($ride->status, [RideStatus::ACTIVE->value, RideStatus::FULL->value])) {
-            throw new \Exception('Can only finish active or full rides');
+        $rideStatus = RideStatus::from($ride->status);
+        if (!in_array($rideStatus, [RideStatus::ACTIVE, RideStatus::FULL])) {
+            throw new \InvalidArgumentException(
+                "Can only finish an active or full ride (current: {$rideStatus->label()})"
+            );
         }
 
-        if (now()->lessThan(\Carbon\Carbon::parse($ride->departure_time))) {
-            throw new \Exception('Cannot finish a ride before its departure time');
+        if (now()->lessThan(Carbon::parse($ride->departure_time))) {
+            throw new \InvalidArgumentException('Cannot finish a ride before its departure time');
         }
 
         $confirmedBookings = $ride->bookings()
             ->where('status', BookingStatus::CONFIRMED->value)
             ->get();
 
+        // â”€â”€ Case A: empty ride â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if ($confirmedBookings->isEmpty()) {
             return DB::transaction(function () use ($ride) {
                 $this->walletService->refundCreationFeeNoBookings($ride);
+
                 $ride->status      = RideStatus::FINISHED->value;
                 $ride->finished_at = now();
                 $ride->save();
 
+                $this->notificationService->createNotification(
+                    $ride->driver,
+                    'ride_finished_no_passengers',
+                    'Ride Finished',
+                    "Ride from {$ride->pickup_address} to {$ride->destination_address} finished. "
+                    . "No passengers booked â€” creation fee refunded.",
+                    ['ride_id' => $ride->id],
+                    'normal', 'ride'
+                );
+
+                Log::info('Ride finished with no passengers', ['ride_id' => $ride->id]);
+
                 return [
                     'status'                => RideStatus::FINISHED->value,
-                    'message'               => 'Ride finished. No passengers booked â€“ creation fee refunded.',
+                    'message'               => 'Ride finished. No passengers booked â€” creation fee refunded.',
                     'requires_confirmation' => false,
                 ];
             });
         }
 
+        // â”€â”€ Case B: confirmed passengers â€” await mutual confirmation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         return DB::transaction(function () use ($ride) {
             $ride->status      = RideStatus::AWAITING_CONFIRMATION->value;
             $ride->finished_at = now();
             $ride->save();
 
-            $this->notifyForConfirmation($ride);
+            $this->notifyAllForConfirmation($ride);
+
+            Log::info('Ride moved to awaiting confirmation', ['ride_id' => $ride->id]);
 
             return [
                 'status'                => RideStatus::AWAITING_CONFIRMATION->value,
-                'message'               => 'Ride completed. Waiting for all parties to confirm to release payment.',
+                'message'               => 'Ride completed. Waiting for all parties to confirm.',
                 'requires_confirmation' => true,
             ];
         });
@@ -13821,16 +15267,23 @@ final class RideService
     // DRIVER CONFIRMS COMPLETION
     // =========================================================================
 
+    /**
+     * Driver confirms the ride took place.
+     * Triggers checkAndCompleteRide() â€” finalises everything if all passengers
+     * have also confirmed.
+     */
     public function driverConfirmCompletion(int $rideId, User $driver): array
     {
-        $ride = $this->rideRepository->getRideById($rideId);
+        $ride = Ride::findOrFail($rideId);
 
         if ($ride->driver_id !== $driver->id) {
-            throw new \Exception('Only the ride driver can confirm completion');
+            throw new \InvalidArgumentException('Only the ride driver can confirm completion');
         }
-
         if ($ride->status !== RideStatus::AWAITING_CONFIRMATION->value) {
-            throw new \Exception('Ride is not awaiting confirmation');
+            throw new \InvalidArgumentException('Ride is not awaiting confirmation');
+        }
+        if ($ride->driver_confirmed_at) {
+            throw new \InvalidArgumentException('Driver has already confirmed this ride');
         }
 
         DB::transaction(function () use ($ride) {
@@ -13838,35 +15291,59 @@ final class RideService
             $ride->save();
         });
 
+        Log::info('Driver confirmed completion', [
+            'ride_id'   => $ride->id,
+            'driver_id' => $driver->id,
+        ]);
+
         $this->checkAndCompleteRide($ride->fresh());
 
         return ['message' => 'Driver confirmation received. Waiting for passenger confirmations.'];
     }
 
     // =========================================================================
-    // CHECK AND COMPLETE
+    // CHECK AND COMPLETE  (called after every confirmation)
     // =========================================================================
 
+    /**
+     * Checks whether all parties have confirmed. When they have:
+     *   1. Release E-PAY escrow â†’ driver (CASH: skip wallet, no-op).
+     *   2. Mark ride FINISHED and all confirmed bookings COMPLETED.
+     *   3. Record +10 score for driver and every confirmed passenger.
+     *   4. Send completion notifications to all parties.
+     *
+     * Idempotent â€” returns immediately if the ride is not in AWAITING_CONFIRMATION
+     * or if not all confirmations are in yet.
+     */
     public function checkAndCompleteRide(Ride $ride): void
     {
-        $confirmedBookings   = $ride->bookings()->where('status', BookingStatus::CONFIRMED->value)->get();
+        if ($ride->status !== RideStatus::AWAITING_CONFIRMATION->value) {
+            return;
+        }
+
+        $confirmedBookings   = $ride->bookings()
+            ->where('status', BookingStatus::CONFIRMED->value)
+            ->with('user')
+            ->get();
+
         $totalPassengers     = $confirmedBookings->count();
         $passengersConfirmed = $confirmedBookings->whereNotNull('passenger_confirmed_at')->count();
 
+        // Guard: not everyone has confirmed yet
         if (!$ride->driver_confirmed_at || $passengersConfirmed < $totalPassengers) {
             return;
         }
 
-        DB::transaction(function () use ($ride, $confirmedBookings) {
-            if (
-                $ride->payment_method === PaymentMethod::E_PAY->value
+        DB::transaction(function () use ($totalPassengers, $ride, $confirmedBookings) {
+            // 1. Release E-PAY earnings from admin escrow â†’ driver's wallet
+            if ($ride->payment_method === PaymentMethod::E_PAY->value
                 && $confirmedBookings->isNotEmpty()
             ) {
                 $this->walletService->releaseEarningsToDriver($ride, $confirmedBookings);
             }
 
-            $ride->status              = RideStatus::FINISHED->value;
-            $ride->passengers_confirmed = true;
+            // 2. Finalise ride and bookings
+            $ride->status = RideStatus::FINISHED->value;
             $ride->save();
 
             $ride->bookings()
@@ -13875,31 +15352,142 @@ final class RideService
                     'status'       => BookingStatus::COMPLETED->value,
                     'completed_at' => now(),
                 ]);
+
+            // 3. Record +10 score for driver + all confirmed passengers.
+            //    Reload ride so bookings reflect COMPLETED status for ScoreService.
+            $freshRide = $ride->fresh(['driver', 'bookings.user']);
+            $this->scoreService->recordRideCompleted($freshRide);
+
+            // 4. Notify driver
+            $totalEarnings = $confirmedBookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
+
+            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
+                $this->notificationService->createNotification(
+                    $ride->driver,
+                    'ride_completed_earnings',
+                    'Payment Released âœ“  +10 pts',
+                    "Ride complete! " . number_format($totalEarnings, 0) . " SYP released to your wallet. "
+                    . "+10 trust points added.",
+                    ['ride_id' => $ride->id, 'total_earnings' => $totalEarnings],
+                    'high', 'ride'
+                );
+            } else {
+                $this->notificationService->createNotification(
+                    $ride->driver,
+                    'ride_completed',
+                    'Ride Completed âœ“  +10 pts',
+                    "Ride from {$ride->pickup_address} to {$ride->destination_address} confirmed complete. "
+                    . "+10 trust points added.",
+                    ['ride_id' => $ride->id],
+                    'normal', 'ride'
+                );
+            }
+
+            // 5. Notify each passenger
+            foreach ($confirmedBookings as $booking) {
+                $this->notificationService->createNotification(
+                    $booking->user,
+                    'ride_completed',
+                    'Ride Completed âœ“  +10 pts',
+                    "Your ride from {$ride->pickup_address} to {$ride->destination_address} is complete. "
+                    . "+10 trust points added to your profile!",
+                    ['ride_id' => $ride->id, 'booking_id' => $booking->id],
+                    'normal', 'ride'
+                );
+            }
+
+            Log::info('Ride fully completed', [
+                'ride_id'     => $ride->id,
+                'passengers'  => $totalPassengers,
+                'earnings'    => $totalEarnings,
+                'payment'     => $ride->payment_method,
+            ]);
         });
+    }
 
-        $totalEarnings = $confirmedBookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
+    // =========================================================================
+    // REPORT DRIVER NO-SHOW  (passenger reports)
+    // =========================================================================
 
-        $this->notificationService->createNotification(
-            $ride->driver,
-            'ride_completed_earnings',
-            'Ride Completed â€“ Payment Released',
-            "Payment of " . number_format($totalEarnings, 0) . " SYP has been released to your wallet.",
-            ['ride_id' => $ride->id, 'total_earnings' => $totalEarnings],
-            'high',
-            'ride'
-        );
+    /**
+     * Passenger reports the driver didn't appear at departure time.
+     *
+     * Wallet (E-PAY only):
+     *   Admin escrow â†’ 100% refund to passenger.
+     *
+     * Score â€” driver:
+     *   âˆ’15 pts ALWAYS (both CASH and E-PAY rides).
+     */
+    public function reportDriverNoShow(int $rideId, User $passenger): array
+    {
+        return DB::transaction(function () use ($rideId, $passenger) {
+            $ride = Ride::lockForUpdate()->findOrFail($rideId);
 
-        foreach ($confirmedBookings as $booking) {
+            if (now()->lessThan(Carbon::parse($ride->departure_time))) {
+                throw new \InvalidArgumentException('Cannot report a no-show before the departure time');
+            }
+
+            // Passenger must have a confirmed booking on this ride
+            $booking = $ride->bookings()
+                ->where('user_id', $passenger->id)
+                ->where('status', BookingStatus::CONFIRMED->value)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$booking) {
+                throw new \InvalidArgumentException('No confirmed booking found for you on this ride');
+            }
+
+            $booking->status = Booking::NO_SHOW;
+            $booking->save();
+
+            // E-PAY: full refund from admin escrow â†’ passenger wallet
+            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
+                $this->walletService->processDriverNoShowRefund($ride, $booking, $passenger);
+            }
+
+            // Score: âˆ’15 to driver â€” always, regardless of payment method
+            $this->scoreService->recordDriverNoShow($ride->driver, $ride);
+
+            // Notify driver
+            $refundNote = $ride->payment_method === PaymentMethod::E_PAY->value
+                ? ' A full refund has been issued to the passenger.'
+                : '';
+
             $this->notificationService->createNotification(
-                $booking->user,
-                'ride_completed',
-                'Ride Completed',
-                "The ride from {$ride->pickup_address} to {$ride->destination_address} has been completed.",
+                $ride->driver,
+                'driver_no_show_reported',
+                'No-Show Reported Against You',
+                "{$passenger->first_name} {$passenger->last_name} reported you as a no-show for the ride "
+                . "from {$ride->pickup_address} to {$ride->destination_address}. "
+                . "Your trust score has been penalised (âˆ’15 pts).{$refundNote}",
                 ['ride_id' => $ride->id, 'booking_id' => $booking->id],
-                'normal',
-                'ride'
+                'high', 'ride'
             );
-        }
+
+            // Notify passenger if there is a refund
+            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
+                $refundAmount = $booking->seats * $ride->price_per_seat;
+
+                $this->notificationService->createNotification(
+                    $passenger,
+                    'driver_no_show_refund',
+                    'Refund Issued âœ“',
+                    "Driver no-show confirmed. A full refund of "
+                    . number_format($refundAmount, 0) . " SYP has been returned to your wallet.",
+                    ['ride_id' => $ride->id, 'booking_id' => $booking->id, 'refund_amount' => $refundAmount],
+                    'high', 'ride'
+                );
+            }
+
+            Log::info('Driver no-show reported', [
+                'ride_id'        => $ride->id,
+                'passenger_id'   => $passenger->id,
+                'payment_method' => $ride->payment_method,
+            ]);
+
+            return ['message' => 'Driver no-show reported. Refund (if applicable) has been processed.'];
+        });
     }
 
     // =========================================================================
@@ -13930,77 +15518,83 @@ final class RideService
     // PRIVATE HELPERS
     // =========================================================================
 
-    private function notifyForConfirmation(Ride $ride): void
+    /**
+     * Notify the driver and every confirmed passenger to confirm completion.
+     */
+    private function notifyAllForConfirmation(Ride $ride): void
     {
+        // Notify driver
         $this->notificationService->createNotification(
             $ride->driver,
-            'driver_confirmation_needed',
+            'confirm_completion_needed',
             'Confirm Ride Completion',
-            "Please confirm you have completed the ride from {$ride->pickup_address} "
-            . "to {$ride->destination_address} to release payment to your wallet.",
+            "Please confirm that the ride from {$ride->pickup_address} to {$ride->destination_address} "
+            . "was completed to release your earnings and earn +10 trust points.",
             ['ride_id' => $ride->id],
-            'high',
-            'ride'
+            'high', 'ride'
         );
 
-        $confirmedBookings = $ride->bookings()
+        // Notify every confirmed passenger
+        $ride->bookings()
             ->where('status', BookingStatus::CONFIRMED->value)
             ->with('user')
-            ->get();
-
-        foreach ($confirmedBookings as $booking) {
-            $this->notificationService->createNotification(
-                $booking->user,
-                'passenger_confirmation_needed',
-                'Confirm Ride Completion',
-                "Please confirm that the ride from {$ride->pickup_address} to "
-                . "{$ride->destination_address} was completed.",
-                ['ride_id' => $ride->id, 'booking_id' => $booking->id],
-                'normal',
-                'ride'
-            );
-        }
+            ->get()
+            ->each(function (Booking $booking) use ($ride) {
+                $this->notificationService->createNotification(
+                    $booking->user,
+                    'confirm_completion_needed',
+                    'Did the Ride Happen?',
+                    "Please confirm that the ride from {$ride->pickup_address} to "
+                    . "{$ride->destination_address} was completed to earn +10 trust points.",
+                    ['ride_id' => $ride->id, 'booking_id' => $booking->id],
+                    'normal', 'ride'
+                );
+            });
     }
 
-    private function notifyRideCancellation(
+    /**
+     * Notify each affected passenger when the driver cancels the entire ride.
+     *
+     * Confirmed + E-PAY: full wallet refund note.
+     * Confirmed + CASH:  no wallet impact note.
+     * Pending:           request cancelled, no payment taken.
+     */
+    private function notifyPassengersOnRideCancelled(
         Ride       $ride,
-        Collection $bookings,
-        \Illuminate\Support\Collection $originalStatuses
+        Collection $confirmedBookings,
+        Collection $pendingBookings
     ): void {
-        foreach ($bookings as $booking) {
-            $wasConfirmed = $originalStatuses[$booking->id] === BookingStatus::CONFIRMED->value;
-            $isEpay       = $ride->payment_method === PaymentMethod::E_PAY->value;
-            $hasRefund    = $wasConfirmed && $isEpay;
-            $refundAmount = $hasRefund ? ($booking->seats * $ride->price_per_seat) : 0;
+        $isEpay = $ride->payment_method === PaymentMethod::E_PAY->value;
 
-            if ($hasRefund) {
-                $title   = 'Ride Cancelled â€“ Full Refund';
-                $message = "The ride from {$ride->pickup_address} to {$ride->destination_address} "
-                    . "has been cancelled by the driver. "
-                    . "A full refund of " . number_format($refundAmount, 0) . " SYP has been issued to your wallet.";
-            } elseif ($wasConfirmed) {
-                $title   = 'Ride Cancelled';
-                $message = "The ride from {$ride->pickup_address} to {$ride->destination_address} "
-                    . "has been cancelled by the driver. As this was a cash booking, no wallet transaction is needed.";
-            } else {
-                $title   = 'Ride Cancelled';
-                $message = "The ride from {$ride->pickup_address} to {$ride->destination_address} "
-                    . "has been cancelled by the driver. Your booking request has been cancelled. No payment was taken.";
-            }
+        foreach ($confirmedBookings as $booking) {
+            $refundAmount = $booking->seats * $ride->price_per_seat;
+            $detail = $isEpay
+                ? "A full refund of " . number_format($refundAmount, 0) . " SYP has been issued to your wallet."
+                : "Cash ride â€” no wallet transaction needed.";
 
             $this->notificationService->createNotification(
                 $booking->user,
-                'ride_cancelled',
-                $title,
-                $message,
+                'ride_cancelled_by_driver',
+                'Ride Cancelled by Driver',
+                "The driver cancelled the ride from {$ride->pickup_address} to {$ride->destination_address}. {$detail}",
                 [
-                    'ride_id'        => $ride->id,
-                    'booking_id'     => $booking->id,
-                    'refund_amount'  => $refundAmount,
-                    'booking_status' => $originalStatuses[$booking->id],
+                    'ride_id'      => $ride->id,
+                    'booking_id'   => $booking->id,
+                    'refund_amount'=> $isEpay ? $refundAmount : 0,
                 ],
-                'high',
-                'ride'
+                'high', 'ride'
+            );
+        }
+
+        foreach ($pendingBookings as $booking) {
+            $this->notificationService->createNotification(
+                $booking->user,
+                'ride_cancelled_by_driver',
+                'Ride Cancelled by Driver',
+                "The ride from {$ride->pickup_address} to {$ride->destination_address} was cancelled. "
+                . "Your pending booking request has been cancelled â€” no payment was taken.",
+                ['ride_id' => $ride->id, 'booking_id' => $booking->id],
+                'normal', 'ride'
             );
         }
     }
@@ -14010,30 +15604,23 @@ final class RideService
 ===== FILE: C:\wamp64\www\4th_year_project\app\Services\Ride\RideValidationService.php =====
 
 <?php
-
 namespace App\Services\Ride;
 
 use App\Models\User;
+use App\Models\UserScore;
 use App\Services\Verification\DocumentVerificationService;
 use Carbon\Carbon;
 
-/**
- * Ride Validation Service
- *
- * All business rule violations throw \InvalidArgumentException so the
- * controller can map them cleanly to 422 responses.
- */
 final class RideValidationService
 {
+    // Score thresholds from SRS v5
+    private const MIN_SCORE_CREATE_RIDE = 50;
+    private const MIN_SCORE_BOOK_RIDE   = 40;
+
     public function __construct(
         private readonly DocumentVerificationService $documentService
     ) {}
 
-    /**
-     * Validate driver can create rides
-     *
-     * @throws \InvalidArgumentException if validation fails
-     */
     public function validateDriverCanCreateRide(User $driver): void
     {
         if (!$driver->is_verified_driver) {
@@ -14045,25 +15632,34 @@ final class RideValidationService
         }
 
         $this->documentService->validateDriverDocuments($driver);
+
+        // Score gate
+        $score = UserScore::where('user_id', $driver->id)->value('score') ?? 70;
+        if ($score < self::MIN_SCORE_CREATE_RIDE) {
+            throw new \InvalidArgumentException(
+                "Your trust score ({$score}) is too low to create rides. " .
+                "Minimum required: " . self::MIN_SCORE_CREATE_RIDE . ". " .
+                "Complete rides without cancelling to raise your score."
+            );
+        }
     }
 
-    /**
-     * Validate passenger can book rides
-     *
-     * @throws \InvalidArgumentException if validation fails
-     */
     public function validatePassengerCanBook(User $passenger): void
     {
         if (!$passenger->is_verified_passenger) {
             throw new \InvalidArgumentException('You must be verified as a passenger to book rides');
         }
+
+        // Score gate
+        $score = UserScore::where('user_id', $passenger->id)->value('score') ?? 70;
+        if ($score < self::MIN_SCORE_BOOK_RIDE) {
+            throw new \InvalidArgumentException(
+                "Your trust score ({$score}) is too low to book rides. " .
+                "Minimum required: " . self::MIN_SCORE_BOOK_RIDE . "."
+            );
+        }
     }
 
-    /**
-     * Validate departure time is acceptable
-     *
-     * @throws \InvalidArgumentException if departure time is invalid
-     */
     public function validateDepartureTime(Carbon $departureTime): void
     {
         $now         = Carbon::now('Asia/Damascus');
@@ -14076,29 +15672,21 @@ final class RideValidationService
             );
         }
 
-        $maxFutureTime = $now->copy()->addDays(30);
-        if ($departureTime->gte($maxFutureTime)) {
+        if ($departureTime->gte($now->copy()->addDays(30))) {
             throw new \InvalidArgumentException(
                 'Departure time cannot be more than 30 days in the future'
             );
         }
     }
 
-    /**
-     * Validate requested seats are available
-     *
-     * @throws \InvalidArgumentException if seat count is invalid
-     */
     public function validateSeatsAvailable(int $requested, int $available): void
     {
         if ($requested < 1) {
             throw new \InvalidArgumentException('Must request at least 1 seat');
         }
-
         if ($requested > 8) {
             throw new \InvalidArgumentException('Cannot request more than 8 seats per booking');
         }
-
         if ($requested > $available) {
             throw new \InvalidArgumentException(
                 "Not enough seats available. Requested: {$requested}, Available: {$available}"
@@ -14106,38 +15694,297 @@ final class RideValidationService
         }
     }
 
-    /**
-     * Validate ride can be cancelled
-     *
-     * @throws \InvalidArgumentException if ride cannot be cancelled
-     */
     public function validateCanCancelRide(Carbon $departureTime): void
     {
-        $now                = Carbon::now('Asia/Damascus');
-        $timeUntilDeparture = $now->diffInHours($departureTime, false);
-
-        if ($timeUntilDeparture < 1) {
+        $now = Carbon::now('Asia/Damascus');
+        if ($now->diffInHours($departureTime, false) < 1) {
             throw new \InvalidArgumentException(
                 'Cannot cancel ride less than 1 hour before departure time'
             );
         }
     }
 
-    /**
-     * Validate booking can be cancelled
-     *
-     * @throws \InvalidArgumentException if booking cannot be cancelled
-     */
     public function validateCanCancelBooking(Carbon $rideDepartureTime): void
     {
-        $now                = Carbon::now('Asia/Damascus');
-        $timeUntilDeparture = $now->diffInHours($rideDepartureTime, false);
-
-        if ($timeUntilDeparture < 2) {
+        $now = Carbon::now('Asia/Damascus');
+        if ($now->diffInHours($rideDepartureTime, false) < 2) {
             throw new \InvalidArgumentException(
                 'Cannot cancel booking less than 2 hours before departure time'
             );
         }
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Services\Score\ScoreService.php =====
+
+<?php
+namespace App\Services\Score;
+
+use App\Domain\Score\ScorePolicyFactory;
+use App\Domain\Score\ScoreResult;
+use App\Enums\ScoreAction;
+use App\Models\Booking;
+use App\Models\Ride;
+use App\Models\ScoreTransaction;
+use App\Models\User;
+use App\Models\UserScore;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class ScoreService
+{
+    public function __construct(
+        private readonly ScorePolicyFactory $policyFactory,
+    ) {}
+
+    // =========================================================================
+    // INITIALIZATION (called by UserObserver on signup)
+    // =========================================================================
+
+    /**
+     * Create UserScore row for a new user with starting score of 70 (Silver tier).
+     * Called once from UserObserver::created().
+     */
+    public function initializeScore(User $user): UserScore
+    {
+        return UserScore::firstOrCreate(
+            ['user_id' => $user->id],
+            ['score' => 70, 'total_rides' => 0, 'total_cancellations' => 0]
+        );
+    }
+
+    // =========================================================================
+    // PUBLIC API
+    // =========================================================================
+
+    /**
+     * Award +10 to the driver and every confirmed passenger when a ride completes.
+     * Applies to both CASH and E-PAY rides.
+     */
+    public function recordRideCompleted(Ride $ride): void
+    {
+        DB::transaction(function () use ($ride) {
+            $this->applyAction(
+                user:      $ride->driver,
+                action:    ScoreAction::RIDE_COMPLETED,
+                reference: $ride,
+                context:   [],
+            );
+            $this->incrementRides($ride->driver);
+
+            $ride->bookings()
+                ->where('status', 'completed')
+                ->with('user')
+                ->get()
+                ->each(function ($booking) use ($ride) {
+                    $this->applyAction(
+                        user:      $booking->user,
+                        action:    ScoreAction::RIDE_COMPLETED,
+                        reference: $ride,
+                        context:   [],
+                    );
+                    $this->incrementRides($booking->user);
+                });
+        });
+    }
+
+    /**
+     * Penalise a passenger who cancelled seat(s).
+     *
+     * CASH rides only â€” for E-PAY rides the wallet time-based refund is the
+     * "penalty"; no score change is applied.
+     */
+    public function recordPassengerCancel(
+        User    $passenger,
+        Booking $booking,
+        float   $elapsedPct,
+        string  $paymentMethod = 'cash',
+    ): void {
+        if ($paymentMethod !== 'cash') {
+            return; // E-PAY: wallet handles the financial penalty, no score change
+        }
+
+        DB::transaction(function () use ($passenger, $booking, $elapsedPct) {
+            $action = ScoreAction::passengerCancelAction($elapsedPct);
+            $this->applyAction(
+                user:      $passenger,
+                action:    $action,
+                reference: $booking,
+                context:   ['elapsed_pct' => $elapsedPct],
+            );
+            $this->incrementCancellations($passenger);
+        });
+    }
+
+    /**
+     * Penalise a passenger marked as no-show.
+     *
+     * CASH rides only: âˆ’15 pts.
+     * E-PAY rides: wallet split handles the penalty (95% driver, 5% SyCash) â€” no score change.
+     */
+    public function recordPassengerNoShow(
+        User    $passenger,
+        Booking $booking,
+        string  $paymentMethod = 'cash',
+    ): void {
+        if ($paymentMethod !== 'cash') {
+            return; // E-PAY: handled via wallet split in WalletTransactionService
+        }
+
+        DB::transaction(function () use ($passenger, $booking) {
+            $this->applyAction(
+                user:      $passenger,
+                action:    ScoreAction::PASSENGER_NO_SHOW,
+                reference: $booking,
+                context:   [],
+            );
+            $this->incrementCancellations($passenger);
+        });
+    }
+
+    /**
+     * Penalise a driver who cancelled a single passenger seat.
+     * âˆ’5 pts always, regardless of payment method or cancel rate.
+     */
+    public function recordDriverCancelSeat(User $driver, Booking $booking): void
+    {
+        DB::transaction(function () use ($driver, $booking) {
+            $this->applyAction(
+                user:      $driver,
+                action:    ScoreAction::DRIVER_CANCEL_SEAT,
+                reference: $booking,
+                context:   [],
+            );
+        });
+    }
+
+    /**
+     * Penalise a driver who cancelled their entire ride.
+     * Applies to both CASH and E-PAY rides.
+     * Tier: 0â€“30% = 0pts, 30â€“50% = âˆ’7pts, 50â€“100% = âˆ’12pts; â‰¥50% cancel rate â†’ âˆ’15 always.
+     */
+    public function recordDriverCancelRide(
+        User  $driver,
+        Ride  $ride,
+        float $elapsedPct,
+    ): void {
+        DB::transaction(function () use ($driver, $ride, $elapsedPct) {
+            $action = ScoreAction::driverCancelRideAction($elapsedPct);
+            $this->applyAction(
+                user:      $driver,
+                action:    $action,
+                reference: $ride,
+                context:   ['elapsed_pct' => $elapsedPct],
+            );
+            $this->incrementCancellations($driver);
+        });
+    }
+
+    /**
+     * Penalise a driver who was marked as no-show.
+     * âˆ’15 pts always for BOTH cash and e-pay rides.
+     */
+    public function recordDriverNoShow(User $driver, Ride $ride): void
+    {
+        DB::transaction(function () use ($driver, $ride) {
+            $this->applyAction(
+                user:      $driver,
+                action:    ScoreAction::DRIVER_NO_SHOW,
+                reference: $ride,
+                context:   [],
+            );
+            $this->incrementCancellations($driver);
+        });
+    }
+
+    // =========================================================================
+    // READ
+    // =========================================================================
+
+    public function getScore(User $user): UserScore
+    {
+        return UserScore::firstOrCreate(
+            ['user_id' => $user->id],
+            ['score' => 70, 'total_rides' => 0, 'total_cancellations' => 0],
+        );
+    }
+
+    public function getHistory(User $user, int $limit = 20): \Illuminate\Database\Eloquent\Collection
+    {
+        return ScoreTransaction::where('user_id', $user->id)
+            ->orderByDesc('created_at')
+            ->limit($limit)
+            ->get();
+    }
+
+    // =========================================================================
+    // HELPERS
+    // =========================================================================
+
+    /** Calculate elapsed percentage from ride/booking creation to departure time. */
+    public static function calculateElapsedPct(
+        \Carbon\Carbon $createdAt,
+        \Carbon\Carbon $departureTime,
+    ): float {
+        $now            = now();
+        $totalMinutes   = $createdAt->diffInMinutes($departureTime);
+        $elapsedMinutes = $createdAt->diffInMinutes($now);
+
+        return $totalMinutes > 0
+            ? min(100, round(($elapsedMinutes / $totalMinutes) * 100, 2))
+            : 100.0;
+    }
+
+    // =========================================================================
+    // PRIVATE
+    // =========================================================================
+
+    private function applyAction(
+        User        $user,
+        ScoreAction $action,
+        object      $reference,
+        array       $context,
+    ): ScoreResult {
+        $userScore = $this->getScore($user);
+        $policy    = $this->policyFactory->make($action);
+        $result    = $policy->calculate($action, $userScore, $context);
+
+        $previousScore = $userScore->score;
+        $userScore->applyDelta($result->points);
+
+        ScoreTransaction::create([
+            'user_id'                  => $user->id,
+            'action'                   => $result->action->value,
+            'points'                   => $result->points,
+            'previous_score'           => $previousScore,
+            'new_score'                => $userScore->score,
+            'reference_type'           => get_class($reference),
+            'reference_id'             => $reference->id,
+            'reason'                   => $result->reason,
+            'high_cancel_rate_applied' => $result->highCancelRateApplied,
+            'metadata'                 => array_merge($context, $result->toArray()),
+        ]);
+
+        Log::info('Score applied', [
+            'user_id'        => $user->id,
+            'action'         => $action->value,
+            'points'         => $result->points,
+            'previous_score' => $previousScore,
+            'new_score'      => $userScore->score,
+        ]);
+
+        return $result;
+    }
+
+    private function incrementRides(User $user): void
+    {
+        $this->getScore($user)->incrementRides();
+    }
+
+    private function incrementCancellations(User $user): void
+    {
+        $this->getScore($user)->incrementCancellations();
     }
 }
 
@@ -14304,6 +16151,132 @@ final class DocumentVerificationService
     public function getRequiredPassengerDocumentTypes(): array
     {
         return self::REQUIRED_PASSENGER_DOCUMENTS;
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Services\EmailOtpService.php =====
+
+<?php
+namespace App\Services;
+
+use App\DTOs\Auth\SendEmailOtpDTO;
+use App\DTOs\Auth\VerifyEmailOtpDTO;
+use App\Interfaces\EmailOtpServiceInterface;
+use App\Interfaces\OtpRepositoryInterface;
+use App\Mail\OtpVerificationMail;
+use App\Models\Otp;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+
+final class EmailOtpService implements EmailOtpServiceInterface
+{
+    private const EXPIRY_MINUTES    = 10;
+    private const MAX_ATTEMPTS      = 3;
+    private const RATE_LIMIT_WINDOW = 5;
+
+    public function __construct(
+        private readonly OtpRepositoryInterface $otpRepository,
+    ) {}
+
+    public function sendOtp(SendEmailOtpDTO $dto): array
+    {
+        try {
+            $identifier = $dto->email->address();
+
+            if ($this->isRateLimited($identifier)) {
+                return [
+                    'success' => false,
+                    'message' => 'Too many requests. Please wait a few minutes.',
+                ];
+            }
+
+            $this->otpRepository->deleteByPhone($identifier);
+
+            $otpCode = Otp::generateCode();
+
+            $otp = $this->otpRepository->create([
+                'phone_number' => $identifier,
+                'otp_code'     => $otpCode,
+                'type'         => $dto->type,
+                'expires_at'   => Carbon::now()->addMinutes(self::EXPIRY_MINUTES),
+                'is_verified'  => false,
+                'attempts'     => 0,
+            ]);
+
+            if ($this->isTestingMode()) {
+                Log::info("Email OTP (testing) for {$identifier}: {$otpCode}");
+                return [
+                    'success'    => true,
+                    'message'    => 'OTP generated (testing mode).',
+                    'otp_code'   => $otpCode,
+                    'expires_at' => $otp->expires_at->toDateTimeString(),
+                ];
+            }
+
+            Mail::to($identifier)->send(
+                new OtpVerificationMail($otpCode, $dto->userName, self::EXPIRY_MINUTES)
+            );
+
+            Log::info("Email OTP sent to {$identifier}");
+
+            return [
+                'success'    => true,
+                'message'    => 'Verification code sent to your email.',
+                'expires_at' => $otp->expires_at->toDateTimeString(),
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("EmailOtpService::sendOtp failed: {$e->getMessage()}");
+            return [
+                'success' => false,
+                'message' => 'Failed to send verification email. Please try again.',
+            ];
+        }
+    }
+
+    public function verifyOtp(VerifyEmailOtpDTO $dto): array
+    {
+        try {
+            $identifier = $dto->email->address();
+
+            $otp = $this->otpRepository->findByPhoneAndCode(
+                $identifier,
+                $dto->otpCode
+            );
+
+            if (!$otp || !$otp->isValid()) {
+                return [
+                    'success' => false,
+                    'message' => 'Invalid or expired verification code.',
+                ];
+            }
+
+            $otp->markAsVerified();
+
+            return [
+                'success'     => true,
+                'message'     => 'Email verified successfully.',
+                'verified_at' => $otp->verified_at->toDateTimeString(),
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("EmailOtpService::verifyOtp failed: {$e->getMessage()}");
+            return ['success' => false, 'message' => 'Verification failed.'];
+        }
+    }
+
+    private function isRateLimited(string $identifier): bool
+    {
+        return $this->otpRepository->getRecentAttempts(
+                $identifier,
+                self::RATE_LIMIT_WINDOW
+            ) >= self::MAX_ATTEMPTS;
+    }
+
+    private function isTestingMode(): bool {
+        return env('EMAIL_OTP_MODE', 'production') === 'testing';
     }
 }
 
@@ -15156,78 +17129,85 @@ class WhatsAppOtpService
 ===== FILE: C:\wamp64\www\4th_year_project\bootstrap\cache\packages.php =====
 
 <?php return array (
-  'laravel/sail' =>
+  'laravel/sail' => 
   array (
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Laravel\\Sail\\SailServiceProvider',
     ),
   ),
-  'laravel/sanctum' =>
+  'laravel/sanctum' => 
   array (
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Laravel\\Sanctum\\SanctumServiceProvider',
     ),
   ),
-  'laravel/socialite' =>
+  'laravel/socialite' => 
   array (
-    'aliases' =>
+    'aliases' => 
     array (
       'Socialite' => 'Laravel\\Socialite\\Facades\\Socialite',
     ),
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Laravel\\Socialite\\SocialiteServiceProvider',
     ),
   ),
-  'laravel/tinker' =>
+  'laravel/tinker' => 
   array (
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Laravel\\Tinker\\TinkerServiceProvider',
     ),
   ),
-  'nesbot/carbon' =>
+  'nesbot/carbon' => 
   array (
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Carbon\\Laravel\\ServiceProvider',
     ),
   ),
-  'nunomaduro/collision' =>
+  'nunomaduro/collision' => 
   array (
-    'providers' =>
+    'providers' => 
     array (
       0 => 'NunoMaduro\\Collision\\Adapters\\Laravel\\CollisionServiceProvider',
     ),
   ),
-  'nunomaduro/termwind' =>
+  'nunomaduro/termwind' => 
   array (
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Termwind\\Laravel\\TermwindServiceProvider',
     ),
   ),
-  'php-open-source-saver/jwt-auth' =>
+  'php-open-source-saver/jwt-auth' => 
   array (
-    'aliases' =>
+    'aliases' => 
     array (
       'JWTAuth' => 'PHPOpenSourceSaver\\JWTAuth\\Facades\\JWTAuth',
       'JWTFactory' => 'PHPOpenSourceSaver\\JWTAuth\\Facades\\JWTFactory',
     ),
-    'providers' =>
+    'providers' => 
     array (
       0 => 'PHPOpenSourceSaver\\JWTAuth\\Providers\\LaravelServiceProvider',
     ),
   ),
-  'spatie/laravel-ignition' =>
+  'resend/resend-laravel' => 
   array (
-    'aliases' =>
+    'providers' => 
+    array (
+      0 => 'Resend\\Laravel\\ResendServiceProvider',
+    ),
+  ),
+  'spatie/laravel-ignition' => 
+  array (
+    'aliases' => 
     array (
       'Flare' => 'Spatie\\LaravelIgnition\\Facades\\Flare',
     ),
-    'providers' =>
+    'providers' => 
     array (
       0 => 'Spatie\\LaravelIgnition\\IgnitionServiceProvider',
     ),
@@ -15238,7 +17218,7 @@ class WhatsAppOtpService
 ===== FILE: C:\wamp64\www\4th_year_project\bootstrap\cache\services.php =====
 
 <?php return array (
-  'providers' =>
+  'providers' => 
   array (
     0 => 'Illuminate\\Auth\\AuthServiceProvider',
     1 => 'Illuminate\\Broadcasting\\BroadcastServiceProvider',
@@ -15270,13 +17250,14 @@ class WhatsAppOtpService
     27 => 'NunoMaduro\\Collision\\Adapters\\Laravel\\CollisionServiceProvider',
     28 => 'Termwind\\Laravel\\TermwindServiceProvider',
     29 => 'PHPOpenSourceSaver\\JWTAuth\\Providers\\LaravelServiceProvider',
-    30 => 'Spatie\\LaravelIgnition\\IgnitionServiceProvider',
-    31 => 'App\\Providers\\AppServiceProvider',
-    32 => 'App\\Providers\\AuthServiceProvider',
-    33 => 'App\\Providers\\EventServiceProvider',
-    34 => 'App\\Providers\\RouteServiceProvider',
+    30 => 'Resend\\Laravel\\ResendServiceProvider',
+    31 => 'Spatie\\LaravelIgnition\\IgnitionServiceProvider',
+    32 => 'App\\Providers\\AppServiceProvider',
+    33 => 'App\\Providers\\AuthServiceProvider',
+    34 => 'App\\Providers\\EventServiceProvider',
+    35 => 'App\\Providers\\RouteServiceProvider',
   ),
-  'eager' =>
+  'eager' => 
   array (
     0 => 'Illuminate\\Auth\\AuthServiceProvider',
     1 => 'Illuminate\\Cookie\\CookieServiceProvider',
@@ -15293,13 +17274,14 @@ class WhatsAppOtpService
     12 => 'NunoMaduro\\Collision\\Adapters\\Laravel\\CollisionServiceProvider',
     13 => 'Termwind\\Laravel\\TermwindServiceProvider',
     14 => 'PHPOpenSourceSaver\\JWTAuth\\Providers\\LaravelServiceProvider',
-    15 => 'Spatie\\LaravelIgnition\\IgnitionServiceProvider',
-    16 => 'App\\Providers\\AppServiceProvider',
-    17 => 'App\\Providers\\AuthServiceProvider',
-    18 => 'App\\Providers\\EventServiceProvider',
-    19 => 'App\\Providers\\RouteServiceProvider',
+    15 => 'Resend\\Laravel\\ResendServiceProvider',
+    16 => 'Spatie\\LaravelIgnition\\IgnitionServiceProvider',
+    17 => 'App\\Providers\\AppServiceProvider',
+    18 => 'App\\Providers\\AuthServiceProvider',
+    19 => 'App\\Providers\\EventServiceProvider',
+    20 => 'App\\Providers\\RouteServiceProvider',
   ),
-  'deferred' =>
+  'deferred' => 
   array (
     'Illuminate\\Broadcasting\\BroadcastManager' => 'Illuminate\\Broadcasting\\BroadcastServiceProvider',
     'Illuminate\\Contracts\\Broadcasting\\Factory' => 'Illuminate\\Broadcasting\\BroadcastServiceProvider',
@@ -15445,51 +17427,51 @@ class WhatsAppOtpService
     'Laravel\\Socialite\\Contracts\\Factory' => 'Laravel\\Socialite\\SocialiteServiceProvider',
     'command.tinker' => 'Laravel\\Tinker\\TinkerServiceProvider',
   ),
-  'when' =>
+  'when' => 
   array (
-    'Illuminate\\Broadcasting\\BroadcastServiceProvider' =>
+    'Illuminate\\Broadcasting\\BroadcastServiceProvider' => 
     array (
     ),
-    'Illuminate\\Bus\\BusServiceProvider' =>
+    'Illuminate\\Bus\\BusServiceProvider' => 
     array (
     ),
-    'Illuminate\\Cache\\CacheServiceProvider' =>
+    'Illuminate\\Cache\\CacheServiceProvider' => 
     array (
     ),
-    'Illuminate\\Foundation\\Providers\\ConsoleSupportServiceProvider' =>
+    'Illuminate\\Foundation\\Providers\\ConsoleSupportServiceProvider' => 
     array (
     ),
-    'Illuminate\\Hashing\\HashServiceProvider' =>
+    'Illuminate\\Hashing\\HashServiceProvider' => 
     array (
     ),
-    'Illuminate\\Mail\\MailServiceProvider' =>
+    'Illuminate\\Mail\\MailServiceProvider' => 
     array (
     ),
-    'Illuminate\\Auth\\Passwords\\PasswordResetServiceProvider' =>
+    'Illuminate\\Auth\\Passwords\\PasswordResetServiceProvider' => 
     array (
     ),
-    'Illuminate\\Pipeline\\PipelineServiceProvider' =>
+    'Illuminate\\Pipeline\\PipelineServiceProvider' => 
     array (
     ),
-    'Illuminate\\Queue\\QueueServiceProvider' =>
+    'Illuminate\\Queue\\QueueServiceProvider' => 
     array (
     ),
-    'Illuminate\\Redis\\RedisServiceProvider' =>
+    'Illuminate\\Redis\\RedisServiceProvider' => 
     array (
     ),
-    'Illuminate\\Translation\\TranslationServiceProvider' =>
+    'Illuminate\\Translation\\TranslationServiceProvider' => 
     array (
     ),
-    'Illuminate\\Validation\\ValidationServiceProvider' =>
+    'Illuminate\\Validation\\ValidationServiceProvider' => 
     array (
     ),
-    'Laravel\\Sail\\SailServiceProvider' =>
+    'Laravel\\Sail\\SailServiceProvider' => 
     array (
     ),
-    'Laravel\\Socialite\\SocialiteServiceProvider' =>
+    'Laravel\\Socialite\\SocialiteServiceProvider' => 
     array (
     ),
-    'Laravel\\Tinker\\TinkerServiceProvider' =>
+    'Laravel\\Tinker\\TinkerServiceProvider' => 
     array (
     ),
   ),
@@ -16615,7 +18597,10 @@ return [
             'timeout' => null,
             'local_domain' => env('MAIL_EHLO_DOMAIN'),
         ],
-
+       /* 'resend' => [
+            'transport' => 'resend',
+        ],
+*/
         'ses' => [
             'transport' => 'ses',
         ],
@@ -18545,6 +20530,128 @@ return new class extends Migration
 };
 
 
+===== FILE: C:\wamp64\www\4th_year_project\database\migrations\2026_04_19_014226_increase_phone_number_length_in_otps_table.php =====
+
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        // Drop any indexes on phone_number first
+        try {
+            DB::statement('ALTER TABLE otps DROP INDEX otps_phone_number_index');
+        } catch (\Exception $e) {
+            // Index may have a different name, try common alternatives
+        }
+        try {
+            DB::statement('ALTER TABLE otps DROP INDEX phone_number');
+        } catch (\Exception $e) {}
+
+        // Resize the column
+        DB::statement('ALTER TABLE otps MODIFY phone_number VARCHAR(191) NOT NULL');
+
+        // Recreate index with prefix length (191 = safe limit for utf8mb4)
+        DB::statement('ALTER TABLE otps ADD INDEX otps_phone_number_index (phone_number(191))');
+    }
+
+    public function down(): void
+    {
+        try {
+            DB::statement('ALTER TABLE otps DROP INDEX otps_phone_number_index');
+        } catch (\Exception $e) {}
+
+        DB::statement('ALTER TABLE otps MODIFY phone_number VARCHAR(20) NOT NULL');
+
+        DB::statement('ALTER TABLE otps ADD INDEX otps_phone_number_index (phone_number)');
+    }
+};
+
+
+===== FILE: C:\wamp64\www\4th_year_project\database\migrations\2026_04_19_014626_add_email_verification_to_otps_type_column.php =====
+
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\DB;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        DB::statement("ALTER TABLE otps MODIFY type ENUM(
+            'E-PAYMENT',
+            'WALLET_CREATION',
+            'registration',
+            'login',
+            'password_reset',
+            'EMAIL_VERIFICATION'
+        ) NOT NULL");
+    }
+
+    public function down(): void
+    {
+        DB::statement("ALTER TABLE otps MODIFY type ENUM(
+            'E-PAYMENT',
+            'WALLET_CREATION',
+            'registration',
+            'login',
+            'password_reset'
+        ) NOT NULL");
+    }
+};
+
+
+===== FILE: C:\wamp64\www\4th_year_project\database\migrations\2026_04_19_183606_create_user_scores_table.php =====
+
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('user_scores', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->integer('score')->default(70);
+            $table->integer('total_rides')->default(0);
+            $table->integer('total_cancellations')->default(0);
+            $table->timestamps();
+        });
+
+        Schema::create('score_transactions', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->string('action');
+            $table->integer('points');
+            $table->integer('previous_score');
+            $table->integer('new_score');
+            $table->string('reference_type')->nullable();
+            $table->unsignedBigInteger('reference_id')->nullable();
+            $table->string('reason')->nullable();
+            $table->boolean('high_cancel_rate_applied')->default(false);
+            $table->json('metadata')->nullable();
+            $table->timestamp('created_at')->useCurrent();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('score_transactions');
+        Schema::dropIfExists('user_scores');
+    }
+};
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\database\seeders\DatabaseSeeder.php =====
 
 <?php
@@ -18936,6 +21043,98 @@ export const messaging = getMessaging(app);
 </html>
 
 
+===== FILE: C:\wamp64\www\4th_year_project\resources\views\emails\otp-verification.blade.php =====
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Atarikak Verification Code</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,sans-serif;">
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;padding:40px 0;">
+    <tr>
+        <td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.1);">
+
+                {{-- Header --}}
+                <tr>
+                    <td align="center" style="background-color:#253c5b;padding:40px 30px;">
+                        <h1 style="color:#ed8b10;margin:0;font-size:32px;font-weight:bold;letter-spacing:2px;">
+                            ATARIKAK
+                        </h1>
+                        <p style="color:#ffffff;margin:8px 0 0;font-size:14px;opacity:0.8;">
+                            Ride Sharing Platform
+                        </p>
+                    </td>
+                </tr>
+
+                {{-- Body --}}
+                <tr>
+                    <td style="padding:40px 30px;">
+                        <h2 style="color:#253c5b;margin:0 0 20px;font-size:24px;">
+                            Email Verification
+                        </h2>
+                        <p style="color:#555555;font-size:16px;line-height:1.6;margin:0 0 30px;">
+                            Hi <strong>{{ $userName }}</strong>,
+                        </p>
+                        <p style="color:#555555;font-size:16px;line-height:1.6;margin:0 0 30px;">
+                            Your Atarikak verification code is:
+                        </p>
+
+                        {{-- OTP Box --}}
+                        <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 30px;">
+                            <tr>
+                                <td align="center">
+                                    <div style="background-color:#253c5b;border-left:4px solid #ed8b10;border-radius:8px;padding:25px;display:inline-block;min-width:200px;">
+                                            <span style="font-size:42px;font-weight:bold;color:#ed8b10;letter-spacing:10px;">
+                                                {{ $otpCode }}
+                                            </span>
+                                    </div>
+                                </td>
+                            </tr>
+                        </table>
+
+                        <p style="color:#555555;font-size:14px;line-height:1.6;margin:0 0 10px;">
+                            â± This code expires in <strong>{{ $expiryMinutes }} minutes</strong>.
+                        </p>
+                        <p style="color:#555555;font-size:14px;line-height:1.6;margin:0;">
+                            ðŸ”’ Do not share this code with anyone.
+                        </p>
+                    </td>
+                </tr>
+
+                {{-- Divider --}}
+                <tr>
+                    <td style="padding:0 30px;">
+                        <hr style="border:none;border-top:1px solid #eeeeee;margin:0;">
+                    </td>
+                </tr>
+
+                {{-- Footer --}}
+                <tr>
+                    <td align="center" style="padding:30px;background-color:#f9f9f9;">
+                        <p style="color:#555555;font-size:14px;margin:0 0 5px;">
+                            Thanks,<br>
+                            <strong style="color:#253c5b;">Atarikak Team</strong>
+                        </p>
+                        <p style="color:#aaaaaa;font-size:12px;margin:15px 0 0;">
+                            Â© 2026 Atarikak. All rights reserved.
+                        </p>
+                    </td>
+                </tr>
+
+            </table>
+        </td>
+    </tr>
+</table>
+
+</body>
+</html>
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\resources\views\welcome.blade.php =====
 
 <!DOCTYPE html>
@@ -19081,9 +21280,11 @@ use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
+use App\Http\Controllers\API\EmailVerificationController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\OtpController;
 use App\Http\Controllers\API\RideController;
+use App\Http\Controllers\API\ScoreController;
 use App\Http\Controllers\API\TextMeOtpController;
 use App\Http\Controllers\API\VerificationController;
 use App\Http\Controllers\API\SignupController;
@@ -19146,6 +21347,12 @@ Route::prefix('auth')->group(function () {
     Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
     Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
     Route::post('/refresh', RefreshTokenController::class);
+});
+Route::prefix('email-verification')->group(function () {
+    // Public â€” no auth needed
+    Route::post('/send',   [EmailVerificationController::class, 'send']);
+    Route::post('/verify', [EmailVerificationController::class, 'verify']);
+    Route::post('/resend', [EmailVerificationController::class, 'resend']);
 });
 
 // ========================================
@@ -19226,6 +21433,13 @@ Route::middleware('jwt.auth')->group(function () {
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
         Route::get('/balance', [WalletController::class, 'getBalance']);
     });
+    Route::get('/score',         [ScoreController::class, 'show']);
+    Route::get('/score/history', [ScoreController::class, 'history']);
+
+    // --- No-show reporting ---
+    Route::post('/bookings/{bookingId}/passenger-no-show', [RideController::class, 'reportPassengerNoShow']);
+    Route::post('/rides/{rideId}/driver-no-show',          [RideController::class, 'reportDriverNoShow']);
+
 });
 
 

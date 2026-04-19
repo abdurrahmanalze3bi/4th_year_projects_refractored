@@ -791,4 +791,126 @@ class WalletTransactionService
             throw new \RuntimeException($message);
         }
     }
+
+    // =========================================================================
+// PASSENGER NO-SHOW (E-PAY only)
+// =========================================================================
+    /**
+     * Passenger didn't show up — E-PAY ride.
+     * Admin escrow → 95% Driver, 5% SyCash. Passenger gets 0%.
+     */
+    public function processPassengerNoShow(Booking $booking, Ride $ride, User $passenger): void
+    {
+        $totalAmount  = $booking->seats * $ride->price_per_seat;
+        $driverShare  = round($totalAmount * 0.95, 2);
+        $syCashShare  = round($totalAmount * 0.05, 2);
+
+        $adminWallet  = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $driverWallet = $this->lockWalletByUserId($ride->driver_id);
+        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
+
+        $this->assertSufficientBalance($adminWallet, $totalAmount,
+            "Insufficient admin balance for no-show settlement. Required: {$totalAmount}");
+
+        $adminPrev  = $adminWallet->balance;
+        $driverPrev = $driverWallet->balance;
+        $syCashPrev = $syCashWallet->balance;
+
+        $adminWallet->balance  -= $totalAmount;
+        $driverWallet->balance += $driverShare;
+        $syCashWallet->balance += $syCashShare;
+
+        $adminWallet->save();
+        $driverWallet->save();
+        $syCashWallet->save();
+
+        $txId = 'PASS_NOSHOW_' . time() . '_' . Str::random(6);
+
+        WalletTransaction::create([
+            'wallet_id' => $adminWallet->id, 'user_id' => $adminWallet->user_id,
+            'type' => 'passenger_no_show_settlement', 'amount' => -$totalAmount,
+            'previous_balance' => $adminPrev, 'new_balance' => $adminWallet->balance,
+            'description' => "Passenger no-show: {$booking->seats} seat(s) settled",
+            'transaction_id' => 'ADMIN_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id,
+                'driver_share' => $driverShare, 'sycash_share' => $syCashShare],
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id' => $driverWallet->id, 'user_id' => $ride->driver_id,
+            'type' => 'passenger_no_show_earning', 'amount' => $driverShare,
+            'previous_balance' => $driverPrev, 'new_balance' => $driverWallet->balance,
+            'description' => "No-show compensation: passenger absent ({$booking->seats} seat(s))",
+            'transaction_id' => 'DRIVER_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id' => $syCashWallet->id, 'user_id' => $syCashWallet->user_id,
+            'type' => 'passenger_no_show_fee', 'amount' => $syCashShare,
+            'previous_balance' => $syCashPrev, 'new_balance' => $syCashWallet->balance,
+            'description' => "No-show platform fee (5%): booking #{$booking->id}",
+            'transaction_id' => 'SYCASH_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
+        ]);
+
+        Log::info('Passenger no-show settled (E-PAY)', [
+            'booking_id'   => $booking->id,
+            'driver_share' => $driverShare,
+            'sycash_share' => $syCashShare,
+        ]);
+    }
+
+// =========================================================================
+// DRIVER NO-SHOW (E-PAY only)
+// =========================================================================
+    /**
+     * Driver didn't show up — E-PAY ride.
+     * Admin escrow → 100% refund to passenger.
+     */
+    public function processDriverNoShowRefund(Ride $ride, Booking $booking, User $passenger): void
+    {
+        $refundAmount    = $booking->seats * $ride->price_per_seat;
+        $adminWallet     = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $passengerWallet = $this->lockWalletByUserId($passenger->id);
+
+        $this->assertSufficientBalance($adminWallet, $refundAmount,
+            "Insufficient admin balance for driver no-show refund. Required: {$refundAmount}");
+
+        $adminPrev     = $adminWallet->balance;
+        $passengerPrev = $passengerWallet->balance;
+
+        $adminWallet->balance     -= $refundAmount;
+        $passengerWallet->balance += $refundAmount;
+
+        $adminWallet->save();
+        $passengerWallet->save();
+
+        $txId = 'DRIVER_NOSHOW_' . time() . '_' . Str::random(6);
+
+        WalletTransaction::create([
+            'wallet_id' => $adminWallet->id, 'user_id' => $adminWallet->user_id,
+            'type' => 'driver_no_show_refund', 'amount' => -$refundAmount,
+            'previous_balance' => $adminPrev, 'new_balance' => $adminWallet->balance,
+            'description' => "Driver no-show: full refund to passenger for booking #{$booking->id}",
+            'transaction_id' => 'ADMIN_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id' => $passengerWallet->id, 'user_id' => $passenger->id,
+            'type' => 'driver_no_show_refund', 'amount' => $refundAmount,
+            'previous_balance' => $passengerPrev, 'new_balance' => $passengerWallet->balance,
+            'description' => "Full refund — driver no-show: {$ride->pickup_address} → {$ride->destination_address}",
+            'transaction_id' => 'PASS_' . $txId, 'status' => 'completed',
+            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id,
+                'refund_reason' => 'driver_no_show'],
+        ]);
+
+        Log::info('Driver no-show refund processed', [
+            'booking_id'    => $booking->id,
+            'passenger_id'  => $passenger->id,
+            'refund_amount' => $refundAmount,
+        ]);
+    }
 }

@@ -15,6 +15,7 @@ use App\Services\Ride\RideService;
 use App\Services\Ride\BookingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use App\Services\Score\ScoreService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
@@ -55,10 +56,15 @@ class RideController extends Controller
                 'message' => 'Ride created successfully'
             ], 201);
         } catch (\Exception $e) {
+            // In create() method, change the return to:
+            $score = app(ScoreService::class)->getScore($request->user());
+
             return response()->json([
-                'success' => false,
-                'message' => $e->getMessage()
-            ], 422);
+                'success' => true,
+                'data'    => new RideResource($ride),
+                'message' => 'Ride created successfully',
+                'driver_score' => ScoreController::formatScore($score),
+            ], 201);
         }
     }
 
@@ -746,4 +752,31 @@ class RideController extends Controller
             'data'    => BookingResource::collection($bookings),
         ]);
     }
+
+
+
+    public function reportPassengerNoShow(Request $request, int $bookingId): JsonResponse
+    {
+        try {
+            $result = $this->bookingService->reportPassengerNoShow($bookingId, $request->user());
+            return response()->json(['status' => 'success', 'message' => $result['message']]);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * Passenger reports driver as no-show.
+     * POST /rides/{rideId}/driver-no-show
+     */
+    public function reportDriverNoShow(Request $request, int $rideId): JsonResponse
+    {
+        try {
+            $result = $this->rideService->reportDriverNoShow($rideId, $request->user());
+            return response()->json(['status' => 'success', 'message' => $result['message']]);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        }
+    }
+
 }

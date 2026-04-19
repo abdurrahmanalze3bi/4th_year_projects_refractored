@@ -4,9 +4,11 @@ use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
+use App\Http\Controllers\API\EmailVerificationController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\OtpController;
 use App\Http\Controllers\API\RideController;
+use App\Http\Controllers\API\ScoreController;
 use App\Http\Controllers\API\TextMeOtpController;
 use App\Http\Controllers\API\VerificationController;
 use App\Http\Controllers\API\SignupController;
@@ -69,6 +71,12 @@ Route::prefix('auth')->group(function () {
     Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
     Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
     Route::post('/refresh', RefreshTokenController::class);
+});
+Route::prefix('email-verification')->group(function () {
+    // Public — no auth needed
+    Route::post('/send',   [EmailVerificationController::class, 'send']);
+    Route::post('/verify', [EmailVerificationController::class, 'verify']);
+    Route::post('/resend', [EmailVerificationController::class, 'resend']);
 });
 
 // ========================================
@@ -149,4 +157,11 @@ Route::middleware('jwt.auth')->group(function () {
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
         Route::get('/balance', [WalletController::class, 'getBalance']);
     });
+    Route::get('/score',         [ScoreController::class, 'show']);
+    Route::get('/score/history', [ScoreController::class, 'history']);
+
+    // --- No-show reporting ---
+    Route::post('/bookings/{bookingId}/passenger-no-show', [RideController::class, 'reportPassengerNoShow']);
+    Route::post('/rides/{rideId}/driver-no-show',          [RideController::class, 'reportDriverNoShow']);
+
 });

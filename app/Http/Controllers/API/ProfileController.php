@@ -8,6 +8,7 @@ use App\Services\Profile\ProfileUpdateService;
 use App\Services\Profile\ProfileInteractionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use App\Http\Controllers\API\ScoreController;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -232,6 +233,11 @@ class ProfileController extends Controller
             'smoking' => $profile->smoking,
             'number_of_rides' => $profile->number_of_rides,
             'documents' => $docs,
+            'score' => (function () use ($user) {
+                $scoreService = app(\App\Services\Score\ScoreService::class);
+                $userScore    = $scoreService->getScore($user);
+                return ScoreController::formatScore($userScore);
+            })(),
             'comments' => $comments,
             'rating' => $ratingStats,
         ];
