@@ -17,10 +17,14 @@ use App\Models\UserScore;
  *  50–100 %    |      −12 pts        |      −15 pts
  *
  * When cancel rate ≥ 50 %, the rate always overrides the time tier.
+ * The high-rate override only activates after MIN_INTERACTIONS total
+ * rides+cancellations, preventing new users from being penalised on
+ * their very first cancellation.
  */
 final class DriverCancelRidePolicy implements ScorePolicyInterface
 {
     private const HIGH_RATE_THRESHOLD = 50.0; // ≥ 50 % triggers the override
+    private const MIN_INTERACTIONS    = 5;    // cancel rate only counts after this many total rides+cancellations
 
     private const BASE_POINTS = [
         'driver_cancel_ride_early' => 0,
@@ -41,13 +45,15 @@ final class DriverCancelRidePolicy implements ScorePolicyInterface
 
     public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
     {
-        $highRate = $userScore->cancel_rate >= self::HIGH_RATE_THRESHOLD;
+        $totalInteractions = $userScore->total_rides + $userScore->total_cancellations;
+        $highRate = $totalInteractions >= self::MIN_INTERACTIONS
+            && $userScore->cancel_rate >= self::HIGH_RATE_THRESHOLD;
 
         if ($highRate) {
             return ScoreResult::of(
                 points: self::HIGH_RATE_POINTS,
                 action: $action,
-                reason: "Driver cancelled ride ({$action->label()}) — high cancel rate overrides time tier",
+                reason: "Driver cancelled ride ({$action->label()}) – high cancel rate overrides time tier",
                 highCancelRateApplied: true,
             );
         }
@@ -57,7 +63,7 @@ final class DriverCancelRidePolicy implements ScorePolicyInterface
         return ScoreResult::of(
             points: $points,
             action: $action,
-            reason: "Driver cancelled ride ({$action->label()})" . ($points === 0 ? ' — no penalty' : ''),
+            reason: "Driver cancelled ride ({$action->label()})" . ($points === 0 ? ' – no penalty' : ''),
         );
     }
 }

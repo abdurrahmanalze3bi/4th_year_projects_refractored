@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Mail;
 
 use Illuminate\Bus\Queueable;
@@ -10,15 +11,22 @@ final class OtpVerificationMail extends Mailable
     use Queueable, SerializesModels;
 
     public function __construct(
-        public readonly string $otpCode,
-        public readonly string $userName,
-        public readonly int    $expiryMinutes = 10,
+        private readonly string $otpCode,
+        private readonly string $userName,
+        private readonly int    $expiryMinutes = 10,
     ) {}
+
+    // app/Mail/OtpVerificationMail.php
 
     public function build(): self
     {
         return $this
             ->subject('Your Atarikak Verification Code')
-            ->view('emails.otp-verification');  // ← change markdown() to view()
+            ->view('emails.otp-verification')
+            ->with([                          // ← ADD THIS
+                'otpCode'       => $this->otpCode,
+                'userName'      => $this->userName,
+                'expiryMinutes' => $this->expiryMinutes,
+            ]);
     }
 }

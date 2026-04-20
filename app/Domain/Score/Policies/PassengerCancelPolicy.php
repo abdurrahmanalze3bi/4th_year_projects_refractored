@@ -15,10 +15,15 @@ use App\Models\UserScore;
  *  0–30 %      |        0 pts        |      −10 pts
  *  30–50 %     |       −5 pts        |      −10 pts
  *  50–100 %    |      −10 pts        |      −10 pts
+ *
+ * The high-rate override only activates after MIN_INTERACTIONS total
+ * rides+cancellations, preventing new users from being penalised on
+ * their very first cancellation.
  */
 final class PassengerCancelPolicy implements ScorePolicyInterface
 {
     private const HIGH_RATE_THRESHOLD = 50.0; // > 50 % triggers the penalty tier
+    private const MIN_INTERACTIONS    = 5;    // cancel rate only counts after this many total rides+cancellations
 
     // Base points per time tier (normal cancel rate)
     private const BASE_POINTS = [
@@ -39,13 +44,15 @@ final class PassengerCancelPolicy implements ScorePolicyInterface
 
     public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
     {
-        $highRate = $userScore->cancel_rate > self::HIGH_RATE_THRESHOLD;
+        $totalInteractions = $userScore->total_rides + $userScore->total_cancellations;
+        $highRate = $totalInteractions >= self::MIN_INTERACTIONS
+            && $userScore->cancel_rate > self::HIGH_RATE_THRESHOLD;
 
         if ($highRate) {
             return ScoreResult::of(
                 points: self::HIGH_RATE_POINTS,
                 action: $action,
-                reason: "Passenger cancelled ({$action->label()}) — high cancel rate penalty applied",
+                reason: "Passenger cancelled ({$action->label()}) – high cancel rate penalty applied",
                 highCancelRateApplied: true,
             );
         }
@@ -55,7 +62,7 @@ final class PassengerCancelPolicy implements ScorePolicyInterface
         return ScoreResult::of(
             points: $points,
             action: $action,
-            reason: "Passenger cancelled ({$action->label()})" . ($points === 0 ? ' — no penalty' : ''),
+            reason: "Passenger cancelled ({$action->label()})" . ($points === 0 ? ' – no penalty' : ''),
         );
     }
 }
