@@ -132,6 +132,7 @@
                                                    vertical-align:middle;
                                                    box-shadow:0 0 22px rgba(237,139,16,0.35);">
                                                     <img src="https://res.cloudinary.com/djncmlppv/image/upload/v1776643394/Screenshot_2026-04-20_030008_ju8lch.png"
+
                                                          width="100"
                                                          height="100"
                                                          alt="Atarikak Logo"
@@ -166,7 +167,8 @@
                             {{-- ─── CAR ANIMATION GIF ─── --}}
                             <tr>
                                 <td style="padding:0;line-height:0;font-size:0;">
-                                    <img src="https://res.cloudinary.com/djncmlppv/image/upload/v1776642002/car-scene_cxurhx.gif"
+                                   <! <img src="https://res.cloudinary.com/djncmlppv/image/upload/v1776642002/car-scene_cxurhx.gif">
+
                                          width="600"
                                          height="140"
                                          alt=""

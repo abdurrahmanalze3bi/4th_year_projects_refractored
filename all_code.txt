@@ -697,10 +697,14 @@ use App\Models\UserScore;
  *  50â€“100 %    |      âˆ’12 pts        |      âˆ’15 pts
  *
  * When cancel rate â‰¥ 50 %, the rate always overrides the time tier.
+ * The high-rate override only activates after MIN_INTERACTIONS total
+ * rides+cancellations, preventing new users from being penalised on
+ * their very first cancellation.
  */
 final class DriverCancelRidePolicy implements ScorePolicyInterface
 {
     private const HIGH_RATE_THRESHOLD = 50.0; // â‰¥ 50 % triggers the override
+    private const MIN_INTERACTIONS    = 5;    // cancel rate only counts after this many total rides+cancellations
 
     private const BASE_POINTS = [
         'driver_cancel_ride_early' => 0,
@@ -721,13 +725,15 @@ final class DriverCancelRidePolicy implements ScorePolicyInterface
 
     public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
     {
-        $highRate = $userScore->cancel_rate >= self::HIGH_RATE_THRESHOLD;
+        $totalInteractions = $userScore->total_rides + $userScore->total_cancellations;
+        $highRate = $totalInteractions >= self::MIN_INTERACTIONS
+            && $userScore->cancel_rate >= self::HIGH_RATE_THRESHOLD;
 
         if ($highRate) {
             return ScoreResult::of(
                 points: self::HIGH_RATE_POINTS,
                 action: $action,
-                reason: "Driver cancelled ride ({$action->label()}) â€” high cancel rate overrides time tier",
+                reason: "Driver cancelled ride ({$action->label()}) â€“ high cancel rate overrides time tier",
                 highCancelRateApplied: true,
             );
         }
@@ -737,7 +743,7 @@ final class DriverCancelRidePolicy implements ScorePolicyInterface
         return ScoreResult::of(
             points: $points,
             action: $action,
-            reason: "Driver cancelled ride ({$action->label()})" . ($points === 0 ? ' â€” no penalty' : ''),
+            reason: "Driver cancelled ride ({$action->label()})" . ($points === 0 ? ' â€“ no penalty' : ''),
         );
     }
 }
@@ -832,10 +838,15 @@ use App\Models\UserScore;
  *  0â€“30 %      |        0 pts        |      âˆ’10 pts
  *  30â€“50 %     |       âˆ’5 pts        |      âˆ’10 pts
  *  50â€“100 %    |      âˆ’10 pts        |      âˆ’10 pts
+ *
+ * The high-rate override only activates after MIN_INTERACTIONS total
+ * rides+cancellations, preventing new users from being penalised on
+ * their very first cancellation.
  */
 final class PassengerCancelPolicy implements ScorePolicyInterface
 {
     private const HIGH_RATE_THRESHOLD = 50.0; // > 50 % triggers the penalty tier
+    private const MIN_INTERACTIONS    = 5;    // cancel rate only counts after this many total rides+cancellations
 
     // Base points per time tier (normal cancel rate)
     private const BASE_POINTS = [
@@ -856,13 +867,15 @@ final class PassengerCancelPolicy implements ScorePolicyInterface
 
     public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
     {
-        $highRate = $userScore->cancel_rate > self::HIGH_RATE_THRESHOLD;
+        $totalInteractions = $userScore->total_rides + $userScore->total_cancellations;
+        $highRate = $totalInteractions >= self::MIN_INTERACTIONS
+            && $userScore->cancel_rate > self::HIGH_RATE_THRESHOLD;
 
         if ($highRate) {
             return ScoreResult::of(
                 points: self::HIGH_RATE_POINTS,
                 action: $action,
-                reason: "Passenger cancelled ({$action->label()}) â€” high cancel rate penalty applied",
+                reason: "Passenger cancelled ({$action->label()}) â€“ high cancel rate penalty applied",
                 highCancelRateApplied: true,
             );
         }
@@ -872,7 +885,7 @@ final class PassengerCancelPolicy implements ScorePolicyInterface
         return ScoreResult::of(
             points: $points,
             action: $action,
-            reason: "Passenger cancelled ({$action->label()})" . ($points === 0 ? ' â€” no penalty' : ''),
+            reason: "Passenger cancelled ({$action->label()})" . ($points === 0 ? ' â€“ no penalty' : ''),
         );
     }
 }
@@ -21187,6 +21200,7 @@ export const messaging = getMessaging(app);
                                                    vertical-align:middle;
                                                    box-shadow:0 0 22px rgba(237,139,16,0.35);">
                                                     <img src="https://res.cloudinary.com/djncmlppv/image/upload/v1776643394/Screenshot_2026-04-20_030008_ju8lch.png"
+
                                                          width="100"
                                                          height="100"
                                                          alt="Atarikak Logo"
@@ -21221,7 +21235,8 @@ export const messaging = getMessaging(app);
                             {{-- â”€â”€â”€ CAR ANIMATION GIF â”€â”€â”€ --}}
                             <tr>
                                 <td style="padding:0;line-height:0;font-size:0;">
-                                    <img src="https://res.cloudinary.com/djncmlppv/image/upload/v1776642002/car-scene_cxurhx.gif"
+                                   <! <img src="https://res.cloudinary.com/djncmlppv/image/upload/v1776642002/car-scene_cxurhx.gif">
+
                                          width="600"
                                          height="140"
                                          alt=""
