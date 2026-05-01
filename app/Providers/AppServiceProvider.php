@@ -90,7 +90,7 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(\App\Services\Admin\AdminAuthService::class);
         $this->app->singleton(\App\Services\Admin\AdminWalletService::class);
         $this->app->singleton(\App\Services\Admin\AdminReportService::class);
-
+        $this->app->singleton(\App\Services\Admin\AdminExportService::class);
         // ========================================
         // NOTIFICATION SERVICE
         // ========================================

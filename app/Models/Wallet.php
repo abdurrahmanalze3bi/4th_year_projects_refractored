@@ -11,29 +11,29 @@ class Wallet extends Model
     use HasFactory;
 
     protected $fillable = [
-        'user_id',
-        'wallet_number',   // ← ADD THIS
-        'stripe_customer_id',
-        'stripe_payment_method_id',
+        'name',            // 'Primary Escrow' | 'SyCash' | null for user wallets
+        'user_id',         // nullable — system wallets have no owner
+        'wallet_number',
         'balance',
-        'phone_number'
+        'phone_number',
     ];
 
     protected $casts = [
-        'balance' => 'decimal:2'
+        'balance' => 'decimal:2',
     ];
-// app/Models/Wallet.php
-    protected static function booted() {
-        static::creating(function ($wallet) {
+
+    protected static function booted(): void
+    {
+        static::creating(function (Wallet $wallet) {
             if (empty($wallet->wallet_number)) {
                 $wallet->wallet_number = self::generateWalletNumber();
             }
         });
     }
-    private static function generateWalletNumber()
+
+    private static function generateWalletNumber(): string
     {
         do {
-            // Generate 16-digit number (credit card format)
             $number = '';
             for ($i = 0; $i < 16; $i++) {
                 $number .= mt_rand(0, 9);
@@ -42,6 +42,13 @@ class Wallet extends Model
 
         return $number;
     }
+
+    /** True for Primary Escrow and SyCash wallets. */
+    public function isSystemWallet(): bool
+    {
+        return $this->user_id === null;
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);

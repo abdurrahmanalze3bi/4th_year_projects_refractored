@@ -54,27 +54,18 @@ final class RideService
             $ride = $this->rideRepository->createRideWithGeometry($dto->toArray());
 
             // Charge 5% creation fee: Driver wallet → SyCash wallet
-            $this->walletService->chargeRideCreationFee($ride, $driver);
-
-            $feeAmount = $dto->calculateRideCreationFee()->amount();
-
             $this->notificationService->createNotification(
                 $driver,
                 'ride_created',
                 'Ride Created ✓',
-                "Your ride from {$ride->pickup_address} to {$ride->destination_address} is now live. "
-                . "Creation fee charged: " . number_format($feeAmount, 0) . " SYP.",
-                ['ride_id' => $ride->id, 'fee_charged' => $feeAmount],
-                'normal', 'ride'
+                "Your ride from {$ride->pickup_address} to {$ride->destination_address} is now live.",
+                ['ride_id' => $ride->id],
+                'normal',
+                'ride'
             );
 
             broadcast(new RideCreated($ride));
 
-            Log::info('Ride created', [
-                'ride_id'   => $ride->id,
-                'driver_id' => $driver->id,
-                'fee'       => $feeAmount,
-            ]);
 
             return $ride->fresh(['driver.profile']);
         });
@@ -161,7 +152,7 @@ final class RideService
             }
 
             // 4. Always refund the driver's creation fee
-            $this->walletService->refundDriverCreationFeeOnCancellation($ride, $originalSeats);
+
 
             // 5. Score penalty for driver
             $elapsedPct = ScoreService::calculateElapsedPct(
@@ -251,7 +242,7 @@ final class RideService
         // ── Case A: empty ride ────────────────────────────────────────────────
         if ($confirmedBookings->isEmpty()) {
             return DB::transaction(function () use ($ride) {
-                $this->walletService->refundCreationFeeNoBookings($ride);
+
 
                 $ride->status      = RideStatus::FINISHED->value;
                 $ride->finished_at = now();

@@ -165,3 +165,59 @@ Route::middleware('jwt.auth')->group(function () {
     Route::post('/rides/{rideId}/driver-no-show',          [RideController::class, 'reportDriverNoShow']);
 
 });
+
+// ========================================
+// ADMIN ROUTES
+// ========================================
+Route::prefix('admin')->group(function () {
+
+    // ----------------------------------------
+    // Auth (public — no middleware)
+    // ----------------------------------------
+    Route::post('/login',   [AdminDashboardController::class, 'login']);
+    Route::post('/refresh', [AdminDashboardController::class, 'refresh']);
+
+    // ----------------------------------------
+    // Protected admin routes
+    // ----------------------------------------
+    Route::middleware('auth.admin')->group(function () {
+
+        // Auth
+        Route::post('/logout', [AdminDashboardController::class, 'logout']);
+        Route::post('/photo', [AdminDashboardController::class, 'uploadAdminPhoto']);
+        // Dashboard — BFF endpoints
+        Route::prefix('dashboard')->group(function () {
+            Route::get('/',        [AdminDashboardController::class, 'dashboard']);       // Full payload (all widgets)
+            Route::get('/stats',   [AdminDashboardController::class, 'dashboardStats']); // KPI cards only
+            Route::get('/growth',  [AdminDashboardController::class, 'dashboardGrowth']); // Growth bar chart
+            Route::get('/cities',  [AdminDashboardController::class, 'dashboardCities']); // City distribution
+            Route::get('/recent',  [AdminDashboardController::class, 'dashboardRecent']); // Recent activities table
+        });
+
+        // Wallet — any admin
+        Route::prefix('wallet')->group(function () {
+            Route::get('/',                          [AdminDashboardController::class, 'getAdminWallet']);        // Own wallet
+            Route::get('/{walletId}/transactions',   [AdminDashboardController::class, 'showWalletTransactions']); // Wallet transactions
+        });
+        Route::get('/wallets', [AdminDashboardController::class, 'getAdminWallets']); // All wallets overview
+
+        // ----------------------------------------
+        // Primary-admin-only routes
+        // ----------------------------------------
+        Route::middleware('auth.admin:primary')->group(function () {
+
+            // Wallet — charge
+            Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
+            Route::get('/export/pdf', [AdminDashboardController::class, 'exportPdf']);
+            // Financial report
+            Route::get('/reports', [AdminDashboardController::class, 'showReport']);
+
+            // Verifications
+            Route::prefix('verifications')->group(function () {
+                Route::get('/',                        [AdminDashboardController::class, 'pendingVerifications']);   // List pending
+                Route::post('/{userId}/approve',       [AdminDashboardController::class, 'approveVerification']);   // Approve
+                Route::post('/{userId}/reject',        [AdminDashboardController::class, 'rejectVerification']);    // Reject
+            });
+        });
+    });
+});

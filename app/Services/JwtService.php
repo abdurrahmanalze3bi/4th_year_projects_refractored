@@ -253,4 +253,38 @@ class JwtService
     {
         return base64_decode(strtr($data, '-_', '+/'));
     }
+    public function generateAdminTokenPair(User $adminUser, string $adminType): array
+    {
+        $accessToken  = $this->generateAdminAccessToken($adminUser, $adminType);
+        $refreshToken = $this->generateAndStoreRefreshToken($adminUser);
+
+        return [
+            'access_token'  => $accessToken,
+            'refresh_token' => $refreshToken,
+            'expires_in'    => config('jwt.access_ttl', 900), // seconds
+            'token_type'    => 'Bearer',
+            'admin_type'    => $adminType,
+        ];
+    }
+
+    /**
+     * Build a signed access token carrying admin-specific claims.
+     */
+    private function generateAdminAccessToken(User $adminUser, string $adminType): string
+    {
+        $now = time();
+
+        $payload = [
+            'sub'        => $adminUser->id,
+            'type'       => 'access',
+            'is_admin'   => true,          // ← AdminJwtMiddleware checks this
+            'admin_type' => $adminType,    // ← 'primary' | 'sycash'
+            'iat'        => $now,
+            'exp'        => $now + config('jwt.access_ttl', 900),
+        ];
+
+        return $this->encodeToken($payload);
+        // Note: encodeToken() is the private method you already use in
+        //       generateTokenPair() — reuse it as-is.
+    }
 }

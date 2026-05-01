@@ -15,150 +15,79 @@ use Illuminate\Support\Str;
 /**
  * WalletTransactionService
  *
- * Single source of truth for ALL money movements in the system.
- * Every balance change and WalletTransaction record is created here.
+ * Single source of truth for ALL money movements.
  *
- * Money flow overview:
- *
- *  RIDE CREATION:
- *    Driver ──(5% of total ride value)──► SyCash
+ * ═══════════════════════════════════════════════════════
+ *  MONEY FLOW
+ * ═══════════════════════════════════════════════════════
  *
  *  BOOKING (e-pay):
- *    Passenger ──(seats × price)──► Primary Admin (escrow)
+ *    Passenger ──(100% of seats × price)──► SyCash (escrow)
  *
  *  RIDE COMPLETION:
- *    Primary Admin ──(total bookings)──► Driver
+ *    SyCash ──(95%)──► Driver
+ *    SyCash ──( 5%)──► Primary Admin
  *
  *  DRIVER CANCELS RIDE:
- *    Primary Admin ──(full refund per booking)──► each Passenger
- *    SyCash ──(creation fee)──► Driver
+ *    SyCash ──(100% per booking)──► each Passenger (full refund)
  *
- *  RIDE FINISHED WITH NO BOOKINGS:
- *    SyCash ──(creation fee)──► Driver
+ *  PASSENGER CANCELS (time-based, e-pay confirmed booking):
+ *    SyCash ──(refund %)──► Passenger
+ *    SyCash ──(rest   %)──► Driver
+ *    Tiers (elapsed %):
+ *      0–30%   → 100% passenger / 0%  driver
+ *      30–50%  →  70% passenger / 30% driver
+ *      50–70%  →  50% passenger / 50% driver
+ *      70–100% →   0% passenger / 100% driver
  *
- *  PASSENGER CANCELS (time-based):
- *    Primary Admin ──(refund %)──► Passenger
- *    Primary Admin ──(non-refundable %)──► Driver
+ *  PASSENGER NO-SHOW (e-pay):
+ *    SyCash ──(95%)──► Driver
+ *    SyCash ──( 5%)──► Primary Admin
  *
- *  Tiers:
- *    0–30% elapsed  → 100% refund to passenger
- *    30–50% elapsed →  70% refund to passenger
- *    50–70% elapsed →  50% refund to passenger
- *    70–100% elapsed→   0% refund (all to driver)
+ *  DRIVER NO-SHOW (e-pay):
+ *    SyCash ──(100%)──► Passenger
+ *
+ *  CASH rides: no wallet movements at all (payment offline).
+ *  PRIMARY ADMIN: only ever receives money at completion or no-show.
+ *  NO creation fee is charged to the driver.
+ * ═══════════════════════════════════════════════════════
  */
 class WalletTransactionService
 {
     // =========================================================================
-    // RIDE CREATION FEE
+    // BOOKING PAYMENT  (Passenger → SyCash)
     // =========================================================================
 
     /**
-     * Charge driver the ride creation fee (5% of total ride value).
-     * Driver wallet → SyCash wallet.
+     * Charge passenger for an e-pay booking.
+     * Full amount goes to SyCash (escrow) — driver receives nothing yet.
      *
-     * Called when: driver creates a ride.
-     */
-    public function chargeRideCreationFee(Ride $ride, User $driver): void
-    {
-        $totalRideValue = $ride->price_per_seat * $ride->available_seats;
-        $fee            = $totalRideValue * 0.05;
-
-        $driverWallet = $this->lockWalletByUserId($driver->id);
-        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
-
-        $this->assertSufficientBalance($driverWallet, $fee,
-            "Insufficient wallet balance. Required fee: " . number_format($fee, 0) . " SYP. " .
-            "Current balance: " . number_format($driverWallet->balance, 0) . " SYP."
-        );
-
-        $driverPrev  = $driverWallet->balance;
-        $syCashPrev  = $syCashWallet->balance;
-
-        $driverWallet->balance -= $fee;
-        $syCashWallet->balance += $fee;
-
-        $driverWallet->save();
-        $syCashWallet->save();
-
-        $txId = 'RIDE_FEE_' . time() . '_' . Str::random(6);
-
-        WalletTransaction::create([
-            'wallet_id'        => $driverWallet->id,
-            'user_id'          => $driver->id,
-            'type'             => 'ride_creation_fee',
-            'amount'           => -$fee,
-            'previous_balance' => $driverPrev,
-            'new_balance'      => $driverWallet->balance,
-            'description'      => "Ride creation fee: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => $txId,
-            'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'          => $ride->id,
-                'total_ride_value' => $totalRideValue,
-                'fee_percentage'   => 5,
-                'available_seats'  => $ride->available_seats,
-                'price_per_seat'   => $ride->price_per_seat,
-                'payment_method'   => $ride->payment_method,
-            ],
-        ]);
-
-        WalletTransaction::create([
-            'wallet_id'        => $syCashWallet->id,
-            'user_id'          => $syCashWallet->user_id,
-            'type'             => 'ride_creation_fee',
-            'amount'           => $fee,
-            'previous_balance' => $syCashPrev,
-            'new_balance'      => $syCashWallet->balance,
-            'description'      => "Ride creation fee from {$driver->first_name} {$driver->last_name}",
-            'transaction_id'   => 'SYCASH_' . $txId,
-            'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'          => $ride->id,
-                'driver_id'        => $driver->id,
-                'driver_name'      => "{$driver->first_name} {$driver->last_name}",
-                'total_ride_value' => $totalRideValue,
-                'fee_percentage'   => 5,
-            ],
-        ]);
-
-        Log::info('Ride creation fee charged', [
-            'ride_id'        => $ride->id,
-            'driver_id'      => $driver->id,
-            'fee'            => $fee,
-            'total_ride_val' => $totalRideValue,
-        ]);
-    }
-
-    // =========================================================================
-    // BOOKING PAYMENT
-    // =========================================================================
-
-    /**
-     * Charge passenger for an e-pay booking (escrow to Primary Admin).
-     * Passenger wallet → Primary Admin wallet.
-     *
-     * Called when: direct e-pay booking confirmed, OR request booking accepted by driver.
+     * Called when:
+     *   - DIRECT booking confirmed
+     *   - REQUEST booking accepted by driver
      */
     public function chargePassengerForBooking(Booking $booking, Ride $ride, User $passenger): void
     {
         $amount = $booking->seats * $ride->price_per_seat;
 
         $passengerWallet = $this->lockWalletByUserId($passenger->id);
-        $adminWallet     = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $syCashWallet    = $this->lockWalletByPhone(config('admin.sycash.phone'));
 
-        $this->assertSufficientBalance($passengerWallet, $amount,
-            "Insufficient wallet balance. Required: " . number_format($amount, 0) . " SYP. " .
+        $this->assertSufficientBalance(
+            $passengerWallet,
+            $amount,
+            "Insufficient balance. Required: " . number_format($amount, 0) . " SYP. " .
             "Current: " . number_format($passengerWallet->balance, 0) . " SYP."
         );
 
         $passengerPrev = $passengerWallet->balance;
-        $adminPrev     = $adminWallet->balance;
+        $syCashPrev    = $syCashWallet->balance;
 
         $passengerWallet->balance -= $amount;
-        $adminWallet->balance     += $amount;
+        $syCashWallet->balance    += $amount;
 
         $passengerWallet->save();
-        $adminWallet->save();
+        $syCashWallet->save();
 
         $txId = 'RB_' . time() . '_' . Str::random(8);
 
@@ -172,42 +101,23 @@ class WalletTransactionService
             'description'      => "Payment for {$booking->seats} seat(s): {$ride->pickup_address} → {$ride->destination_address}",
             'transaction_id'   => $txId,
             'status'           => 'completed',
-            'metadata'         => [
-                'booking_id'           => $booking->id,
-                'ride_id'              => $ride->id,
-                'seats'                => $booking->seats,
-                'price_per_seat'       => $ride->price_per_seat,
-                'driver_id'            => $ride->driver_id,
-                'pickup_address'       => $ride->pickup_address,
-                'destination_address'  => $ride->destination_address,
-                'departure_time'       => $ride->departure_time->toDateTimeString(),
-            ],
+            'reference'        => "booking:{$booking->id}",
         ]);
 
         WalletTransaction::create([
-            'wallet_id'        => $adminWallet->id,
-            'user_id'          => $adminWallet->user_id,
-            'type'             => 'ride_booking_received',
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
+            'type'             => 'escrow_received',
             'amount'           => $amount,
-            'previous_balance' => $adminPrev,
-            'new_balance'      => $adminWallet->balance,
-            'description'      => "Booking payment from {$passenger->first_name} {$passenger->last_name} — {$booking->seats} seat(s)",
-            'transaction_id'   => 'ADMIN_' . $txId,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => $syCashWallet->balance,
+            'description'      => "Escrow received — {$passenger->first_name} {$passenger->last_name}, {$booking->seats} seat(s)",
+            'transaction_id'   => 'SYCASH_' . $txId,
             'status'           => 'completed',
-            'metadata'         => [
-                'booking_id'          => $booking->id,
-                'ride_id'             => $ride->id,
-                'passenger_id'        => $passenger->id,
-                'passenger_name'      => "{$passenger->first_name} {$passenger->last_name}",
-                'seats'               => $booking->seats,
-                'price_per_seat'      => $ride->price_per_seat,
-                'driver_id'           => $ride->driver_id,
-                'pickup_address'      => $ride->pickup_address,
-                'destination_address' => $ride->destination_address,
-            ],
+            'reference'        => "booking:{$booking->id}",
         ]);
 
-        Log::info('Passenger charged for booking', [
+        Log::info('Passenger charged — escrow held in SyCash', [
             'booking_id'   => $booking->id,
             'passenger_id' => $passenger->id,
             'amount'       => $amount,
@@ -215,98 +125,108 @@ class WalletTransactionService
     }
 
     // =========================================================================
-    // RIDE COMPLETION PAYOUT
+    // RIDE COMPLETION  (SyCash → Driver 95% + Primary 5%)
     // =========================================================================
 
     /**
-     * Release escrow to driver after ride is confirmed complete.
-     * Primary Admin wallet → Driver wallet.
+     * Release escrow after all parties confirm ride completion.
      *
-     * Called when: all parties confirm ride completion (e-pay rides only).
+     * SyCash → Driver  (95%)
+     * SyCash → Primary ( 5%)
      */
     public function releaseEarningsToDriver(Ride $ride, Collection $confirmedBookings): void
     {
-        $totalAmount = $confirmedBookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
+        $total = $confirmedBookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
 
-        if ($totalAmount <= 0) {
-            Log::info('No e-pay bookings to release for ride', ['ride_id' => $ride->id]);
+        if ($total <= 0) {
+            Log::info('No e-pay bookings to release', ['ride_id' => $ride->id]);
             return;
         }
 
-        $adminWallet  = $this->lockWalletByPhone(config('admin.primary.phone'));
-        $driverWallet = $this->lockWalletByUserId($ride->driver_id);
+        $driverShare  = round($total * 0.95, 2);
+        $primaryShare = round($total * 0.05, 2);
 
-        $this->assertSufficientBalance($adminWallet, $totalAmount,
-            "Insufficient admin wallet balance for driver payout. Required: {$totalAmount}"
+        $syCashWallet  = $this->lockWalletByPhone(config('admin.sycash.phone'));
+        $primaryWallet = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $driverWallet  = $this->lockWalletByUserId($ride->driver_id);
+
+        $this->assertSufficientBalance(
+            $syCashWallet,
+            $total,
+            "Insufficient SyCash balance for payout. Required: {$total}"
         );
 
-        $adminPrev  = $adminWallet->balance;
-        $driverPrev = $driverWallet->balance;
+        $syCashPrev  = $syCashWallet->balance;
+        $driverPrev  = $driverWallet->balance;
+        $primaryPrev = $primaryWallet->balance;
 
-        $adminWallet->balance  -= $totalAmount;
-        $driverWallet->balance += $totalAmount;
+        $syCashWallet->balance  -= $total;
+        $driverWallet->balance  += $driverShare;
+        $primaryWallet->balance += $primaryShare;
 
-        $adminWallet->save();
+        $syCashWallet->save();
         $driverWallet->save();
+        $primaryWallet->save();
 
-        $txId = 'RIDE_COMP_' . time() . '_' . Str::random(6);
+        $txId = 'COMPLETE_' . time() . '_' . Str::random(6);
 
+        // SyCash debit
         WalletTransaction::create([
-            'wallet_id'        => $adminWallet->id,
-            'user_id'          => $adminWallet->user_id,
-            'type'             => 'ride_payout',
-            'amount'           => -$totalAmount,
-            'previous_balance' => $adminPrev,
-            'new_balance'      => $adminWallet->balance,
-            'description'      => "Payout to driver for completed ride: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => 'ADMIN_' . $txId,
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
+            'type'             => 'escrow_released',
+            'amount'           => -$total,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => $syCashWallet->balance,
+            'description'      => "Escrow released for completed ride: {$ride->pickup_address} → {$ride->destination_address}",
+            'transaction_id'   => 'SYCASH_' . $txId,
             'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'         => $ride->id,
-                'driver_id'       => $ride->driver_id,
-                'passenger_count' => $confirmedBookings->count(),
-                'total_seats'     => $confirmedBookings->sum('seats'),
-                'total_amount'    => $totalAmount,
-            ],
+            'reference'        => "ride:{$ride->id}",
         ]);
 
+        // Driver receives 95%
         WalletTransaction::create([
             'wallet_id'        => $driverWallet->id,
             'user_id'          => $ride->driver_id,
             'type'             => 'ride_earnings',
-            'amount'           => $totalAmount,
+            'amount'           => $driverShare,
             'previous_balance' => $driverPrev,
             'new_balance'      => $driverWallet->balance,
-            'description'      => "Earnings from completed ride: {$ride->pickup_address} → {$ride->destination_address}",
+            'description'      => "Earnings (95%) — completed ride: {$ride->pickup_address} → {$ride->destination_address}",
             'transaction_id'   => 'DRIVER_' . $txId,
             'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'   => $ride->id,
-                'breakdown' => $confirmedBookings->map(fn($b) => [
-                    'booking_id'   => $b->id,
-                    'passenger_id' => $b->user_id,
-                    'seats'        => $b->seats,
-                    'amount'       => $b->seats * $ride->price_per_seat,
-                ])->toArray(),
-            ],
+            'reference'        => "ride:{$ride->id}",
         ]);
 
-        Log::info('Driver earnings released', [
-            'ride_id'      => $ride->id,
-            'driver_id'    => $ride->driver_id,
-            'total_amount' => $totalAmount,
+        // Primary receives 5%
+        WalletTransaction::create([
+            'wallet_id'        => $primaryWallet->id,
+            'user_id'          => null,
+            'type'             => 'platform_fee',
+            'amount'           => $primaryShare,
+            'previous_balance' => $primaryPrev,
+            'new_balance'      => $primaryWallet->balance,
+            'description'      => "Platform fee (5%) — completed ride: {$ride->pickup_address} → {$ride->destination_address}",
+            'transaction_id'   => 'PRIMARY_' . $txId,
+            'status'           => 'completed',
+            'reference'        => "ride:{$ride->id}",
+        ]);
+
+        Log::info('Ride earnings released', [
+            'ride_id'       => $ride->id,
+            'driver_share'  => $driverShare,
+            'primary_share' => $primaryShare,
         ]);
     }
 
     // =========================================================================
-    // DRIVER CANCELS RIDE
+    // DRIVER CANCELS RIDE  (SyCash → each Passenger, 100%)
     // =========================================================================
 
     /**
-     * Full refund all passengers when driver cancels the ride.
-     * Primary Admin wallet → each Passenger wallet.
-     *
-     * Called when: driver cancels a ride that has confirmed/pending bookings.
+     * Full refund to all confirmed passengers when driver cancels.
+     * SyCash → each Passenger (100%).
+     * No creation fee was charged, so nothing to refund to driver.
      */
     public function refundPassengersForDriverCancellation(Ride $ride, Collection $bookings): void
     {
@@ -314,36 +234,32 @@ class WalletTransactionService
             return;
         }
 
-        $totalRefund = $bookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
+        $totalRefund  = $bookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
+        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
 
-        $adminWallet = $this->lockWalletByPhone(config('admin.primary.phone'));
-
-        $this->assertSufficientBalance($adminWallet, $totalRefund,
-            "Insufficient admin balance for passenger refunds. Required: {$totalRefund}"
+        $this->assertSufficientBalance(
+            $syCashWallet,
+            $totalRefund,
+            "Insufficient SyCash balance for passenger refunds. Required: {$totalRefund}"
         );
-
-        $adminPrev = $adminWallet->balance;
-        $adminWallet->balance -= $totalRefund;
-        $adminWallet->save();
 
         $txId = 'DRIVER_CANCEL_' . time() . '_' . Str::random(6);
 
+        $syCashPrev            = $syCashWallet->balance;
+        $syCashWallet->balance -= $totalRefund;
+        $syCashWallet->save();
+
         WalletTransaction::create([
-            'wallet_id'        => $adminWallet->id,
-            'user_id'          => $adminWallet->user_id,
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
             'type'             => 'driver_cancellation_refunds',
             'amount'           => -$totalRefund,
-            'previous_balance' => $adminPrev,
-            'new_balance'      => $adminWallet->balance,
-            'description'      => "Passenger refunds for driver-cancelled ride: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => 'ADMIN_' . $txId,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => $syCashWallet->balance,
+            'description'      => "Refunds for driver-cancelled ride: {$ride->pickup_address} → {$ride->destination_address}",
+            'transaction_id'   => 'SYCASH_' . $txId,
             'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'           => $ride->id,
-                'driver_id'         => $ride->driver_id,
-                'passengers_count'  => $bookings->count(),
-                'total_refunded'    => $totalRefund,
-            ],
+            'reference'        => "ride:{$ride->id}",
         ]);
 
         foreach ($bookings as $booking) {
@@ -361,18 +277,10 @@ class WalletTransactionService
                 'amount'           => $refundAmount,
                 'previous_balance' => $passengerPrev,
                 'new_balance'      => $passengerWallet->balance,
-                'description'      => "Full refund — driver cancelled ride: {$ride->pickup_address} → {$ride->destination_address}",
+                'description'      => "Full refund — driver cancelled: {$ride->pickup_address} → {$ride->destination_address}",
                 'transaction_id'   => 'PASS_' . $txId . '_' . $booking->id,
                 'status'           => 'completed',
-                'metadata'         => [
-                    'booking_id'          => $booking->id,
-                    'ride_id'             => $ride->id,
-                    'seats_refunded'      => $booking->seats,
-                    'price_per_seat'      => $ride->price_per_seat,
-                    'refund_reason'       => 'driver_cancelled_ride',
-                    'pickup_address'      => $ride->pickup_address,
-                    'destination_address' => $ride->destination_address,
-                ],
+                'reference'        => "booking:{$booking->id}",
             ]);
 
             Log::info('Passenger refunded for driver cancellation', [
@@ -383,174 +291,14 @@ class WalletTransactionService
         }
     }
 
-    /**
-     * Refund driver's creation fee when driver cancels their own ride.
-     * SyCash wallet → Driver wallet.
-     *
-     * Called when: driver cancels a ride (always, regardless of bookings).
-     */
-    public function refundDriverCreationFeeOnCancellation(Ride $ride, int $originalSeats): void
-    {
-        $totalRideValue = $ride->price_per_seat * $originalSeats;
-        $refundAmount   = $totalRideValue * 0.05;
-
-        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
-        $driverWallet = $this->lockWalletByUserId($ride->driver_id);
-
-        $this->assertSufficientBalance($syCashWallet, $refundAmount,
-            "Insufficient SyCash balance for driver creation fee refund. Required: {$refundAmount}"
-        );
-
-        $syCashPrev = $syCashWallet->balance;
-        $driverPrev = $driverWallet->balance;
-
-        $syCashWallet->balance -= $refundAmount;
-        $driverWallet->balance += $refundAmount;
-
-        $syCashWallet->save();
-        $driverWallet->save();
-
-        $txId = 'DRIVER_SELF_CANCEL_' . time() . '_' . Str::random(6);
-
-        WalletTransaction::create([
-            'wallet_id'        => $syCashWallet->id,
-            'user_id'          => $syCashWallet->user_id,
-            'type'             => 'driver_self_cancellation_refund',
-            'amount'           => -$refundAmount,
-            'previous_balance' => $syCashPrev,
-            'new_balance'      => $syCashWallet->balance,
-            'description'      => "Creation fee refund for driver-cancelled ride: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => 'SYCASH_' . $txId,
-            'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'        => $ride->id,
-                'driver_id'      => $ride->driver_id,
-                'original_seats' => $originalSeats,
-                'total_value'    => $totalRideValue,
-                'fee_percentage' => 5,
-                'refund_reason'  => 'driver_self_cancelled',
-            ],
-        ]);
-
-        WalletTransaction::create([
-            'wallet_id'        => $driverWallet->id,
-            'user_id'          => $ride->driver_id,
-            'type'             => 'ride_creation_fee_refund',
-            'amount'           => $refundAmount,
-            'previous_balance' => $driverPrev,
-            'new_balance'      => $driverWallet->balance,
-            'description'      => "Creation fee refunded — self-cancelled ride: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => 'DRIVER_' . $txId,
-            'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'        => $ride->id,
-                'original_seats' => $originalSeats,
-                'total_value'    => $totalRideValue,
-                'fee_percentage' => 5,
-                'refund_reason'  => 'self_cancelled_ride',
-            ],
-        ]);
-
-        Log::info('Driver creation fee refunded on self-cancellation', [
-            'ride_id'       => $ride->id,
-            'driver_id'     => $ride->driver_id,
-            'refund_amount' => $refundAmount,
-        ]);
-    }
-
     // =========================================================================
-    // NO BOOKINGS RIDE FINISH
+    // TIME-BASED PASSENGER CANCELLATION  (SyCash → Passenger + Driver)
     // =========================================================================
 
     /**
-     * Refund driver creation fee when ride finishes with zero bookings.
-     * SyCash wallet → Driver wallet.
+     * Calculate refund policy based on time elapsed.
      *
-     * Called when: driver finishes a ride but nobody booked it.
-     */
-    public function refundCreationFeeNoBookings(Ride $ride): void
-    {
-        // For rides with no bookings, available_seats = original seats
-        $originalSeats  = $ride->available_seats;
-        $totalRideValue = $ride->price_per_seat * $originalSeats;
-        $refundAmount   = $totalRideValue * 0.05;
-
-        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
-        $driverWallet = $this->lockWalletByUserId($ride->driver_id);
-
-        $this->assertSufficientBalance($syCashWallet, $refundAmount,
-            "Insufficient SyCash balance for no-booking refund. Required: {$refundAmount}"
-        );
-
-        $syCashPrev = $syCashWallet->balance;
-        $driverPrev = $driverWallet->balance;
-
-        $syCashWallet->balance -= $refundAmount;
-        $driverWallet->balance += $refundAmount;
-
-        $syCashWallet->save();
-        $driverWallet->save();
-
-        $txId = 'NO_BOOKING_REFUND_' . time() . '_' . Str::random(6);
-
-        WalletTransaction::create([
-            'wallet_id'        => $syCashWallet->id,
-            'user_id'          => $syCashWallet->user_id,
-            'type'             => 'no_booking_refund',
-            'amount'           => -$refundAmount,
-            'previous_balance' => $syCashPrev,
-            'new_balance'      => $syCashWallet->balance,
-            'description'      => "Creation fee refund — no bookings received for ride: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => 'SYCASH_' . $txId,
-            'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'        => $ride->id,
-                'driver_id'      => $ride->driver_id,
-                'original_seats' => $originalSeats,
-                'total_value'    => $totalRideValue,
-                'fee_percentage' => 5,
-                'refund_reason'  => 'no_bookings_received',
-            ],
-        ]);
-
-        WalletTransaction::create([
-            'wallet_id'        => $driverWallet->id,
-            'user_id'          => $ride->driver_id,
-            'type'             => 'ride_fee_refund',
-            'amount'           => $refundAmount,
-            'previous_balance' => $driverPrev,
-            'new_balance'      => $driverWallet->balance,
-            'description'      => "Creation fee refunded — no passengers booked ride: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id'   => 'DRIVER_' . $txId,
-            'status'           => 'completed',
-            'metadata'         => [
-                'ride_id'        => $ride->id,
-                'original_seats' => $originalSeats,
-                'total_value'    => $totalRideValue,
-                'fee_percentage' => 5,
-                'refund_reason'  => 'no_bookings_received',
-            ],
-        ]);
-
-        Log::info('Creation fee refunded — no bookings', [
-            'ride_id'       => $ride->id,
-            'driver_id'     => $ride->driver_id,
-            'refund_amount' => $refundAmount,
-        ]);
-    }
-
-    // =========================================================================
-    // TIME-BASED PASSENGER CANCELLATION
-    // =========================================================================
-
-    /**
-     * Calculate and return refund info based on time elapsed since booking vs departure.
-     *
-     * Tiers:
-     *   0–30%  elapsed → 100% refund
-     *   30–50% elapsed →  70% refund
-     *   50–70% elapsed →  50% refund
-     *   70–100% elapsed→   0% refund
+     * Returns refund_percentage for passenger (rest goes to driver).
      */
     public function calculateRefundPolicy(\Carbon\Carbon $departureTime, \Carbon\Carbon $bookingCreatedAt): array
     {
@@ -581,19 +329,15 @@ class WalletTransactionService
         }
 
         return array_merge($tier, [
-            'time_elapsed_percentage'  => $elapsedPct,
+            'time_elapsed_percentage'    => $elapsedPct,
             'total_minutes_from_booking' => $totalMinutes,
-            'minutes_elapsed'          => $elapsedMinutes,
+            'minutes_elapsed'            => $elapsedMinutes,
         ]);
     }
 
     /**
-     * Process time-based cancellation fund redistribution.
-     * Primary Admin → Passenger (refund portion) + Primary Admin → Driver (non-refundable portion).
-     *
-     * Called when: passenger cancels seats (partial or full booking).
-     *
-     * @param array $refundPolicy  Result of calculateRefundPolicy()
+     * Process time-based cancellation.
+     * SyCash → Passenger (refund%) + SyCash → Driver (non-refundable%).
      */
     public function processTimeBasedCancellation(
         Booking $booking,
@@ -601,68 +345,53 @@ class WalletTransactionService
         int     $seatsCancelled,
         array   $refundPolicy
     ): void {
-        $totalPaid        = $seatsCancelled * $ride->price_per_seat;
-        $refundAmount     = ($totalPaid * $refundPolicy['refund_percentage']) / 100;
-        $driverAmount     = $totalPaid - $refundAmount; // non-refundable goes to driver
+        $totalPaid    = $seatsCancelled * $ride->price_per_seat;
+        $refundAmount = ($totalPaid * $refundPolicy['refund_percentage']) / 100;
+        $driverAmount = $totalPaid - $refundAmount;
 
-        $adminWallet     = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $syCashWallet    = $this->lockWalletByPhone(config('admin.sycash.phone'));
         $passengerWallet = $this->lockWalletByUserId($booking->user_id);
         $driverWallet    = $this->lockWalletByUserId($ride->driver_id);
 
-        $this->assertSufficientBalance($adminWallet, $totalPaid,
-            "Insufficient admin balance for cancellation processing. Required: {$totalPaid}"
+        $this->assertSufficientBalance(
+            $syCashWallet,
+            $totalPaid,
+            "Insufficient SyCash balance for cancellation refund. Required: {$totalPaid}"
         );
 
-        $adminPrev     = $adminWallet->balance;
+        $syCashPrev    = $syCashWallet->balance;
         $passengerPrev = $passengerWallet->balance;
         $driverPrev    = $driverWallet->balance;
 
-        // Admin releases full amount it holds for these seats
-        $adminWallet->balance -= $totalPaid;
-
+        $syCashWallet->balance -= $totalPaid;
         if ($refundAmount > 0) {
             $passengerWallet->balance += $refundAmount;
         }
-
         if ($driverAmount > 0) {
             $driverWallet->balance += $driverAmount;
         }
 
-        $adminWallet->save();
+        $syCashWallet->save();
         $passengerWallet->save();
         $driverWallet->save();
 
         $txId = 'TIME_CANCEL_' . time() . '_' . Str::random(6);
 
-        // Admin debit
+        // SyCash debit
         WalletTransaction::create([
-            'wallet_id'        => $adminWallet->id,
-            'user_id'          => $adminWallet->user_id,
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
             'type'             => 'cancellation_processing',
             'amount'           => -$totalPaid,
-            'previous_balance' => $adminPrev,
-            'new_balance'      => $adminWallet->balance,
-            'description'      => "Cancellation processing: {$seatsCancelled} seat(s) — refund " .
-                number_format($refundAmount, 0) . " SYP, driver " .
-                number_format($driverAmount, 0) . " SYP",
-            'transaction_id'   => 'ADMIN_' . $txId,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => $syCashWallet->balance,
+            'description'      => "Cancellation: refund " . number_format($refundAmount, 0) . " SYP to passenger, " . number_format($driverAmount, 0) . " SYP to driver",
+            'transaction_id'   => 'SYCASH_' . $txId,
             'status'           => 'completed',
-            'metadata'         => [
-                'booking_id'              => $booking->id,
-                'ride_id'                 => $ride->id,
-                'passenger_id'            => $booking->user_id,
-                'driver_id'               => $ride->driver_id,
-                'seats_cancelled'         => $seatsCancelled,
-                'total_paid'              => $totalPaid,
-                'refund_amount'           => $refundAmount,
-                'driver_payout'           => $driverAmount,
-                'refund_percentage'       => $refundPolicy['refund_percentage'],
-                'time_elapsed_percentage' => $refundPolicy['time_elapsed_percentage'],
-                'policy_tier'             => $refundPolicy['policy_tier'],
-            ],
+            'reference'        => "booking:{$booking->id}",
         ]);
 
-        // Passenger refund (only if amount > 0)
+        // Passenger refund
         if ($refundAmount > 0) {
             WalletTransaction::create([
                 'wallet_id'        => $passengerWallet->id,
@@ -671,22 +400,13 @@ class WalletTransactionService
                 'amount'           => $refundAmount,
                 'previous_balance' => $passengerPrev,
                 'new_balance'      => $passengerWallet->balance,
-                'description'      => "Refund ({$refundPolicy['refund_percentage']}%) for {$seatsCancelled} cancelled seat(s) — {$refundPolicy['policy_tier']}",
+                'description'      => "Refund ({$refundPolicy['refund_percentage']}%) — {$seatsCancelled} seat(s) cancelled ({$refundPolicy['policy_tier']})",
                 'transaction_id'   => 'REFUND_' . $txId,
                 'status'           => 'completed',
-                'metadata'         => [
-                    'booking_id'              => $booking->id,
-                    'ride_id'                 => $ride->id,
-                    'seats_cancelled'         => $seatsCancelled,
-                    'refund_percentage'       => $refundPolicy['refund_percentage'],
-                    'time_elapsed_percentage' => $refundPolicy['time_elapsed_percentage'],
-                    'policy_tier'             => $refundPolicy['policy_tier'],
-                    'pickup_address'          => $ride->pickup_address,
-                    'destination_address'     => $ride->destination_address,
-                ],
+                'reference'        => "booking:{$booking->id}",
             ]);
         } else {
-            // Record 0-amount entry so passenger has an audit trail
+            // Audit trail for zero-refund so passenger sees it in history
             WalletTransaction::create([
                 'wallet_id'        => $passengerWallet->id,
                 'user_id'          => $booking->user_id,
@@ -694,22 +414,14 @@ class WalletTransactionService
                 'amount'           => 0,
                 'previous_balance' => $passengerPrev,
                 'new_balance'      => $passengerWallet->balance,
-                'description'      => "No refund — late cancellation: {$seatsCancelled} seat(s) forfeited ({$refundPolicy['policy_tier']})",
+                'description'      => "No refund — late cancellation ({$refundPolicy['policy_tier']})",
                 'transaction_id'   => 'NO_REFUND_' . $txId,
                 'status'           => 'completed',
-                'metadata'         => [
-                    'booking_id'              => $booking->id,
-                    'ride_id'                 => $ride->id,
-                    'seats_cancelled'         => $seatsCancelled,
-                    'forfeited_amount'        => $totalPaid,
-                    'refund_percentage'       => 0,
-                    'time_elapsed_percentage' => $refundPolicy['time_elapsed_percentage'],
-                    'policy_tier'             => $refundPolicy['policy_tier'],
-                ],
+                'reference'        => "booking:{$booking->id}",
             ]);
         }
 
-        // Driver payout (only if amount > 0)
+        // Driver compensation
         if ($driverAmount > 0) {
             WalletTransaction::create([
                 'wallet_id'        => $driverWallet->id,
@@ -718,21 +430,10 @@ class WalletTransactionService
                 'amount'           => $driverAmount,
                 'previous_balance' => $driverPrev,
                 'new_balance'      => $driverWallet->balance,
-                'description'      => "Cancellation earnings — {$seatsCancelled} seat(s) ({$refundPolicy['policy_tier']})",
+                'description'      => "Cancellation compensation — {$seatsCancelled} seat(s) ({$refundPolicy['policy_tier']})",
                 'transaction_id'   => 'DRIVER_' . $txId,
                 'status'           => 'completed',
-                'metadata'         => [
-                    'booking_id'              => $booking->id,
-                    'ride_id'                 => $ride->id,
-                    'passenger_id'            => $booking->user_id,
-                    'seats_cancelled'         => $seatsCancelled,
-                    'total_paid_by_passenger' => $totalPaid,
-                    'refund_percentage'       => $refundPolicy['refund_percentage'],
-                    'time_elapsed_percentage' => $refundPolicy['time_elapsed_percentage'],
-                    'policy_tier'             => $refundPolicy['policy_tier'],
-                    'pickup_address'          => $ride->pickup_address,
-                    'destination_address'     => $ride->destination_address,
-                ],
+                'reference'        => "booking:{$booking->id}",
             ]);
         }
 
@@ -747,17 +448,160 @@ class WalletTransactionService
     }
 
     // =========================================================================
-    // PRIVATE HELPERS
+    // PASSENGER NO-SHOW  (SyCash → Driver 95% + Primary 5%)
     // =========================================================================
 
     /**
-     * Lock a wallet row by user ID for the current transaction.
+     * Passenger didn't show — E-PAY ride.
+     * SyCash → Driver (95%) + SyCash → Primary (5%).
      */
+    public function processPassengerNoShow(Booking $booking, Ride $ride, User $passenger): void
+    {
+        $total        = $booking->seats * $ride->price_per_seat;
+        $driverShare  = round($total * 0.95, 2);
+        $primaryShare = round($total * 0.05, 2);
+
+        $syCashWallet  = $this->lockWalletByPhone(config('admin.sycash.phone'));
+        $driverWallet  = $this->lockWalletByUserId($ride->driver_id);
+        $primaryWallet = $this->lockWalletByPhone(config('admin.primary.phone'));
+
+        $this->assertSufficientBalance(
+            $syCashWallet,
+            $total,
+            "Insufficient SyCash balance for no-show settlement. Required: {$total}"
+        );
+
+        $syCashPrev  = $syCashWallet->balance;
+        $driverPrev  = $driverWallet->balance;
+        $primaryPrev = $primaryWallet->balance;
+
+        $syCashWallet->balance  -= $total;
+        $driverWallet->balance  += $driverShare;
+        $primaryWallet->balance += $primaryShare;
+
+        $syCashWallet->save();
+        $driverWallet->save();
+        $primaryWallet->save();
+
+        $txId = 'PASS_NOSHOW_' . time() . '_' . Str::random(6);
+
+        WalletTransaction::create([
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
+            'type'             => 'passenger_no_show_settlement',
+            'amount'           => -$total,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => $syCashWallet->balance,
+            'description'      => "No-show settlement — booking #{$booking->id}",
+            'transaction_id'   => 'SYCASH_' . $txId,
+            'status'           => 'completed',
+            'reference'        => "booking:{$booking->id}",
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id'        => $driverWallet->id,
+            'user_id'          => $ride->driver_id,
+            'type'             => 'passenger_no_show_earning',
+            'amount'           => $driverShare,
+            'previous_balance' => $driverPrev,
+            'new_balance'      => $driverWallet->balance,
+            'description'      => "No-show compensation (95%) — passenger absent, {$booking->seats} seat(s)",
+            'transaction_id'   => 'DRIVER_' . $txId,
+            'status'           => 'completed',
+            'reference'        => "booking:{$booking->id}",
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id'        => $primaryWallet->id,
+            'user_id'          => null,
+            'type'             => 'platform_fee',
+            'amount'           => $primaryShare,
+            'previous_balance' => $primaryPrev,
+            'new_balance'      => $primaryWallet->balance,
+            'description'      => "Platform fee (5%) — no-show booking #{$booking->id}",
+            'transaction_id'   => 'PRIMARY_' . $txId,
+            'status'           => 'completed',
+            'reference'        => "booking:{$booking->id}",
+        ]);
+
+        Log::info('Passenger no-show settled', [
+            'booking_id'   => $booking->id,
+            'driver_share' => $driverShare,
+            'primary_share'=> $primaryShare,
+        ]);
+    }
+
+    // =========================================================================
+    // DRIVER NO-SHOW  (SyCash → Passenger 100%)
+    // =========================================================================
+
+    /**
+     * Driver didn't show — E-PAY ride.
+     * SyCash → Passenger (100% refund).
+     */
+    public function processDriverNoShowRefund(Ride $ride, Booking $booking, User $passenger): void
+    {
+        $refundAmount    = $booking->seats * $ride->price_per_seat;
+        $syCashWallet    = $this->lockWalletByPhone(config('admin.sycash.phone'));
+        $passengerWallet = $this->lockWalletByUserId($passenger->id);
+
+        $this->assertSufficientBalance(
+            $syCashWallet,
+            $refundAmount,
+            "Insufficient SyCash balance for driver no-show refund. Required: {$refundAmount}"
+        );
+
+        $syCashPrev    = $syCashWallet->balance;
+        $passengerPrev = $passengerWallet->balance;
+
+        $syCashWallet->balance    -= $refundAmount;
+        $passengerWallet->balance += $refundAmount;
+
+        $syCashWallet->save();
+        $passengerWallet->save();
+
+        $txId = 'DRIVER_NOSHOW_' . time() . '_' . Str::random(6);
+
+        WalletTransaction::create([
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
+            'type'             => 'driver_no_show_refund',
+            'amount'           => -$refundAmount,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => $syCashWallet->balance,
+            'description'      => "Driver no-show — full refund to passenger, booking #{$booking->id}",
+            'transaction_id'   => 'SYCASH_' . $txId,
+            'status'           => 'completed',
+            'reference'        => "booking:{$booking->id}",
+        ]);
+
+        WalletTransaction::create([
+            'wallet_id'        => $passengerWallet->id,
+            'user_id'          => $passenger->id,
+            'type'             => 'driver_no_show_refund',
+            'amount'           => $refundAmount,
+            'previous_balance' => $passengerPrev,
+            'new_balance'      => $passengerWallet->balance,
+            'description'      => "Full refund — driver no-show: {$ride->pickup_address} → {$ride->destination_address}",
+            'transaction_id'   => 'PASS_' . $txId,
+            'status'           => 'completed',
+            'reference'        => "booking:{$booking->id}",
+        ]);
+
+        Log::info('Driver no-show refund processed', [
+            'booking_id'    => $booking->id,
+            'passenger_id'  => $passenger->id,
+            'refund_amount' => $refundAmount,
+        ]);
+    }
+
+    // =========================================================================
+    // PRIVATE HELPERS
+    // =========================================================================
+
     private function lockWalletByUserId(int $userId): Wallet
     {
-        $wallet = Wallet::where('user_id', $userId)
-            ->lockForUpdate()
-            ->first();
+        $wallet = Wallet::where('user_id', $userId)->lockForUpdate()->first();
 
         if (!$wallet) {
             throw new \RuntimeException("Wallet not found for user ID: {$userId}");
@@ -766,151 +610,24 @@ class WalletTransactionService
         return $wallet;
     }
 
-    /**
-     * Lock a wallet row by phone number for the current transaction.
-     */
     private function lockWalletByPhone(string $phone): Wallet
     {
-        $wallet = Wallet::where('phone_number', $phone)
-            ->lockForUpdate()
-            ->first();
+        $wallet = Wallet::where('phone_number', $phone)->lockForUpdate()->first();
 
         if (!$wallet) {
-            throw new \RuntimeException("Wallet not found for phone: {$phone}");
+            throw new \RuntimeException(
+                "Wallet not found for phone: {$phone}. " .
+                "Run: php artisan db:seed --class=SystemWalletSeeder"
+            );
         }
 
         return $wallet;
     }
 
-    /**
-     * Assert a wallet has sufficient balance; throw with human-readable message if not.
-     */
     private function assertSufficientBalance(Wallet $wallet, float $required, string $message): void
     {
         if ($wallet->balance < $required) {
             throw new \RuntimeException($message);
         }
-    }
-
-    // =========================================================================
-// PASSENGER NO-SHOW (E-PAY only)
-// =========================================================================
-    /**
-     * Passenger didn't show up — E-PAY ride.
-     * Admin escrow → 95% Driver, 5% SyCash. Passenger gets 0%.
-     */
-    public function processPassengerNoShow(Booking $booking, Ride $ride, User $passenger): void
-    {
-        $totalAmount  = $booking->seats * $ride->price_per_seat;
-        $driverShare  = round($totalAmount * 0.95, 2);
-        $syCashShare  = round($totalAmount * 0.05, 2);
-
-        $adminWallet  = $this->lockWalletByPhone(config('admin.primary.phone'));
-        $driverWallet = $this->lockWalletByUserId($ride->driver_id);
-        $syCashWallet = $this->lockWalletByPhone(config('admin.sycash.phone'));
-
-        $this->assertSufficientBalance($adminWallet, $totalAmount,
-            "Insufficient admin balance for no-show settlement. Required: {$totalAmount}");
-
-        $adminPrev  = $adminWallet->balance;
-        $driverPrev = $driverWallet->balance;
-        $syCashPrev = $syCashWallet->balance;
-
-        $adminWallet->balance  -= $totalAmount;
-        $driverWallet->balance += $driverShare;
-        $syCashWallet->balance += $syCashShare;
-
-        $adminWallet->save();
-        $driverWallet->save();
-        $syCashWallet->save();
-
-        $txId = 'PASS_NOSHOW_' . time() . '_' . Str::random(6);
-
-        WalletTransaction::create([
-            'wallet_id' => $adminWallet->id, 'user_id' => $adminWallet->user_id,
-            'type' => 'passenger_no_show_settlement', 'amount' => -$totalAmount,
-            'previous_balance' => $adminPrev, 'new_balance' => $adminWallet->balance,
-            'description' => "Passenger no-show: {$booking->seats} seat(s) settled",
-            'transaction_id' => 'ADMIN_' . $txId, 'status' => 'completed',
-            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id,
-                'driver_share' => $driverShare, 'sycash_share' => $syCashShare],
-        ]);
-
-        WalletTransaction::create([
-            'wallet_id' => $driverWallet->id, 'user_id' => $ride->driver_id,
-            'type' => 'passenger_no_show_earning', 'amount' => $driverShare,
-            'previous_balance' => $driverPrev, 'new_balance' => $driverWallet->balance,
-            'description' => "No-show compensation: passenger absent ({$booking->seats} seat(s))",
-            'transaction_id' => 'DRIVER_' . $txId, 'status' => 'completed',
-            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
-        ]);
-
-        WalletTransaction::create([
-            'wallet_id' => $syCashWallet->id, 'user_id' => $syCashWallet->user_id,
-            'type' => 'passenger_no_show_fee', 'amount' => $syCashShare,
-            'previous_balance' => $syCashPrev, 'new_balance' => $syCashWallet->balance,
-            'description' => "No-show platform fee (5%): booking #{$booking->id}",
-            'transaction_id' => 'SYCASH_' . $txId, 'status' => 'completed',
-            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
-        ]);
-
-        Log::info('Passenger no-show settled (E-PAY)', [
-            'booking_id'   => $booking->id,
-            'driver_share' => $driverShare,
-            'sycash_share' => $syCashShare,
-        ]);
-    }
-
-// =========================================================================
-// DRIVER NO-SHOW (E-PAY only)
-// =========================================================================
-    /**
-     * Driver didn't show up — E-PAY ride.
-     * Admin escrow → 100% refund to passenger.
-     */
-    public function processDriverNoShowRefund(Ride $ride, Booking $booking, User $passenger): void
-    {
-        $refundAmount    = $booking->seats * $ride->price_per_seat;
-        $adminWallet     = $this->lockWalletByPhone(config('admin.primary.phone'));
-        $passengerWallet = $this->lockWalletByUserId($passenger->id);
-
-        $this->assertSufficientBalance($adminWallet, $refundAmount,
-            "Insufficient admin balance for driver no-show refund. Required: {$refundAmount}");
-
-        $adminPrev     = $adminWallet->balance;
-        $passengerPrev = $passengerWallet->balance;
-
-        $adminWallet->balance     -= $refundAmount;
-        $passengerWallet->balance += $refundAmount;
-
-        $adminWallet->save();
-        $passengerWallet->save();
-
-        $txId = 'DRIVER_NOSHOW_' . time() . '_' . Str::random(6);
-
-        WalletTransaction::create([
-            'wallet_id' => $adminWallet->id, 'user_id' => $adminWallet->user_id,
-            'type' => 'driver_no_show_refund', 'amount' => -$refundAmount,
-            'previous_balance' => $adminPrev, 'new_balance' => $adminWallet->balance,
-            'description' => "Driver no-show: full refund to passenger for booking #{$booking->id}",
-            'transaction_id' => 'ADMIN_' . $txId, 'status' => 'completed',
-            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id],
-        ]);
-
-        WalletTransaction::create([
-            'wallet_id' => $passengerWallet->id, 'user_id' => $passenger->id,
-            'type' => 'driver_no_show_refund', 'amount' => $refundAmount,
-            'previous_balance' => $passengerPrev, 'new_balance' => $passengerWallet->balance,
-            'description' => "Full refund — driver no-show: {$ride->pickup_address} → {$ride->destination_address}",
-            'transaction_id' => 'PASS_' . $txId, 'status' => 'completed',
-            'metadata' => ['booking_id' => $booking->id, 'ride_id' => $ride->id,
-                'refund_reason' => 'driver_no_show'],
-        ]);
-
-        Log::info('Driver no-show refund processed', [
-            'booking_id'    => $booking->id,
-            'passenger_id'  => $passenger->id,
-            'refund_amount' => $refundAmount,
-        ]);
     }
 }

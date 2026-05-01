@@ -3,158 +3,125 @@
 namespace App\Services\Admin;
 
 use App\Models\User;
-use App\Models\Wallet;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Session;
+use App\Services\JwtService;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Service for admin authentication
- * Eliminates auth logic from AdminDashboardController
+ * AdminAuthService
+ *
+ * Handles admin login / refresh / logout.
+ *
+ * Admin users are kept as lightweight User rows purely so JwtService
+ * can issue tokens. They have no wallet attached — system wallets
+ * (Primary Escrow, SyCash) are standalone rows seeded via SystemWalletSeeder.
  */
-class AdminAuthService
+final class AdminAuthService
 {
+    public function __construct(
+        private readonly JwtService $jwtService,
+    ) {}
+
+    // =========================================================================
+    // LOGIN
+    // =========================================================================
+
     /**
-     * Authenticate admin with email and password
+     * Validate credentials (email OR username) + password.
+     * Ensure a minimal admin User row exists (for JWT), then return token pair.
+     *
+     * @return array{tokens: array, admin: array}|null
      */
-    public function authenticate(string $email, string $password): ?array
+    public function authenticate(string $emailOrUsername, string $password): ?array
     {
-        $adminConfig = $this->getAdminConfigByCredentials($email, $password);
+        $adminConfig = $this->findAdminConfig($emailOrUsername, $password);
 
         if (!$adminConfig) {
-            Log::warning('Admin login attempt failed', ['email' => $email]);
+            Log::warning('Admin login failed', ['identifier' => $emailOrUsername]);
             return null;
         }
 
-        // Create session
-        $this->createAdminSession($adminConfig);
+        // Ensure a User row exists for this admin so JwtService can sign tokens.
+        // This row has NO wallet — it is only a JWT principal.
+        $adminUser = User::firstOrCreate(
+            ['email' => $adminConfig['email']],
+            [
+                'first_name' => $adminConfig['first_name'],
+                'last_name'  => $adminConfig['last_name'],
+                'password'   => bcrypt($adminConfig['password']),
+                'gender'     => 'M',
+                'address'    => $adminConfig['address'] ?? 'دمشق',
+                'status'     => 1,
+            ]
+        );
 
-        Log::info('Admin logged in successfully', [
-            'email' => $email,
-            'type' => $adminConfig['type']
+        $tokens = $this->jwtService->generateTokenPair($adminUser);
+
+        Log::info('Admin logged in', [
+            'identifier' => $emailOrUsername,
+            'admin_type' => $adminConfig['type'],
         ]);
 
-        return $adminConfig;
+        return [
+            'tokens' => $tokens,
+            'admin'  => [
+                'type'  => $adminConfig['type'],
+                'email' => $adminConfig['email'],
+                'name'  => $adminConfig['first_name'] . ' ' . $adminConfig['last_name'],
+                'phone' => $adminConfig['phone'],
+            ],
+        ];
     }
 
-    /**
-     * Get admin configuration by credentials
-     */
-    private function getAdminConfigByCredentials(string $email, string $password): ?array
+    // =========================================================================
+    // REFRESH / LOGOUT
+    // =========================================================================
+
+    public function refresh(string $refreshToken): ?array
     {
-        $adminConfigs = config('admin');
+        return $this->jwtService->refreshAccessToken($refreshToken);
+    }
 
+    public function logout(int $adminUserId): void
+    {
+        $this->jwtService->revokeAllTokens($adminUserId);
+        Log::info('Admin logged out', ['user_id' => $adminUserId]);
+    }
+
+    // =========================================================================
+    // HELPERS used by controllers / middleware
+    // =========================================================================
+
+    public function getAdminConfigFromRequest(\Illuminate\Http\Request $request): ?array
+    {
+        return $request->attributes->get('adminConfig');
+    }
+
+    public function isPrimary(\Illuminate\Http\Request $request): bool
+    {
+        return $request->attributes->get('adminType') === 'primary';
+    }
+
+    // =========================================================================
+    // PRIVATE
+    // =========================================================================
+
+    /**
+     * Match $identifier against each admin config's 'email' OR 'username' field,
+     * then verify the password.
+     */
+    private function findAdminConfig(string $identifier, string $password): ?array
+    {
         foreach (['primary', 'sycash'] as $type) {
-            $config = $adminConfigs[$type];
+            $config = config("admin.{$type}");
 
-            // In production, use Hash::check for hashed passwords
-            if ($config['email'] === $email && $config['password'] === $password) {
+            $emailMatch    = isset($config['email'])    && $config['email']    === $identifier;
+            $usernameMatch = isset($config['username']) && $config['username'] === $identifier;
+
+            if (($emailMatch || $usernameMatch) && $config['password'] === $password) {
                 return array_merge($config, ['type' => $type]);
             }
         }
 
         return null;
-    }
-
-    /**
-     * Create admin session
-     */
-    private function createAdminSession(array $adminConfig): void
-    {
-        Session::put([
-            'admin_logged_in' => true,
-            'admin_email' => $adminConfig['email'],
-            'admin_type' => $adminConfig['type'],
-            'admin_permissions' => $adminConfig['permissions'] ?? []
-        ]);
-
-        Session::save();
-    }
-
-    /**
-     * Check if current user is authenticated admin
-     */
-    public function isAuthenticated(): bool
-    {
-        return Session::get('admin_logged_in', false);
-    }
-
-    /**
-     * Get current admin configuration
-     */
-    public function getCurrentAdmin(): ?array
-    {
-        if (!$this->isAuthenticated()) {
-            return null;
-        }
-
-        $type = Session::get('admin_type');
-        $config = config("admin.{$type}");
-
-        if (!$config) {
-            return null;
-        }
-
-        return array_merge($config, ['type' => $type]);
-    }
-
-    /**
-     * Check if current admin is primary admin
-     */
-    public function isPrimaryAdmin(): bool
-    {
-        return Session::get('admin_type') === 'primary';
-    }
-
-    /**
-     * Check if admin has permission
-     */
-    public function hasPermission(string $permission): bool
-    {
-        $permissions = Session::get('admin_permissions', []);
-
-        // Wildcard permission
-        if (in_array('*', $permissions)) {
-            return true;
-        }
-
-        return in_array($permission, $permissions);
-    }
-
-    /**
-     * Logout current admin
-     */
-    public function logout(): void
-    {
-        $email = Session::get('admin_email');
-
-        Session::forget([
-            'admin_logged_in',
-            'admin_email',
-            'admin_type',
-            'admin_permissions'
-        ]);
-
-        Log::info('Admin logged out', ['email' => $email]);
-    }
-
-    /**
-     * Get admin info for response
-     */
-    public function getAdminInfo(): ?array
-    {
-        $adminConfig = $this->getCurrentAdmin();
-
-        if (!$adminConfig) {
-            return null;
-        }
-
-        return [
-            'email' => $adminConfig['email'],
-            'type' => $adminConfig['type'],
-            'name' => $adminConfig['first_name'] . ' ' . $adminConfig['last_name'],
-            'phone' => $adminConfig['phone'],
-            'permissions' => $adminConfig['permissions'] ?? []
-        ];
     }
 }
