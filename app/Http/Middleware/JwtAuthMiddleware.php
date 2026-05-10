@@ -10,93 +10,61 @@ use Symfony\Component\HttpFoundation\Response;
 
 class JwtAuthMiddleware
 {
-    protected JwtService $jwtService;
+    public function __construct(protected JwtService $jwtService) {}
 
-    public function __construct(JwtService $jwtService)
-    {
-        $this->jwtService = $jwtService;
-    }
-
-    /**
-     * Handle an incoming request.
-     *
-     * @param  \Closure(\Illuminate\Http\Request): (\Symfony\Component\HttpFoundation\Response)  $next
-     */
     public function handle(Request $request, Closure $next): Response
     {
-        // Get token from Authorization header
+        // 1. Extract Bearer token
         $token = $this->extractToken($request);
-
         if (!$token) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Unauthenticated',
-                'code' => 'TOKEN_MISSING'
-            ], 401);
+            return $this->fail('TOKEN_MISSING', 'Unauthenticated');
         }
 
-        // Decode and validate token
+        // 2. Decode: verify signature + expiry
         $payload = $this->jwtService->decodeToken($token);
-
         if (!$payload) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Invalid or expired token',
-                'code' => 'TOKEN_INVALID'
-            ], 401);
+            return $this->fail('TOKEN_INVALID', 'Invalid or expired token');
         }
 
-        // Verify token type
+        // 3. Must be an access token
         if (($payload['type'] ?? null) !== 'access') {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Invalid token type',
-                'code' => 'TOKEN_TYPE_INVALID'
-            ], 401);
+            return $this->fail('TOKEN_TYPE_INVALID', 'Invalid token type');
         }
 
-        // Get user
+        // 4. Load user
         $user = User::find($payload['sub']);
-
         if (!$user) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'User not found',
-                'code' => 'USER_NOT_FOUND'
-            ], 401);
+            return $this->fail('USER_NOT_FOUND', 'User not found');
         }
 
-        // Check if user is active
+        // 5. Account must be active
         if ($user->status == 0) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'User account is inactive',
-                'code' => 'USER_INACTIVE'
-            ], 401);
+            return $this->fail('USER_INACTIVE', 'User account is inactive');
         }
 
-        // Attach user to request
-        $request->setUserResolver(function () use ($user) {
-            return $user;
-        });
+        // 6. Layer 3 — token_version check
+        //    Rejects tokens issued before the last password change or logout-all.
+        //    No extra DB query — user is already loaded above.
+        if (!$this->jwtService->validateTokenVersion($payload, $user)) {
+            return $this->fail(
+                'TOKEN_INVALIDATED',
+                'Your session has been invalidated. Please log in again.'
+            );
+        }
+
+        $request->setUserResolver(fn () => $user);
 
         return $next($request);
     }
 
-    /**
-     * Extract token from request
-     *
-     * @param Request $request
-     * @return string|null
-     */
     private function extractToken(Request $request): ?string
     {
-        $header = $request->header('Authorization');
+        $header = $request->header('Authorization', '');
+        return str_starts_with($header, 'Bearer ') ? substr($header, 7) : null;
+    }
 
-        if (!$header || !str_starts_with($header, 'Bearer ')) {
-            return null;
-        }
-
-        return substr($header, 7);
+    private function fail(string $code, string $message): Response
+    {
+        return response()->json(['status' => 'error', 'code' => $code, 'message' => $message], 401);
     }
 }

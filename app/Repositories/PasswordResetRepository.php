@@ -3,26 +3,29 @@
 namespace App\Repositories;
 
 use App\Interfaces\PasswordResetRepositoryInterface;
+use App\Services\JwtService;
 use Illuminate\Support\Facades\Password;
 
 class PasswordResetRepository implements PasswordResetRepositoryInterface
 {
+    public function __construct(private readonly JwtService $jwtService) {}
+
     public function sendResetLink(array $credentials)
     {
         return Password::sendResetLink($credentials);
     }
 
-    // app/Repositories/PasswordResetRepository.php
     public function reset(array $credentials)
     {
         return Password::reset($credentials, function ($user, $password) {
             $user->update([
                 'password' => bcrypt($password),
-                'status' => 0 // Force status to 0
+                'status'   => 1,
             ]);
 
-            // Optional: Clear existing tokens
-            $user->tokens()->delete();
+            // This is the critical line — revokes all refresh tokens
+            // AND increments token_version to kill all access tokens
+            $this->jwtService->revokeAllTokens($user->id);
         });
     }
 }

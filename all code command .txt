@@ -18,3 +18,7 @@ Get-ChildItem -Path "tests" -Recurse -Include "*.php" | ForEach-Object {
     "`n`n===== FILE: $($_.FullName) =====`n"
     Get-Content $_.FullName
 } | Out-File -FilePath "tests_code.txt" -Encoding utf8
+
+php artisan migrate:fresh
+ php artisan db:seed --class=SystemWalletSeeder
+php artisan db:seed --class=Atarikaktestseeder

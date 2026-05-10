@@ -31,16 +31,17 @@ class User extends Authenticatable
         'google_id',
         'avatar',
         'status',
+        'token_version',          // ADD THIS
         'is_verified_passenger',
         'is_verified_driver',
         'verification_status',
         'wallet_id',
-        'email_verified_at'
+        'email_verified_at',
     ];
-
     protected $casts = [
         'email_verified_at' => 'datetime',
-        'password' => 'hashed'
+        'password'          => 'hashed',
+        'token_version'     => 'integer',  // ADD THIS
     ];
 
     protected $hidden = [

@@ -50,7 +50,6 @@ class VerificationRepository implements VerificationRepositoryInterface
     {
         $user = User::findOrFail($userId);
 
-        // Only allow approving if status is exactly 'pending'
         if ($user->verification_status !== 'pending') {
             throw new \Exception('Cannot approve driver: not in pending state');
         }
@@ -60,6 +59,24 @@ class VerificationRepository implements VerificationRepositoryInterface
             'is_verified_driver'    => true,
             'verification_status'   => 'approved',
         ]);
+
+        // ── Seed initial 3-star rating for new drivers ─────────────────
+        // Uses the primary admin account as the rater so foreign key is valid.
+        // firstOrCreate ensures re-approving the same driver never duplicates it.
+        $adminUser = \App\Models\User::where('email', config('admin.primary.email'))->first();
+
+        if ($adminUser) {
+            \App\Models\UserRating::firstOrCreate(
+                [
+                    'rater_id'      => $adminUser->id,
+                    'rated_user_id' => $userId,
+                ],
+                [
+                    'rating' => 3.0,
+                ]
+            );
+        }
+        // ───────────────────────────────────────────────────────────────
 
         return $user;
     }

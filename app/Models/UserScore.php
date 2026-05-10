@@ -28,14 +28,21 @@ class UserScore extends Model
         'score',
         'total_rides',
         'total_cancellations',
+        'total_no_shows',      // ← add this
     ];
 
     protected $casts = [
         'score'               => 'integer',
         'total_rides'         => 'integer',
         'total_cancellations' => 'integer',
+        'total_no_shows'      => 'integer',   // ← add this
     ];
 
+// Add this helper method
+    public function incrementNoShows(): void
+    {
+        $this->increment('total_no_shows');
+    }
     // ── Relationships ────────────────────────────────────────────────────────
 
     public function user(): BelongsTo
@@ -83,7 +90,7 @@ class UserScore extends Model
      */
     public function applyDelta(int $delta): void
     {
-        $this->score = max(0, min(200, $this->score + $delta));
+        $this->score = max(0, min(100, $this->score + $delta));
         $this->save();
     }
 

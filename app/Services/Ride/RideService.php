@@ -338,92 +338,97 @@ final class RideService
      * Idempotent — returns immediately if the ride is not in AWAITING_CONFIRMATION
      * or if not all confirmations are in yet.
      */
+
     public function checkAndCompleteRide(Ride $ride): void
     {
-        if ($ride->status !== RideStatus::AWAITING_CONFIRMATION->value) {
-            return;
-        }
+        DB::transaction(function () use ($ride) {
 
-        $confirmedBookings   = $ride->bookings()
-            ->where('status', BookingStatus::CONFIRMED->value)
-            ->with('user')
-            ->get();
+            // ── Re-load inside a row-level lock ───────────────────────────
+            // Any concurrent / sequential second call will block here until
+            // the first call commits. Once it commits the status is FINISHED,
+            // so the second call hits the guard below and exits cleanly.
+            $ride = Ride::lockForUpdate()->findOrFail($ride->id);
 
-        $totalPassengers     = $confirmedBookings->count();
-        $passengersConfirmed = $confirmedBookings->whereNotNull('passenger_confirmed_at')->count();
-
-        // Guard: not everyone has confirmed yet
-        if (!$ride->driver_confirmed_at || $passengersConfirmed < $totalPassengers) {
-            return;
-        }
-
-        DB::transaction(function () use ($totalPassengers, $ride, $confirmedBookings) {
-            // 1. Release E-PAY earnings from admin escrow → driver's wallet
-            if ($ride->payment_method === PaymentMethod::E_PAY->value
-                && $confirmedBookings->isNotEmpty()
-            ) {
-                $this->walletService->releaseEarningsToDriver($ride, $confirmedBookings);
+            // ── Idempotency guard ─────────────────────────────────────────
+            // If the first call already finished the ride, bail immediately.
+            if ($ride->status !== RideStatus::AWAITING_CONFIRMATION->value) {
+                return;
             }
 
-            // 2. Finalise ride and bookings
-            $ride->status = RideStatus::FINISHED->value;
+            // ── Gate: driver must have confirmed ─────────────────────────
+            if (! $ride->driver_confirmed_at) {
+                return;
+            }
+
+            // ── Gate: every confirmed booking must have passenger confirm ─
+            $confirmedBookings = $ride->bookings()
+                ->where('status', BookingStatus::CONFIRMED->value)
+                ->get();
+
+            if ($confirmedBookings->isNotEmpty()) {
+                $allPassengersConfirmed = $confirmedBookings->every(
+                    fn($b) => $b->passenger_confirmed_at !== null
+                );
+                if (! $allPassengersConfirmed) {
+                    return;
+                }
+            }
+
+            // ── Flip status to FINISHED *before* any side-effects ─────────
+            // This is the true idempotency anchor. The second call's
+            // lockForUpdate() will now see FINISHED and return early above.
+            $ride->status      = RideStatus::FINISHED->value;
+            $ride->finished_at = now();
             $ride->save();
 
-            $ride->bookings()
-                ->where('status', BookingStatus::CONFIRMED->value)
-                ->update([
-                    'status'       => BookingStatus::COMPLETED->value,
-                    'completed_at' => now(),
-                ]);
-
-            // 3. Record +10 score for driver + all confirmed passengers.
-            //    Reload ride so bookings reflect COMPLETED status for ScoreService.
-            $freshRide = $ride->fresh(['driver', 'bookings.user']);
-            $this->scoreService->recordRideCompleted($freshRide);
-
-            // 4. Notify driver
-            $totalEarnings = $confirmedBookings->sum(fn($b) => $b->seats * $ride->price_per_seat);
-
-            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
-                $this->notificationService->createNotification(
-                    $ride->driver,
-                    'ride_completed_earnings',
-                    'Payment Released ✓  +10 pts',
-                    "Ride complete! " . number_format($totalEarnings, 0) . " SYP released to your wallet. "
-                    . "+10 trust points added.",
-                    ['ride_id' => $ride->id, 'total_earnings' => $totalEarnings],
-                    'high', 'ride'
-                );
-            } else {
-                $this->notificationService->createNotification(
-                    $ride->driver,
-                    'ride_completed',
-                    'Ride Completed ✓  +10 pts',
-                    "Ride from {$ride->pickup_address} to {$ride->destination_address} confirmed complete. "
-                    . "+10 trust points added.",
-                    ['ride_id' => $ride->id],
-                    'normal', 'ride'
-                );
+            // ── Release wallet escrow (E-PAY rides only) ──────────────────
+            $ePayBookings = $confirmedBookings->filter(
+                fn($b) => $ride->payment_method === PaymentMethod::E_PAY->value
+            );
+            if ($ePayBookings->isNotEmpty()) {
+                $this->walletService->releaseEarningsToDriver($ride, $ePayBookings);
             }
 
-            // 5. Notify each passenger
+            // ── Mark every confirmed booking as completed ─────────────────
+            foreach ($confirmedBookings as $booking) {
+                $booking->markAsCompleted();
+            }
+
+            // ── Record scores for driver and each passenger ───────────────
+            // ✅ correct
+            $this->scoreService->recordRideCompleted($ride);
+
+            foreach ($confirmedBookings as $booking) {
+                $this->scoreService->recordRideCompleted($ride);
+            }
+
+            // ── Notify all parties ────────────────────────────────────────
+            $this->notificationService->createNotification(
+                $ride->driver,
+                'ride_completed',
+                'Ride Completed ✓',
+                "Your ride from {$ride->pickup_address} to {$ride->destination_address} is complete. Earnings released.",
+                ['ride_id' => $ride->id],
+                'high',
+                'ride'
+            );
+
             foreach ($confirmedBookings as $booking) {
                 $this->notificationService->createNotification(
                     $booking->user,
                     'ride_completed',
-                    'Ride Completed ✓  +10 pts',
-                    "Your ride from {$ride->pickup_address} to {$ride->destination_address} is complete. "
-                    . "+10 trust points added to your profile!",
+                    'Ride Completed ✓',
+                    "Your ride from {$ride->pickup_address} to {$ride->destination_address} is complete. Thank you!",
                     ['ride_id' => $ride->id, 'booking_id' => $booking->id],
-                    'normal', 'ride'
+                    'high',
+                    'ride'
                 );
             }
 
-            Log::info('Ride fully completed', [
-                'ride_id'     => $ride->id,
-                'passengers'  => $totalPassengers,
-                'earnings'    => $totalEarnings,
-                'payment'     => $ride->payment_method,
+            Log::info('Ride completed', [
+                'ride_id'   => $ride->id,
+                'bookings'  => $confirmedBookings->count(),
+                'payment'   => $ride->payment_method,
             ]);
         });
     }
@@ -470,7 +475,8 @@ final class RideService
             }
 
             // Score: −15 to driver — always, regardless of payment method
-            $this->scoreService->recordDriverNoShow($ride->driver, $ride);
+            // ✅ pass the payment method
+            $this->scoreService->recordDriverNoShow($ride->driver, $ride, $ride->payment_method);
 
             // Notify driver
             $refundNote = $ride->payment_method === PaymentMethod::E_PAY->value

@@ -4,121 +4,58 @@ namespace App\Services;
 
 use App\Models\User;
 use App\Models\RefreshToken;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
 class JwtService
 {
+    // =========================================================================
+    // PUBLIC — TOKEN PAIR
+    // =========================================================================
+
     /**
-     * Generate access and refresh tokens for a user
-     *
-     * @param User $user
-     * @return array
+     * Generate access + refresh token pair for a regular user.
      */
     public function generateTokenPair(User $user): array
     {
-        // Generate access token (short-lived: 15 minutes)
-        $accessToken = $this->generateAccessToken($user);
-
-        // Generate refresh token (long-lived: 7 days)
+        $accessToken  = $this->generateAccessToken($user);
         $refreshToken = $this->generateRefreshToken($user);
 
         return [
-            'access_token' => $accessToken['token'],
-            'access_token_expires_at' => $accessToken['expires_at'],
-            'refresh_token' => $refreshToken['token'],
+            'access_token'             => $accessToken['token'],
+            'access_token_expires_at'  => $accessToken['expires_at'],
+            'refresh_token'            => $refreshToken['token'],
             'refresh_token_expires_at' => $refreshToken['expires_at'],
-            'token_type' => 'Bearer'
+            'token_type'               => 'Bearer',
         ];
     }
 
     /**
-     * Generate access token
-     *
-     * @param User $user
-     * @return array
+     * Generate access + refresh token pair for an admin user.
+     * Embeds is_admin and admin_type claims so AdminJwtMiddleware can verify.
      */
-    private function generateAccessToken(User $user): array
+    public function generateAdminTokenPair(User $adminUser, string $adminType): array
     {
-        $expiresIn = config('jwt.ttl', 15); // 15 minutes default
-        $expiresAt = Carbon::now()->addMinutes($expiresIn);
-
-        $payload = [
-            'iss' => config('app.url'),
-            'sub' => $user->id,
-            'iat' => Carbon::now()->timestamp,
-            'exp' => $expiresAt->timestamp,
-            'jti' => Str::uuid()->toString(),
-            'type' => 'access'
-        ];
-
-        $token = $this->encodeToken($payload);
+        $accessToken  = $this->generateAdminAccessToken($adminUser, $adminType);
+        $refreshToken = $this->generateRefreshToken($adminUser);
 
         return [
-            'token' => $token,
-            'expires_at' => $expiresAt->toDateTimeString(),
-            'expires_in' => $expiresIn * 60 // in seconds
+            'access_token'  => $accessToken,
+            'refresh_token' => $refreshToken['token'],
+            'expires_in'    => config('jwt.ttl', 15) * 60,
+            'token_type'    => 'Bearer',
+            'admin_type'    => $adminType,
         ];
     }
 
-    /**
-     * Generate and store refresh token
-     *
-     * @param User $user
-     * @return array
-     */
-    private function generateRefreshToken(User $user): array
-    {
-        $expiresIn = config('jwt.refresh_ttl', 10080); // 7 days in minutes
-        $expiresAt = Carbon::now()->addMinutes($expiresIn);
-
-        // Generate unique refresh token
-        $tokenString = Str::random(64);
-        $hashedToken = hash('sha256', $tokenString);
-
-        // Store in database
-        RefreshToken::create([
-            'user_id' => $user->id,
-            'token' => $hashedToken,
-            'expires_at' => $expiresAt,
-            'user_agent' => request()->userAgent(),
-            'ip_address' => request()->ip()
-        ]);
-
-        return [
-            'token' => $tokenString,
-            'expires_at' => $expiresAt->toDateTimeString(),
-            'expires_in' => $expiresIn * 60 // in seconds
-        ];
-    }
+    // =========================================================================
+    // PUBLIC — DECODE & VALIDATE
+    // =========================================================================
 
     /**
-     * Encode JWT token
-     *
-     * @param array $payload
-     * @return string
-     */
-    private function encodeToken(array $payload): string
-    {
-        $header = [
-            'typ' => 'JWT',
-            'alg' => config('jwt.algo', 'HS256')
-        ];
-
-        $headerEncoded = $this->base64UrlEncode(json_encode($header));
-        $payloadEncoded = $this->base64UrlEncode(json_encode($payload));
-
-        $signature = $this->generateSignature($headerEncoded, $payloadEncoded);
-
-        return "{$headerEncoded}.{$payloadEncoded}.{$signature}";
-    }
-
-    /**
-     * Decode and validate JWT token
-     *
-     * @param string $token
-     * @return array|null
+     * Decode and verify a JWT token (signature + expiry).
+     * Does NOT check token_version — that is done in the middleware
+     * after the user is loaded, to avoid an extra DB query.
      */
     public function decodeToken(string $token): ?array
     {
@@ -138,12 +75,11 @@ class JwtService
 
         // Decode payload
         $payload = json_decode($this->base64UrlDecode($payloadEncoded), true);
-
         if (!$payload) {
             return null;
         }
 
-        // Check expiration
+        // Check expiry
         if (isset($payload['exp']) && Carbon::now()->timestamp > $payload['exp']) {
             return null;
         }
@@ -152,16 +88,39 @@ class JwtService
     }
 
     /**
-     * Refresh access token using refresh token
+     * Validate that the token's 'ver' claim matches the user's current token_version.
      *
-     * @param string $refreshToken
-     * @return array|null
+     * Call this in JwtAuthMiddleware AFTER decodeToken() + User::find().
+     * Zero extra DB queries — user is already loaded.
+     *
+     * Returns false if:
+     *   - 'ver' claim is missing (token issued before this system was added → force re-login)
+     *   - 'ver' doesn't match user.token_version (password was changed → token is dead)
+     */
+    public function validateTokenVersion(array $payload, User $user): bool
+    {
+        if (!isset($payload['ver'])) {
+            return false;
+        }
+
+        return (int) $payload['ver'] === (int) $user->token_version;
+    }
+
+    // =========================================================================
+    // PUBLIC — REFRESH (with rotation)
+    // =========================================================================
+
+    /**
+     * Validate refresh token, REVOKE IT, and issue a brand new pair.
+     *
+     * Rotation: each refresh token is single-use only.
+     * If an attacker uses a stolen refresh token, the legitimate user's
+     * next refresh will fail — a clear signal of compromise.
      */
     public function refreshAccessToken(string $refreshToken): ?array
     {
         $hashedToken = hash('sha256', $refreshToken);
 
-        // Find refresh token in database
         $storedToken = RefreshToken::where('token', $hashedToken)
             ->where('expires_at', '>', Carbon::now())
             ->where('revoked', false)
@@ -171,36 +130,44 @@ class JwtService
             return null;
         }
 
-        // Get user
         $user = User::find($storedToken->user_id);
         if (!$user) {
             return null;
         }
 
-        // Refresh token rotation: revoke old token and generate new pair
+        // ROTATE: revoke old token before issuing new pair
         $storedToken->update(['revoked' => true]);
 
         return $this->generateTokenPair($user);
     }
 
+    // =========================================================================
+    // PUBLIC — REVOKE (password change / logout-all)
+    // =========================================================================
+
     /**
-     * Revoke all user's refresh tokens
+     * Immediately kills every token for this user across all devices:
      *
-     * @param int $userId
-     * @return void
+     *   1. Revokes all refresh tokens in DB → can't mint new access tokens.
+     *   2. Increments token_version → all current access tokens fail the
+     *      'ver' check in JwtAuthMiddleware on their very next request.
+     *
+     * Call this on: password reset, "logout from all devices", admin-forced logout.
      */
     public function revokeAllTokens(int $userId): void
     {
         RefreshToken::where('user_id', $userId)
             ->where('revoked', false)
             ->update(['revoked' => true]);
+
+        // Bump version — kills every outstanding access token immediately
+        User::where('id', $userId)->increment('token_version');
     }
 
-    /**
-     * Clean up expired tokens
-     *
-     * @return int Number of deleted tokens
-     */
+    // =========================================================================
+    // PUBLIC — CLEANUP (scheduled command)
+    // =========================================================================
+
     public function cleanupExpiredTokens(): int
     {
         return RefreshToken::where('expires_at', '<', Carbon::now())
@@ -208,83 +175,125 @@ class JwtService
             ->delete();
     }
 
+    // =========================================================================
+    // PRIVATE — TOKEN GENERATORS
+    // =========================================================================
+
     /**
-     * Generate signature for JWT
-     *
-     * @param string $header
-     * @param string $payload
-     * @return string
+     * Build a signed access token for a regular user.
+     * Includes 'ver' (token_version) so old tokens are rejected after
+     * a password change without any extra DB query.
      */
+    private function generateAccessToken(User $user): array
+    {
+        $expiresIn = config('jwt.ttl', 15); // minutes
+        $expiresAt = Carbon::now()->addMinutes($expiresIn);
+
+        $payload = [
+            'iss'  => config('app.url'),
+            'sub'  => $user->id,
+            'iat'  => Carbon::now()->timestamp,
+            'exp'  => $expiresAt->timestamp,
+            'jti'  => Str::uuid()->toString(),
+            'type' => 'access',
+            'ver'  => $user->token_version,   // ← token_version claim
+        ];
+
+        return [
+            'token'      => $this->encodeToken($payload),
+            'expires_at' => $expiresAt->toDateTimeString(),
+            'expires_in' => $expiresIn * 60,
+        ];
+    }
+
+    /**
+     * Build a signed access token for an admin user.
+     * Embeds is_admin + admin_type claims for AdminJwtMiddleware.
+     */
+    private function generateAdminAccessToken(User $adminUser, string $adminType): string
+    {
+        $expiresIn = config('jwt.ttl', 15);
+        $now       = Carbon::now();
+
+        $payload = [
+            'iss'        => config('app.url'),
+            'sub'        => $adminUser->id,
+            'iat'        => $now->timestamp,
+            'exp'        => $now->addMinutes($expiresIn)->timestamp,
+            'jti'        => Str::uuid()->toString(),
+            'type'       => 'access',
+            'ver'        => $adminUser->token_version,
+            'is_admin'   => true,
+            'admin_type' => $adminType,
+        ];
+
+        return $this->encodeToken($payload);
+    }
+
+    /**
+     * Generate, hash, and store a refresh token in the DB.
+     * Returns the plaintext token (returned to client once, never stored plain).
+     */
+    private function generateRefreshToken(User $user): array
+    {
+        $expiresIn   = config('jwt.refresh_ttl', 10080); // minutes, default 7 days
+        $expiresAt   = Carbon::now()->addMinutes($expiresIn);
+        $tokenString = Str::random(64);
+
+        RefreshToken::create([
+            'user_id'    => $user->id,
+            'token'      => hash('sha256', $tokenString), // store hash, never plaintext
+            'expires_at' => $expiresAt,
+            'user_agent' => request()->userAgent(),
+            'ip_address' => request()->ip(),
+        ]);
+
+        return [
+            'token'      => $tokenString,
+            'expires_at' => $expiresAt->toDateTimeString(),
+            'expires_in' => $expiresIn * 60,
+        ];
+    }
+
+    // =========================================================================
+    // PRIVATE — JWT ENCODING HELPERS (unchanged from original)
+    // =========================================================================
+
+    private function encodeToken(array $payload): string
+    {
+        $header = ['typ' => 'JWT', 'alg' => config('jwt.algo', 'HS256')];
+
+        $headerEncoded  = $this->base64UrlEncode(json_encode($header));
+        $payloadEncoded = $this->base64UrlEncode(json_encode($payload));
+        $signature      = $this->generateSignature($headerEncoded, $payloadEncoded);
+
+        return "{$headerEncoded}.{$payloadEncoded}.{$signature}";
+    }
+
     private function generateSignature(string $header, string $payload): string
     {
-        $secret = config('jwt.secret');
-        $algo = strtolower(config('jwt.algo', 'HS256'));
+        $secret  = config('jwt.secret');
+        $algo    = strtolower(config('jwt.algo', 'HS256'));
 
         $algoMap = [
             'hs256' => 'sha256',
             'hs384' => 'sha384',
-            'hs512' => 'sha512'
+            'hs512' => 'sha512',
         ];
 
-        $hashAlgo = $algoMap[$algo] ?? 'sha256';
+        $hashAlgo  = $algoMap[$algo] ?? 'sha256';
         $signature = hash_hmac($hashAlgo, "{$header}.{$payload}", $secret, true);
 
         return $this->base64UrlEncode($signature);
     }
 
-    /**
-     * Base64 URL encode
-     *
-     * @param string $data
-     * @return string
-     */
     private function base64UrlEncode(string $data): string
     {
         return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
     }
 
-    /**
-     * Base64 URL decode
-     *
-     * @param string $data
-     * @return string
-     */
     private function base64UrlDecode(string $data): string
     {
         return base64_decode(strtr($data, '-_', '+/'));
-    }
-    public function generateAdminTokenPair(User $adminUser, string $adminType): array
-    {
-        $accessToken  = $this->generateAdminAccessToken($adminUser, $adminType);
-        $refreshToken = $this->generateAndStoreRefreshToken($adminUser);
-
-        return [
-            'access_token'  => $accessToken,
-            'refresh_token' => $refreshToken,
-            'expires_in'    => config('jwt.access_ttl', 900), // seconds
-            'token_type'    => 'Bearer',
-            'admin_type'    => $adminType,
-        ];
-    }
-
-    /**
-     * Build a signed access token carrying admin-specific claims.
-     */
-    private function generateAdminAccessToken(User $adminUser, string $adminType): string
-    {
-        $now = time();
-
-        $payload = [
-            'sub'        => $adminUser->id,
-            'type'       => 'access',
-            'is_admin'   => true,          // ← AdminJwtMiddleware checks this
-            'admin_type' => $adminType,    // ← 'primary' | 'sycash'
-            'iat'        => $now,
-            'exp'        => $now + config('jwt.access_ttl', 900),
-        ];
-
-        return $this->encodeToken($payload);
-        // Note: encodeToken() is the private method you already use in
-        //       generateTokenPair() — reuse it as-is.
     }
 }
