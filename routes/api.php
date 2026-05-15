@@ -3,6 +3,7 @@
 use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\AdminDriverController;
 use App\Http\Controllers\API\AdminTripController;
+use App\Http\Controllers\API\AdminUserController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
@@ -219,7 +220,12 @@ Route::middleware('jwt')->group(function () {
 // ========================================
 
 Route::prefix('admin')->group(function () {
-
+    Route::get('users', [AdminUserController::class, 'index']);
+   /* GET /api/admin/users
+GET /api/admin/users?type=driver
+    GET /api/admin/users?type=passenger&status=pending
+        GET /api/admin/users?status=verified&date=last_30_days
+            GET /api/admin/users?type=driver&status=all&date=last_6_months&search=ahmed*/
     Route::get('drivers/verification-efficiency', [AdminDriverController::class, 'verificationEfficiency']);
     Route::get('drivers/dashboard',  [AdminDriverController::class, 'dashboard']);
 
@@ -231,9 +237,9 @@ Route::prefix('admin')->group(function () {
     Route::get('drivers',            [AdminDriverController::class, 'index']);
 
 //  Single driver profile / detail view
-    Route::get('drivers/{driverId}/profile', [AdminDriverController::class, 'driverProfile']);
-
-
+    //  Single driver profile / detail view
+    Route::get('drivers/{driverId}/profile',   [AdminDriverController::class, 'driverProfile']);
+    Route::get('drivers/{driverId}/dashboard', [AdminDriverController::class, 'driverDashboard']);
     // ── Public admin auth ─────────────────────────────────────────────────
     Route::post('/login',   [AdminDashboardController::class, 'login']);
     Route::post('/refresh', [AdminDashboardController::class, 'refresh']);

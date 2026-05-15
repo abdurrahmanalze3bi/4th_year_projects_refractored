@@ -227,6 +227,32 @@ final class AdminDriverController extends Controller
             ], 500);
         }
     }
+    public function driverDashboard(int $driverId): JsonResponse
+    {
+        try {
+            $data = $this->driverService->getDriverDashboard($driverId);
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $data,
+            ]);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Driver not found',
+            ], 404);
+        } catch (\Exception $e) {
+            Log::error('Driver dashboard failed', [
+                'driver_id' => $driverId,
+                'error'     => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Failed to load driver dashboard',
+            ], 500);
+        }
+    }
     public function verificationEfficiency(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [

@@ -3633,6 +3633,32 @@ final class AdminDriverController extends Controller
             ], 500);
         }
     }
+    public function driverDashboard(int $driverId): JsonResponse
+    {
+        try {
+            $data = $this->driverService->getDriverDashboard($driverId);
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $data,
+            ]);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Driver not found',
+            ], 404);
+        } catch (\Exception $e) {
+            Log::error('Driver dashboard failed', [
+                'driver_id' => $driverId,
+                'error'     => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Failed to load driver dashboard',
+            ], 500);
+        }
+    }
     public function verificationEfficiency(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -3926,6 +3952,100 @@ final class AdminTripController extends Controller
             return response()->json([
                 'status'  => 'error',
                 'message' => 'Failed to load top drivers',
+            ], 500);
+        }
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\AdminUserController.php =====
+
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use App\Services\Admin\AdminUserService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+
+/**
+ * AdminUserController
+ *
+ * â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ *
+ *  GET  /api/admin/users   â†’ admin photo + stats + filtered paginated table
+ *
+ * â”€â”€ Query params (all optional, all default to "all") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ *
+ *  type      = all | driver | passenger
+ *  status    = all | verified | pending | suspended
+ *  date      = all | last_30_days | last_3_months | last_6_months | last_12_months
+ *  per_page  = 1â€“50   (default 10)
+ *  page      = int    (default 1)
+ *  search    = string (matches first name, last name, or email)
+ */
+final class AdminUserController extends Controller
+{
+    public function __construct(
+        private readonly AdminUserService $userService,
+    ) {}
+
+    // =========================================================================
+    // SINGLE MERGED ENDPOINT
+    // =========================================================================
+
+    /**
+     * GET /api/admin/users
+     *
+     * Returns everything the Users/Passengers dashboard page needs:
+     *   - admin_photo
+     *   - stats  (total_registered, active_drivers, pending_drivers,
+     *             passengers, suspended_users)
+     *   - users  (paginated rows, all filters applied)
+     *   - meta   (pagination + active filters)
+     */
+    public function index(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'type'     => 'sometimes|in:all,driver,passenger',
+            'status'   => 'sometimes|in:all,verified,pending,suspended',
+            'date'     => 'sometimes|in:all,last_30_days,last_3_months,last_6_months,last_12_months',
+            'per_page' => 'sometimes|integer|min:1|max:50',
+            'page'     => 'sometimes|integer|min:1',
+            'search'   => 'sometimes|string|max:100',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'error',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $data = $this->userService->getPageData(
+                adminUserId:  $request->user()?->id,
+                typeFilter:   $request->get('type',     'all'),
+                statusFilter: $request->get('status',   'all'),
+                dateFilter:   $request->get('date',     'all'),
+                perPage:      (int) $request->get('per_page', 10),
+                page:         (int) $request->get('page',     1),
+                search:       $request->get('search'),
+            );
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $data,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Admin user index failed', ['error' => $e->getMessage()]);
+
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Failed to load users',
             ], 500);
         }
     }
@@ -4833,9 +4953,6 @@ use Illuminate\Support\Facades\Log;
 /**
  * Profile Controller (REFACTORED)
  *
- * BEFORE: 500+ lines doing everything
- * AFTER: 150 lines - thin controller delegating to services
- *
  * Delegates to:
  * - ProfileUpdateService: Profile updates
  * - ProfileInteractionService: Comments and ratings
@@ -4845,27 +4962,30 @@ class ProfileController extends Controller
 {
     public function __construct(
         private readonly ProfileRepositoryInterface $profileRepo,
-        private readonly ProfileUpdateService $updateService,
-        private readonly ProfileInteractionService $interactionService
+        private readonly ProfileUpdateService       $updateService,
+        private readonly ProfileInteractionService  $interactionService
     ) {}
 
+    // =========================================================================
+    // SHOW
+    // =========================================================================
+
     /**
-     * Show profile
      * GET /profile/{userId}
      */
     public function show(Request $request, int $userId)
     {
         try {
-            $authUser = $request->user();
             $profile = $this->profileRepo->getProfileWithUser($userId);
-            $isOwner = ($authUser->id == $userId);
+            $isOwner = $request->user()->id === $userId;
 
             return response()->json([
                 'success' => true,
-                'data' => $this->formatProfileData($profile, $profile->user, $isOwner),
-            ], 200);
+                'data'    => $this->formatProfileData($profile, $profile->user, $isOwner),
+            ]);
         } catch (\Exception $e) {
             Log::error("Profile fetch error: {$e->getMessage()}");
+
             return response()->json([
                 'success' => false,
                 'message' => 'Profile not found',
@@ -4873,8 +4993,11 @@ class ProfileController extends Controller
         }
     }
 
+    // =========================================================================
+    // UPDATE
+    // =========================================================================
+
     /**
-     * Update profile
      * POST /profile
      */
     public function update(Request $request)
@@ -4882,28 +5005,28 @@ class ProfileController extends Controller
         $user = $request->user();
 
         $validator = Validator::make($request->all(), [
-            'first_name' => 'sometimes|string|max:255',
-            'last_name' => 'sometimes|string|max:255',
-            'description' => 'nullable|string|max:500',
-            'address' => 'nullable|in:Ø¯Ù…Ø´Ù‚,Ø¯Ø±Ø¹Ø§,Ø§Ù„Ù‚Ù†ÙŠØ·Ø±Ø©,Ø§Ù„Ø³ÙˆÙŠØ¯Ø§Ø¡,Ø±ÙŠÙ Ø¯Ù…Ø´Ù‚,Ø­Ù…Øµ,Ø­Ù…Ø§Ø©,Ø§Ù„Ù„Ø§Ø°Ù‚ÙŠØ©,Ø·Ø±Ø·ÙˆØ³,Ø­Ù„Ø¨,Ø§Ø¯Ù„Ø¨,Ø§Ù„Ø­Ø³ÙƒØ©,Ø§Ù„Ø±Ù‚Ø©,Ø¯ÙŠØ± Ø§Ù„Ø²ÙˆØ±',
-            'gender' => 'nullable|in:M,F',
-            'type_of_car' => 'nullable|string|max:255',
-            'color_of_car' => 'nullable|string|max:50',
-            'number_of_seats' => 'nullable|integer|min:1|max:12',
-            'radio' => 'nullable|boolean',
-            'smoking' => 'nullable|boolean',
-            'profile_photo' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'car_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'face_id_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'back_id_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'first_name'          => 'sometimes|string|max:255',
+            'last_name'           => 'sometimes|string|max:255',
+            'description'         => 'nullable|string|max:500',
+            'address'             => 'nullable|in:Ø¯Ù…Ø´Ù‚,Ø¯Ø±Ø¹Ø§,Ø§Ù„Ù‚Ù†ÙŠØ·Ø±Ø©,Ø§Ù„Ø³ÙˆÙŠØ¯Ø§Ø¡,Ø±ÙŠÙ Ø¯Ù…Ø´Ù‚,Ø­Ù…Øµ,Ø­Ù…Ø§Ø©,Ø§Ù„Ù„Ø§Ø°Ù‚ÙŠØ©,Ø·Ø±Ø·ÙˆØ³,Ø­Ù„Ø¨,Ø§Ø¯Ù„Ø¨,Ø§Ù„Ø­Ø³ÙƒØ©,Ø§Ù„Ø±Ù‚Ø©,Ø¯ÙŠØ± Ø§Ù„Ø²ÙˆØ±',
+            'gender'              => 'nullable|in:M,F',
+            'type_of_car'         => 'nullable|string|max:255',
+            'color_of_car'        => 'nullable|string|max:50',
+            'number_of_seats'     => 'nullable|integer|min:1|max:12',
+            'radio'               => 'nullable|boolean',
+            'smoking'             => 'nullable|boolean',
+            'profile_photo'       => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'car_pic'             => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'face_id_pic'         => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'back_id_pic'         => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             'driving_license_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'mechanic_card_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'mechanic_card_pic'   => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors' => $validator->errors(),
+                'errors'  => $validator->errors(),
             ], 422);
         }
 
@@ -4916,7 +5039,6 @@ class ProfileController extends Controller
             }
         }
 
-        // Prevent manual ride count updates
         if (isset($data['number_of_rides'])) {
             return response()->json([
                 'success' => false,
@@ -4925,14 +5047,13 @@ class ProfileController extends Controller
         }
 
         try {
-            // Delegate to service
             $result = $this->updateService->updateProfile($user, $data);
 
             return response()->json([
                 'success' => true,
                 'message' => 'Profile updated successfully',
-                'data' => $this->formatProfileData($result['profile'], $result['user']),
-            ], 200);
+                'data'    => $this->formatProfileData($result['profile'], $result['user']),
+            ]);
         } catch (\Exception $e) {
             Log::error("Profile update error: {$e->getMessage()}");
 
@@ -4943,20 +5064,23 @@ class ProfileController extends Controller
         }
     }
 
+    // =========================================================================
+    // COMMENT
+    // =========================================================================
+
     /**
-     * Add comment to profile
      * POST /profile/{userId}/comments
      */
     public function comment(Request $request, int $userId)
     {
         $validator = Validator::make($request->all(), [
-            'comment' => 'required|string|max:500'
+            'comment' => 'required|string|max:500',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors' => $validator->errors()
+                'errors'  => $validator->errors(),
             ], 422);
         }
 
@@ -4970,18 +5094,21 @@ class ProfileController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Comment added',
-                'data' => $comment,
+                'data'    => $comment,
             ], 201);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], $e->getCode() ?: 500);
         }
     }
 
+    // =========================================================================
+    // RATE
+    // =========================================================================
+
     /**
-     * Rate user
      * POST /profile/{userId}/rate
      */
     public function rateUser(Request $request, int $userId)
@@ -4993,7 +5120,7 @@ class ProfileController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors' => $validator->errors()
+                'errors'  => $validator->errors(),
             ], 422);
         }
 
@@ -5007,111 +5134,82 @@ class ProfileController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Rating submitted successfully',
-                'data' => $ratingStats,
-            ], 200);
+                'data'    => $ratingStats,
+            ]);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], $e->getCode() ?: 500);
         }
     }
 
-    /**
-     * Format profile data for API response
-     */
+    // =========================================================================
+    // PRIVATE â€” FORMAT
+    // =========================================================================
+
     private function formatProfileData($profile, $user, bool $isOwner = false): array
     {
+        // â”€â”€ Comments & rating â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         $comments    = $this->interactionService->getProfileComments($user->id);
         $ratingStats = $this->interactionService->getRatingStats($user->id);
 
+        // â”€â”€ Documents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         $photoRepo = app(\App\Interfaces\PhotoRepositoryInterface::class);
         $docs = $photoRepo->getUserDocumentsByType(
             $user->id,
             ['face_id', 'back_id', 'license', 'mechanic_card']
         )->mapWithKeys(fn($d) => ["{$d->type}_pic" => asset("storage/{$d->path}")])->toArray();
 
-        // â”€â”€ Ride history â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        $completedBookings = \App\Models\Booking::with(['ride:id,pickup_address,destination_address,departure_time,price_per_seat,driver_id', 'ride.driver:id,first_name,last_name'])
-            ->where('user_id', $user->id)
-            ->where('status', 'completed')
-            ->orderByDesc('completed_at')
-            ->get()
-            ->map(fn($b) => [
-                'booking_id'          => $b->id,
-                'ride_id'             => $b->ride_id,
-                'seats'               => $b->seats,
-                'total_price'         => $b->seats * $b->ride->price_per_seat,
-                'from'                => $b->ride->pickup_address,
-                'to'                  => $b->ride->destination_address,
-                'departure_time'      => $b->ride->departure_time->toIso8601String(),
-                'driver'              => trim($b->ride->driver->first_name . ' ' . $b->ride->driver->last_name),
-                'completed_at'        => $b->completed_at?->toIso8601String(),
-            ]);
+        // â”€â”€ Score â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $scoreService = app(\App\Services\Score\ScoreService::class);
+        $userScore    = $scoreService->getScore($user);
 
-        $cancelledBookings = \App\Models\Booking::with(['ride:id,pickup_address,destination_address,departure_time,price_per_seat,driver_id', 'ride.driver:id,first_name,last_name'])
-            ->where('user_id', $user->id)
-            ->where('status', 'cancelled')
-            ->orderByDesc('updated_at')
-            ->get()
-            ->map(fn($b) => [
-                'booking_id'     => $b->id,
-                'ride_id'        => $b->ride_id,
-                'seats'          => $b->seats,
-                'from'           => $b->ride->pickup_address,
-                'to'             => $b->ride->destination_address,
-                'departure_time' => $b->ride->departure_time->toIso8601String(),
-                'driver'         => trim($b->ride->driver->first_name . ' ' . $b->ride->driver->last_name),
-                'cancelled_at'   => $b->updated_at->toIso8601String(),
-            ]);
+        // â”€â”€ Ride history: as driver (counts only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $driverBase = \App\Models\Ride::where('driver_id', $user->id);
 
-        $noShowBookings = \App\Models\Booking::with(['ride:id,pickup_address,destination_address,departure_time,driver_id', 'ride.driver:id,first_name,last_name'])
-            ->where('user_id', $user->id)
-            ->where('status', 'no_show')
-            ->orderByDesc('updated_at')
-            ->get()
-            ->map(fn($b) => [
-                'booking_id'     => $b->id,
-                'ride_id'        => $b->ride_id,
-                'seats'          => $b->seats,
-                'from'           => $b->ride->pickup_address,
-                'to'             => $b->ride->destination_address,
-                'departure_time' => $b->ride->departure_time->toIso8601String(),
-                'driver'         => trim($b->ride->driver->first_name . ' ' . $b->ride->driver->last_name),
-                'recorded_at'    => $b->updated_at->toIso8601String(),
-            ]);
-        // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $asDriver = [
+            'total_created' => (clone $driverBase)->count(),
+            'completed'     => (clone $driverBase)->where('status', 'finished')->count(),
+            'cancelled'     => (clone $driverBase)->where('status', 'cancelled')->count(),
+            'no_show'       => (clone $driverBase)->where('status', 'awaiting_confirmation')->count(),
+        ];
 
+        // â”€â”€ Ride history: as passenger (counts only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $passengerBase = \App\Models\Booking::where('user_id', $user->id);
+
+        $asPassenger = [
+            'total_booked' => (clone $passengerBase)->count(),
+            'completed'    => (clone $passengerBase)->where('status', 'completed')->count(),
+            'cancelled'    => (clone $passengerBase)->where('status', 'cancelled')->count(),
+            'no_show'      => (clone $passengerBase)->where('status', 'no_show')->count(),
+        ];
+
+        // â”€â”€ Assemble â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         return [
             'user_id'             => $user->id,
             'full_name'           => trim("{$user->first_name} {$user->last_name}"),
             'verification_status' => $user->verification_status,
             'address'             => $profile->address,
             'gender'              => $profile->gender,
-            'profile_photo'       => $profile->profile_photo ? asset("storage/{$profile->profile_photo}") : null,
+            'profile_photo'       => $profile->profile_photo
+                ? asset("storage/{$profile->profile_photo}")
+                : null,
             'description'         => $profile->description,
             'type_of_car'         => $profile->type_of_car,
             'color_of_car'        => $profile->color_of_car,
             'number_of_seats'     => $profile->number_of_seats,
-            'car_pic'             => $profile->car_pic ? asset("storage/{$profile->car_pic}") : null,
+            'car_pic'             => $profile->car_pic
+                ? asset("storage/{$profile->car_pic}")
+                : null,
             'radio'               => $profile->radio,
             'smoking'             => $profile->smoking,
             'number_of_rides'     => $profile->number_of_rides,
             'documents'           => $docs,
-            'score'               => (function () use ($user) {
-                $scoreService = app(\App\Services\Score\ScoreService::class);
-                $userScore    = $scoreService->getScore($user);
-                return ScoreController::formatScore($userScore);
-            })(),
-            'ride_history' => [                          // â† NEW
-                'completed'  => $completedBookings,
-                'cancelled'  => $cancelledBookings,
-                'no_show'    => $noShowBookings,
-                'summary'    => [
-                    'total_completed' => $completedBookings->count(),
-                    'total_cancelled' => $cancelledBookings->count(),
-                    'total_no_show'   => $noShowBookings->count(),
-                ],
+            'score'               => ScoreController::formatScore($userScore),
+            'ride_history'        => [
+                'as_driver'    => $asDriver,
+                'as_passenger' => $asPassenger,
             ],
             'comments'            => $comments,
             'rating'              => $ratingStats,
@@ -10148,9 +10246,11 @@ class UserVerifiedNotification extends Notification
 ===== FILE: C:\wamp64\www\4th_year_project\app\Observers\UserObserver.php =====
 
 <?php
+
 namespace App\Observers;
 
 use App\Models\User;
+use App\Models\UserRating;
 use App\Interfaces\ProfileRepositoryInterface;
 use App\Services\Score\ScoreService;
 
@@ -10168,6 +10268,22 @@ class UserObserver
 
         // Initialize trust score at 70 (Silver tier) per SRS v5
         $this->scoreService->initializeScore($user);
+
+        // Seed a 3.0 base rating so every new user starts visible with a rating.
+        // The admin account acts as the system rater (same pattern as verifyDriver).
+        // firstOrCreate prevents duplicates if the observer fires more than once.
+        $adminUser = User::where('email', config('admin.primary.email'))->first();
+        if ($adminUser) {
+            UserRating::firstOrCreate(
+                [
+                    'rater_id'      => $adminUser->id,
+                    'rated_user_id' => $user->id,
+                ],
+                [
+                    'rating' => 3.0,
+                ]
+            );
+        }
     }
 }
 
@@ -10269,6 +10385,7 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(\App\Services\Admin\AdminExportService::class);
         $this->app->singleton(\App\Services\Admin\AdminTripService::class);
         $this->app->singleton(\App\Services\Admin\AdminDriverService::class);
+        $this->app->singleton(\App\Services\Admin\AdminUserService::class);
         // ========================================
         // NOTIFICATION SERVICE
         // ========================================
@@ -11481,6 +11598,7 @@ final class AdminAuthService
 
 namespace App\Services\Admin;
 
+use App\Models\Booking;
 use App\Models\Photo;
 use App\Models\Profile;
 use App\Models\Ride;
@@ -11500,6 +11618,7 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
  *   - Recent activity    (verification events + vehicle/profile updates)
  *   - Verification efficiency widget (day / week / month with comparison)
  *   - Admin profile photo
+ *   - Driver dashboard   (rich detail page: earnings, cancel rate, docs, etc.)
  *
  * â”€â”€ Definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
  *   "Total drivers"     = verified drivers  +  users with pending/rejected
@@ -11551,7 +11670,6 @@ final class AdminDriverService
      */
     public function getStats(): array
     {
-        // Total = verified  OR  has driver docs (pending / rejected)
         $totalDrivers = User::where('is_verified_driver', true)
             ->orWhere(function ($q) {
                 $q->whereIn('verification_status', ['pending', 'rejected'])
@@ -11565,10 +11683,8 @@ final class AdminDriverService
             ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card']))
             ->count();
 
-        // Suspended: not implemented yet â€“ always 0
-        $suspendedDrivers = 0;
+        $suspendedDrivers = 0; // not implemented yet
 
-        // Average rating across all verified drivers
         $avgRating = UserRating::whereHas(
             'ratedUser',
             fn($q) => $q->where('is_verified_driver', true)
@@ -11606,7 +11722,6 @@ final class AdminDriverService
             'photos',
         ])
             ->where(function ($q) {
-                // Only users who are drivers or have submitted driver documentation
                 $q->where('is_verified_driver', true)
                     ->orWhere(function ($q2) {
                         $q2->whereIn('verification_status', ['pending', 'rejected'])
@@ -11614,16 +11729,14 @@ final class AdminDriverService
                     });
             });
 
-        // â”€â”€ Filter tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         match ($filter) {
             'verified'  => $query->where('is_verified_driver', true),
             'pending'   => $query->where('verification_status', 'pending')
                 ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card'])),
             'suspended' => $query->where('status', 0),
-            default     => null, // 'all' â€“ no extra constraint
+            default     => null,
         };
 
-        // â”€â”€ Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if ($search) {
             $query->where(function ($q) use ($search) {
                 $q->where('first_name', 'like', "%{$search}%")
@@ -11636,10 +11749,8 @@ final class AdminDriverService
 
         $paginator = $query->paginate($perPage, ['*'], 'page', $page);
 
-        // Attach avg rating to each driver in the current page
         $paginator->getCollection()->transform(function (User $driver) {
-            $driver->avg_rating = UserRating::where('rated_user_id', $driver->id)
-                ->avg('rating');
+            $driver->avg_rating = UserRating::where('rated_user_id', $driver->id)->avg('rating');
             return $driver;
         });
 
@@ -11682,11 +11793,14 @@ final class AdminDriverService
     }
 
     // =========================================================================
-    // DRIVER PROFILE  (detail / modal view)
+    // DRIVER PROFILE  (existing â€“ detail / modal view)
     // =========================================================================
 
     /**
-     * Returns the full profile of a single driver for the admin detail view.
+     * GET /api/admin/drivers/{driverId}/profile
+     *
+     * Returns the full profile of a single driver including:
+     *   - personal info, vehicle details, documents, rating, recent rides
      */
     public function getDriverProfile(int $driverId): array
     {
@@ -11736,7 +11850,7 @@ final class AdminDriverService
                     ? asset('storage/' . $profile->car_pic)
                     : null,
             ],
-            'documents' => $documents,
+            'documents'    => $documents,
             'rating' => [
                 'average'       => $ratingStats->average
                     ? round((float) $ratingStats->average, 2)
@@ -11759,12 +11873,130 @@ final class AdminDriverService
     }
 
     // =========================================================================
+    // DRIVER DASHBOARD  (new â€“ rich detail page for dashboard page-3)
+    // =========================================================================
+
+    /**
+     * GET /api/admin/drivers/{driverId}/dashboard
+     *
+     * Returns the full data needed by the driver dashboard detail page:
+     *   - personal info + profile photo
+     *   - vehicle info + car photo
+     *   - all uploaded documents
+     *   - stats: total rides, earnings after commission, cancel rate
+     *   - recent rides: source, destination, price_per_seat, date (no rating/comment)
+     *   - favorite destination: most frequent drop-off location
+     */
+    public function getDriverDashboard(int $driverId): array
+    {
+        $driver  = User::with(['profile', 'photos'])->findOrFail($driverId);
+        $profile = $driver->profile;
+
+        // â”€â”€ Rating â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $ratingStats = UserRating::where('rated_user_id', $driverId)
+            ->selectRaw('COUNT(*) as total, ROUND(AVG(rating), 2) as average')
+            ->first();
+
+        // â”€â”€ Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $totalRides     = Ride::where('driver_id', $driverId)->count();
+        $completedRides = Ride::where('driver_id', $driverId)->where('status', 'finished')->count();
+        $cancelledRides = Ride::where('driver_id', $driverId)->where('status', 'cancelled')->count();
+
+        $cancelRate = $totalRides > 0
+            ? round(($cancelledRides / $totalRides) * 100, 1)
+            : 0.0;
+
+        // Earnings = SUM(seats Ã— price_per_seat Ã— 0.95) across completed bookings
+        $totalEarnings = Booking::join('rides', 'bookings.ride_id', '=', 'rides.id')
+            ->where('rides.driver_id', $driverId)
+            ->where('bookings.status', 'completed')
+            ->selectRaw('SUM(bookings.seats * rides.price_per_seat * 0.95) as total')
+            ->value('total') ?? 0.0;
+
+        // â”€â”€ Recent rides â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $recentRides = Ride::where('driver_id', $driverId)
+            ->orderByDesc('created_at')
+            ->limit(10)
+            ->get(['id', 'status', 'pickup_address', 'destination_address', 'price_per_seat', 'departure_time']);
+
+        // â”€â”€ Favorite destination â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $favoriteDestination = Ride::where('driver_id', $driverId)
+            ->where('status', 'finished')
+            ->select('destination_address')
+            ->selectRaw('COUNT(*) as visit_count')
+            ->groupBy('destination_address')
+            ->orderByDesc('visit_count')
+            ->first();
+
+        // â”€â”€ Documents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $documents = $driver->photos->map(fn($photo) => [
+            'type'     => $photo->type,
+            'file_url' => asset('storage/' . $photo->path),
+        ]);
+
+        return [
+            'id'                  => $driver->id,
+            'driver_ref'          => '#DR-' . $driver->id,
+            'full_name'           => trim("{$driver->first_name} {$driver->last_name}"),
+            'email'               => $driver->email,
+            'phone'               => $this->resolveDriverPhone($driver->id),
+            'gender'              => $driver->gender,
+            'address'             => $driver->address,
+            'joined_at'           => $driver->created_at->toIso8601String(),
+            'status'              => $this->resolveDriverStatus($driver),
+            'is_verified'         => (bool) $driver->is_verified_driver,
+            'verification_status' => $driver->verification_status,
+
+            'profile_photo' => $profile?->profile_photo
+                ? asset('storage/' . $profile->profile_photo)
+                : null,
+
+            'rating' => [
+                'average'       => $ratingStats->average ?? 0,
+                'total_ratings' => (int) ($ratingStats->total ?? 0),
+            ],
+
+            'stats' => [
+                'total_rides'     => $totalRides,
+                'completed_rides' => $completedRides,
+                'cancelled_rides' => $cancelledRides,
+                'cancel_rate'     => $cancelRate,                        // e.g. 2.4 (%)
+                'total_earnings'  => round((float) $totalEarnings, 2),  // after 5% commission
+            ],
+
+            'vehicle' => [
+                'type'      => $profile?->type_of_car,
+                'color'     => $profile?->color_of_car,
+                'seats'     => $profile?->number_of_seats,
+                'photo_url' => $profile?->car_pic
+                    ? asset('storage/' . $profile->car_pic)
+                    : null,
+            ],
+
+            'documents' => $documents,
+
+            'recent_rides' => $recentRides->map(fn($ride) => [
+                'id'             => $ride->id,
+                'status'         => $ride->status,
+                'source'         => $ride->pickup_address,
+                'destination'    => $ride->destination_address,
+                'price_per_seat' => (float) $ride->price_per_seat,
+                'date'           => $ride->departure_time->toIso8601String(),
+            ])->values(),
+
+            'favorite_destination' => $favoriteDestination ? [
+                'name'        => $favoriteDestination->destination_address,
+                'visit_count' => $favoriteDestination->visit_count,
+            ] : null,
+        ];
+    }
+
+    // =========================================================================
     // RECENT ACTIVITY FEED
     // =========================================================================
 
     /**
-     * Returns the latest driver-related activity events merged and
-     * sorted newest-first.
+     * Returns the latest driver-related activity events merged and sorted newest-first.
      *
      * Event sources:
      *   1. Verification status changes  (pending / approved / rejected)
@@ -11817,7 +12049,7 @@ final class AdminDriverService
             $q->where('is_verified_driver', true)
                 ->orWhereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card']))
             )
-            ->whereNotNull('type_of_car')   // only profiles that have vehicle info
+            ->whereNotNull('type_of_car')
             ->orderByDesc('updated_at')
             ->limit($limit)
             ->get();
@@ -11838,7 +12070,6 @@ final class AdminDriverService
             ];
         }
 
-        // â”€â”€ Sort all events newest-first, take $limit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         usort($events, fn($a, $b) => strcmp($b['occurred_at'], $a['occurred_at']));
 
         return array_slice(array_values($events), 0, $limit);
@@ -11851,16 +12082,6 @@ final class AdminDriverService
     /**
      * Calculates the verification processing efficiency for the chosen period
      * and compares it against the previous equivalent period.
-     *
-     * Formula:
-     *   efficiency % = (processed_in_period / incoming_in_period) Ã— 100
-     *   If no requests arrived â†’ 100% (nothing to process).
-     *
-     * "Incoming"  = users whose first driver doc (license or mechanic_card photo)
-     *               was uploaded (photo created_at) within the period.
-     *
-     * "Processed" = users with driver docs whose verification_status changed to
-     *               'approved' or 'rejected' within the period (updated_at in range).
      *
      * @param string $period  'day' | 'week' | 'month'
      */
@@ -11875,7 +12096,6 @@ final class AdminDriverService
             $previousLabel,
         ] = $this->resolvePeriodBounds($period);
 
-        // â”€â”€ Current period â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         $totalIncoming = $this->countIncomingVerifications($currentStart, $currentEnd);
         $processed     = $this->countProcessedVerifications($currentStart, $currentEnd);
 
@@ -11883,7 +12103,6 @@ final class AdminDriverService
             ? round(($processed / $totalIncoming) * 100)
             : 100;
 
-        // â”€â”€ Previous period â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         $prevTotalIncoming = $this->countIncomingVerifications($previousStart, $previousEnd);
         $prevProcessed     = $this->countProcessedVerifications($previousStart, $previousEnd);
 
@@ -11891,7 +12110,6 @@ final class AdminDriverService
             ? round(($prevProcessed / $prevTotalIncoming) * 100)
             : 100;
 
-        // â”€â”€ Delta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         $delta        = $efficiencyPct - $prevEfficiencyPct;
         $deltaDisplay = ($delta >= 0 ? '+' : '') . $delta . '%';
         $trend        = $delta > 0 ? 'up' : ($delta < 0 ? 'down' : 'flat');
@@ -11924,8 +12142,8 @@ final class AdminDriverService
             'comparison' => [
                 'delta'         => $delta,
                 'delta_display' => $deltaDisplay,
-                'trend'         => $trend,          // 'up' | 'down' | 'flat'
-                'text'          => $comparisonText, // "5% higher than last week"
+                'trend'         => $trend,
+                'text'          => $comparisonText,
             ],
         ];
     }
@@ -11949,12 +12167,6 @@ final class AdminDriverService
     // PRIVATE HELPERS
     // =========================================================================
 
-    /**
-     * Count driver verification requests that ARRIVED in the given period.
-     *
-     * Proxy: users whose first license or mechanic_card photo was created
-     * within the period â€” that is the moment the "request arrived".
-     */
     private function countIncomingVerifications(Carbon $start, Carbon $end): int
     {
         return User::whereHas('photos', function ($q) use ($start, $end) {
@@ -11963,15 +12175,6 @@ final class AdminDriverService
         })->count();
     }
 
-    /**
-     * Count driver verifications that were PROCESSED (approved OR rejected)
-     * within the given period.
-     *
-     * "Processed" = status moved away from 'pending':
-     *   verification_status IN ('approved', 'rejected')
-     *   AND updated_at falls within the period
-     *   AND user has driver documents.
-     */
     private function countProcessedVerifications(Carbon $start, Carbon $end): int
     {
         return User::whereIn('verification_status', ['approved', 'rejected'])
@@ -11980,12 +12183,6 @@ final class AdminDriverService
             ->count();
     }
 
-    /**
-     * Resolve Carbon start/end bounds for the current and previous period.
-     *
-     * @return array{Carbon, Carbon, Carbon, Carbon, string, string}
-     *         [currentStart, currentEnd, previousStart, previousEnd, label, prevLabel]
-     */
     private function resolvePeriodBounds(string $period): array
     {
         $now = Carbon::now();
@@ -11996,31 +12193,25 @@ final class AdminDriverService
                 $now->copy()->endOfDay(),
                 $now->copy()->subDay()->startOfDay(),
                 $now->copy()->subDay()->endOfDay(),
-                'day',
-                'day',
+                'day', 'day',
             ],
             'month' => [
                 $now->copy()->startOfMonth(),
                 $now->copy()->endOfMonth(),
                 $now->copy()->subMonth()->startOfMonth(),
                 $now->copy()->subMonth()->endOfMonth(),
-                'month',
-                'month',
+                'month', 'month',
             ],
-            default => [ // 'week'
+            default => [
                 $now->copy()->startOfWeek(),
                 $now->copy()->endOfWeek(),
                 $now->copy()->subWeek()->startOfWeek(),
                 $now->copy()->subWeek()->endOfWeek(),
-                'week',
-                'week',
+                'week', 'week',
             ],
         };
     }
 
-    /**
-     * Resolve the UI-facing status string for a driver.
-     */
     private function resolveDriverStatus(User $driver): string
     {
         if ($driver->status == 0)                        return 'suspended';
@@ -12030,10 +12221,6 @@ final class AdminDriverService
         return 'unverified';
     }
 
-    /**
-     * Best phone proxy: communication_number from the most recent ride
-     * the user drove (stored on the ride row).
-     */
     private function resolveDriverPhone(int $driverId): ?string
     {
         return Ride::where('driver_id', $driverId)
@@ -12042,9 +12229,6 @@ final class AdminDriverService
             ->value('communication_number');
     }
 
-    /**
-     * Human-readable relative time string.
-     */
     private function humanTime(Carbon $time): string
     {
         $diffMins = $time->diffInMinutes(now());
@@ -12961,6 +13145,249 @@ final class AdminTripService
         } catch (\Throwable) {
             return null;
         }
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Services\Admin\AdminUserService.php =====
+
+<?php
+
+namespace App\Services\Admin;
+
+use App\Models\Profile;
+use App\Models\User;
+use Carbon\Carbon;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+
+/**
+ * AdminUserService
+ *
+ * Single endpoint returns everything the Users dashboard needs:
+ *   - admin_photo
+ *   - stats cards
+ *   - paginated user table  (all filters applied together)
+ *
+ * â”€â”€ Filter defaults (when nothing is passed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ *   type      = all
+ *   status    = all
+ *   date      = all
+ *
+ * â”€â”€ Type definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ *   driver    = is_verified_driver = 1
+ *              OR (verification_status = 'pending' AND has license/mechanic_card)
+ *   passenger = everyone else
+ *
+ * â”€â”€ Status definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ *   verified  = is_verified_driver = 1  OR  is_verified_passenger = 1
+ *   pending   = verification_status = 'pending'
+ *   suspended = status = 0
+ */
+final class AdminUserService
+{
+    // =========================================================================
+    // MAIN â€” single merged response
+    // =========================================================================
+
+    /**
+     * Returns admin photo, stats, and the filtered paginated table
+     * in one response.
+     *
+     * @param int|null $adminUserId
+     * @param string   $typeFilter    all | driver | passenger
+     * @param string   $statusFilter  all | verified | pending | suspended
+     * @param string   $dateFilter    all | last_30_days | last_3_months | last_6_months | last_12_months
+     * @param int      $perPage
+     * @param int      $page
+     * @param string|null $search
+     */
+    public function getPageData(
+        ?int    $adminUserId  = null,
+        string  $typeFilter   = 'all',
+        string  $statusFilter = 'all',
+        string  $dateFilter   = 'all',
+        int     $perPage      = 10,
+        int     $page         = 1,
+        ?string $search       = null
+    ): array {
+        $paginator = $this->buildQuery(
+            $typeFilter,
+            $statusFilter,
+            $dateFilter,
+            $search
+        )->paginate($perPage, ['*'], 'page', $page);
+
+        $rows = $paginator->getCollection()
+            ->map(fn(User $user) => $this->formatUser($user))
+            ->values();
+
+        return [
+            'admin_photo' => $this->getAdminPhoto($adminUserId),
+            'stats'       => $this->getStats(),
+            'users'       => $rows,
+            'meta'        => [
+                'current_page' => $paginator->currentPage(),
+                'last_page'    => $paginator->lastPage(),
+                'per_page'     => $paginator->perPage(),
+                'total'        => $paginator->total(),
+                'filters'      => [
+                    'type'   => $typeFilter,
+                    'status' => $statusFilter,
+                    'date'   => $dateFilter,
+                ],
+            ],
+        ];
+    }
+
+    // =========================================================================
+    // STATS CARDS
+    // =========================================================================
+
+    public function getStats(): array
+    {
+        return [
+            'total_registered' => User::count(),
+            'active_drivers'   => User::where('is_verified_driver', true)->count(),
+            'pending_drivers'  => User::where('verification_status', 'pending')
+                ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card']))
+                ->count(),
+            'passengers'       => User::where('is_verified_passenger', true)
+                ->where('is_verified_driver', false)
+                ->count(),
+            'suspended_users'  => User::where('status', 0)->count(),
+        ];
+    }
+
+    // =========================================================================
+    // ADMIN PHOTO
+    // =========================================================================
+
+    public function getAdminPhoto(?int $adminUserId): ?string
+    {
+        if (!$adminUserId) return null;
+
+        $profile = Profile::where('user_id', $adminUserId)->first();
+
+        return ($profile?->profile_photo)
+            ? asset('storage/' . $profile->profile_photo)
+            : null;
+    }
+
+    // =========================================================================
+    // PRIVATE â€” QUERY BUILDER
+    // =========================================================================
+
+    private function buildQuery(
+        string  $typeFilter,
+        string  $statusFilter,
+        string  $dateFilter,
+        ?string $search
+    ) {
+        $query = User::with([
+            'profile:user_id,profile_photo',
+            'photos:id,user_id,type',
+        ]);
+
+        // â”€â”€ Type filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        match ($typeFilter) {
+
+            'driver' => $query->where(function ($q) {
+                $q->where('is_verified_driver', true)
+                    ->orWhere(function ($q2) {
+                        $q2->where('verification_status', 'pending')
+                            ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card']));
+                    });
+            }),
+
+            'passenger' => $query
+                ->where('is_verified_driver', false)
+                ->whereDoesntHave('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card'])),
+
+            default => null,   // 'all' â€” no constraint
+        };
+
+        // â”€â”€ Status filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        match ($statusFilter) {
+
+            'verified'  => $query->where(function ($q) {
+                $q->where('is_verified_driver', true)
+                    ->orWhere('is_verified_passenger', true);
+            }),
+
+            'pending'   => $query->where('verification_status', 'pending'),
+
+            'suspended' => $query->where('status', 0),
+
+            default     => null,   // 'all' â€” no constraint
+        };
+
+        // â”€â”€ Date / join filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        $cutoff = match ($dateFilter) {
+            'last_30_days'   => Carbon::now()->subDays(30),
+            'last_3_months'  => Carbon::now()->subMonths(3),
+            'last_6_months'  => Carbon::now()->subMonths(6),
+            'last_12_months' => Carbon::now()->subMonths(12),
+            default          => null,   // 'all' â€” no constraint
+        };
+
+        if ($cutoff) {
+            $query->where('created_at', '>=', $cutoff);
+        }
+
+        // â”€â”€ Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if ($search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('first_name', 'like', "%{$search}%")
+                    ->orWhere('last_name',  'like', "%{$search}%")
+                    ->orWhere('email',      'like', "%{$search}%");
+            });
+        }
+
+        return $query->orderByDesc('created_at');
+    }
+
+    // =========================================================================
+    // PRIVATE â€” FORMAT
+    // =========================================================================
+
+    private function formatUser(User $user): array
+    {
+        return [
+            'id'            => $user->id,
+            'full_name'     => trim("{$user->first_name} {$user->last_name}"),
+            'email'         => $user->email,
+            'profile_photo' => $user->profile?->profile_photo
+                ? asset('storage/' . $user->profile->profile_photo)
+                : null,
+            'type'          => $this->resolveUserType($user),
+            'status'        => $this->resolveUserStatus($user),
+            'joined_at'     => $user->created_at->toIso8601String(),
+            'joined_label'  => $user->created_at->format('d M Y'),
+        ];
+    }
+
+    private function resolveUserType(User $user): string
+    {
+        if ($user->is_verified_driver) {
+            return 'driver';
+        }
+
+        $hasDriverDocs = $user->photos
+            ->whereIn('type', ['license', 'mechanic_card'])
+            ->isNotEmpty();
+
+        return $hasDriverDocs ? 'driver' : 'passenger';
+    }
+
+    private function resolveUserStatus(User $user): string
+    {
+        if ($user->status == 0)                        return 'suspended';
+        if ($user->is_verified_driver)                 return 'verified';
+        if ($user->is_verified_passenger)              return 'verified';
+        if ($user->verification_status === 'pending')  return 'pending';
+        if ($user->verification_status === 'rejected') return 'rejected';
+
+        return 'unverified';
     }
 }
 
@@ -22756,6 +23183,51 @@ return new class extends Migration
 };
 
 
+===== FILE: C:\wamp64\www\4th_year_project\database\seeders\AdminUserSeeder.php =====
+
+<?php
+
+namespace Database\Seeders;
+
+use App\Models\User;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Hash;
+
+/**
+ * AdminUserSeeder
+ *
+ * Creates the User row that represents the primary admin account.
+ * This row is NOT a regular user â€” it only exists so that:
+ *   1. JwtService can issue tokens for admin login.
+ *   2. UserObserver::created() can find a valid rater_id when seeding
+ *      the 3.0 base rating for every newly created user.
+ *
+ * Must run BEFORE any other user seeders.
+ */
+class AdminUserSeeder extends Seeder
+{
+    public function run(): void
+    {
+        // firstOrCreate: safe to re-run after migrate:fresh --seed
+        User::firstOrCreate(
+            ['email' => config('admin.primary.email')],
+            [
+                'first_name'         => config('admin.primary.first_name', 'Admin'),
+                'last_name'          => config('admin.primary.last_name',  'Primary'),
+                'password'           => Hash::make(config('admin.primary.password')),
+                'gender'             => 'M',
+                'address'            => 'Ø¯Ù…Ø´Ù‚',
+                'status'             => 1,
+                'email_verified_at'  => now(),
+                'verification_status'=> 'none',
+            ]
+        );
+
+        $this->command->info('âœ…  Admin user row ready.');
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\database\seeders\Atarikaktestseeder.php =====
 
 <?php
@@ -22794,8 +23266,11 @@ use Illuminate\Support\Str;
  *   - Inconsistent data = a bug in your code, not the seeder
  *   - Every scenario exercises your real business logic
  *
- * Run:
- *   php artisan migrate:fresh
+ * Run via DatabaseSeeder (recommended):
+ *   php artisan migrate:fresh --seed
+ *
+ * Or standalone:
+ *   php artisan db:seed --class=AdminUserSeeder
  *   php artisan db:seed --class=SystemWalletSeeder
  *   php artisan db:seed --class=Atarikaktestseeder
  */
@@ -22833,18 +23308,18 @@ class Atarikaktestseeder extends Seeder
         config(['broadcasting.default' => 'log']);
         config(['mail.default'         => 'log']);
 
-        // Suppress UserObserver â€” we create Profile + UserScore manually
+        // Suppress UserObserver â€” we create Profile + UserScore manually below.
         // (flushEventListeners only removes User model listeners, not Wallet etc.)
         \App\Models\User::flushEventListeners();
 
         $this->command->info('ðŸš€ Atarikak Test Seeder starting...');
 
-        // Verify system wallets exist
+        // Verify system wallets exist (AdminUserSeeder + SystemWalletSeeder must run first)
         $syCash  = Wallet::where('phone_number', config('admin.sycash.phone'))->first();
         $primary = Wallet::where('phone_number', config('admin.primary.phone'))->first();
 
         if (!$syCash || !$primary) {
-            $this->command->error('System wallets not found. Run: php artisan db:seed --class=SystemWalletSeeder');
+            $this->command->error('System wallets not found. Run AdminUserSeeder + SystemWalletSeeder first.');
             return;
         }
 
@@ -22905,12 +23380,15 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // USER CREATION
-    // (Observer is off â€” we create Profile + UserScore manually here)
+    // Observer is OFF â€” we create Profile + UserScore + UserRating manually.
+    // Every user gets a 3.0 base rating from the admin rater so avg_rating
+    // is never null (matching what UserObserver::created() does in production).
     // =========================================================================
 
     private function createDrivers(int $count): \Illuminate\Support\Collection
     {
         $drivers   = collect();
+        // Must exist (AdminUserSeeder runs before this seeder)
         $adminUser = User::where('email', config('admin.primary.email'))->first();
 
         for ($i = 1; $i <= $count; $i++) {
@@ -22942,7 +23420,7 @@ class Atarikaktestseeder extends Seeder
                 'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             ]);
 
-            // High balance so wallet never blocks seeding
+            // Unique phone per driver â€” avoids unique constraint crash
             $wallet = Wallet::create([
                 'user_id'      => $user->id,
                 'phone_number' => '+9639' . str_pad($i, 8, '0', STR_PAD_LEFT),
@@ -22951,7 +23429,7 @@ class Atarikaktestseeder extends Seeder
             $user->wallet_id = $wallet->id;
             $user->save();
 
-            // Score starts at 70 (matches SRS) â€” above driver gate of 50
+            // Score starts at 70 (Silver tier) â€” above driver gate of 50
             UserScore::create([
                 'user_id'             => $user->id,
                 'score'               => 70,
@@ -22959,14 +23437,17 @@ class Atarikaktestseeder extends Seeder
                 'total_cancellations' => 0,
             ]);
 
-            // Seed initial 3-star admin rating (same as verifyDriver does)
+            // â”€â”€ Base 3.0 rating â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Observer is off, so we seed it manually here.
+            // firstOrCreate: safe if seeder is run more than once.
             if ($adminUser) {
                 UserRating::firstOrCreate(
                     ['rater_id' => $adminUser->id, 'rated_user_id' => $user->id],
                     ['rating'   => 3.0]
                 );
             }
-// Insert required verification documents (fake paths â€” seeder only)
+
+            // Insert required verification documents (fake paths â€” seeder only)
             foreach (['face_id', 'back_id', 'license', 'mechanic_card'] as $docType) {
                 \App\Models\Photo::create([
                     'user_id' => $user->id,
@@ -22974,15 +23455,19 @@ class Atarikaktestseeder extends Seeder
                     'path'    => "verifications/{$docType}/seeded_{$user->id}.jpg",
                 ]);
             }
+
             $drivers->push($user);
         }
 
+        $this->command->info("  âœ… {$count} drivers created with 3.0 base rating.");
         return $drivers;
     }
 
     private function createPassengers(int $count): \Illuminate\Support\Collection
     {
         $passengers = collect();
+        // Fetch admin rater â€” same pattern as createDrivers
+        $adminUser  = User::where('email', config('admin.primary.email'))->first();
 
         for ($i = 1; $i <= $count; $i++) {
             $user = User::create([
@@ -23010,7 +23495,7 @@ class Atarikaktestseeder extends Seeder
                 'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             ]);
 
-            // High balance so wallet never blocks seeding
+            // Unique phone per passenger (100-series to avoid clash with drivers)
             $wallet = Wallet::create([
                 'user_id'      => $user->id,
                 'phone_number' => '+9639' . str_pad(100 + $i, 8, '0', STR_PAD_LEFT),
@@ -23027,15 +23512,35 @@ class Atarikaktestseeder extends Seeder
                 'total_cancellations' => 0,
             ]);
 
+            // â”€â”€ Base 3.0 rating â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // FIX: was missing for passengers â€” added to match driver behaviour.
+            if ($adminUser) {
+                UserRating::firstOrCreate(
+                    ['rater_id' => $adminUser->id, 'rated_user_id' => $user->id],
+                    ['rating'   => 3.0]
+                );
+            }
+
+            // Insert required verification documents
+            foreach (['face_id', 'back_id'] as $docType) {
+                \App\Models\Photo::create([
+                    'user_id' => $user->id,
+                    'type'    => $docType,
+                    'path'    => "verifications/{$docType}/seeded_{$user->id}.jpg",
+                ]);
+            }
+
             $passengers->push($user);
         }
 
+        $this->command->info("  âœ… {$count} passengers created with 3.0 base rating.");
         return $passengers;
     }
 
     private function createUnverifiedUsers(int $count): void
     {
-        $statuses = ['pending', 'none', 'pending', 'none', 'rejected'];
+        $statuses  = ['pending', 'none', 'pending', 'none', 'rejected'];
+        $adminUser = User::where('email', config('admin.primary.email'))->first();
 
         for ($i = 1; $i <= $count; $i++) {
             $user = User::create([
@@ -23069,23 +23574,22 @@ class Atarikaktestseeder extends Seeder
                 'total_rides'         => 0,
                 'total_cancellations' => 0,
             ]);
+
+            // â”€â”€ Base 3.0 rating â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // FIX: was missing for unverified users â€” added for consistency.
+            if ($adminUser) {
+                UserRating::firstOrCreate(
+                    ['rater_id' => $adminUser->id, 'rated_user_id' => $user->id],
+                    ['rating'   => 3.0]
+                );
+            }
         }
+
+        $this->command->info("  âœ… {$count} unverified users created with 3.0 base rating.");
     }
 
     // =========================================================================
     // SCENARIO A â€“ COMPLETED RIDES (e-pay)
-    //
-    // Timeline (using Carbon fake time):
-    //   T-10d  â†’ create ride, book it
-    //   T-10d+3h â†’ finish ride
-    //   T-10d+3h â†’ driver confirms
-    //   T-10d+3h â†’ passenger confirms â†’ checkAndCompleteRide() â†’ payment released
-    //
-    // Expected result:
-    //   - ride.status = finished
-    //   - booking.status = completed
-    //   - SyCash â†’ 95% driver wallet + 5% primary wallet
-    //   - score +10 both driver and passenger
     // =========================================================================
 
     private function scenarioA_CompletedRides($drivers, $passengers): void
@@ -23095,7 +23599,6 @@ class Atarikaktestseeder extends Seeder
                 $driver    = $drivers[$i % $drivers->count()];
                 $passenger = $passengers[$i % $passengers->count()];
 
-                // Go back in time so "departure" is truly in the past
                 Carbon::setTestNow(Carbon::now()->subDays(10 + $i));
                 $departure = Carbon::now()->addHours(2);
 
@@ -23109,7 +23612,6 @@ class Atarikaktestseeder extends Seeder
                     $passenger
                 );
 
-                // Advance time past departure before finishing
                 Carbon::setTestNow($departure->copy()->addHours(1));
 
                 $this->rideService->finishRide($ride->id, $driver);
@@ -23130,10 +23632,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO B â€“ AWAITING CONFIRMATION
-    //
-    // Driver finished and confirmed. Passenger has NOT confirmed yet.
-    // ride.status stays = awaiting_confirmation
-    // Payment is NOT released yet.
     // =========================================================================
 
     private function scenarioB_AwaitingConfirmation($drivers, $passengers): void
@@ -23174,9 +23672,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO C â€“ SCHEDULED RIDES
-    //
-    // Future departure, currently accepting bookings.
-    // Mix of e-pay and cash, some with bookings some empty.
     // =========================================================================
 
     private function scenarioC_ScheduledRides($drivers, $passengers): void
@@ -23209,37 +23704,32 @@ class Atarikaktestseeder extends Seeder
     }
 
     // =========================================================================
-    // SCENARIO D â€“ ACTIVE / ON-ROAD
-    //
-    // Departure has already passed, ride is running, not finished.
+    // SCENARIO D â€“ ACTIVE ON-ROAD RIDES
     // =========================================================================
 
     private function scenarioD_ActiveRides($drivers, $passengers): void
     {
-        for ($i = 0; $i < 6; $i++) {
+        for ($i = 0; $i < 5; $i++) {
             try {
                 $driver    = $drivers[($i + 5) % $drivers->count()];
                 $passenger = $passengers[($i + 10) % $passengers->count()];
 
-                // Create ride 3 hours ago with departure 1 hour ago
+                // Create the ride in the past so departure_time has already passed
                 Carbon::setTestNow(Carbon::now()->subHours(3));
-                $departure = Carbon::now()->addHours(1); // = 2 hours ago in real time
+                $departure = Carbon::now()->addMinutes(30);
 
                 $ride = $this->rideService->createRide(
                     $this->makeRideDTO($driver, $departure, 'e-pay', 'direct'),
                     $driver
                 );
 
-                // Reset to real now â€” departure is now in the past, ride is on-road
-                Carbon::setTestNow(null);
-
                 $this->bookingService->bookRide(
                     $this->makeBookDTO($passenger, $ride->id, 1),
                     $passenger
                 );
 
-                // Do NOT call finishRide â€” the ride is currently running
-                $this->command->line("  âœ“ Active on-road ride #{$ride->id}");
+                // Don't finish â€” departure passed, ride is "on the road"
+                $this->command->line("  âœ“ Active ride #{$ride->id} (departed, not finished)");
 
             } catch (\Throwable $e) {
                 $this->command->warn("  âœ— Scenario D [{$i}]: " . $e->getMessage());
@@ -23251,16 +23741,14 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO E â€“ DRIVER CANCELS RIDE
-    //
-    // Confirmed e-pay passengers â†’ 100% refund from SyCash escrow
-    // Driver score penalty applied by ScoreService
     // =========================================================================
 
     private function scenarioE_DriverCancelsRide($drivers, $passengers): void
     {
-        for ($i = 0; $i < 6; $i++) {
+        for ($i = 0; $i < 5; $i++) {
             try {
-                $driver    = $drivers[($i + 2) % $drivers->count()];
+                $driver    = $drivers[$i % $drivers->count()];
+                $passenger = $passengers[($i + 3) % $passengers->count()];
                 $departure = Carbon::now()->addHours(rand(3, 48));
 
                 $ride = $this->rideService->createRide(
@@ -23268,19 +23756,14 @@ class Atarikaktestseeder extends Seeder
                     $driver
                 );
 
-                // 1-2 passengers book the ride
-                for ($p = 0; $p < rand(1, 2); $p++) {
-                    $passenger = $passengers[($i + $p) % $passengers->count()];
-                    $this->bookingService->bookRide(
-                        $this->makeBookDTO($passenger, $ride->id, 1),
-                        $passenger
-                    );
-                }
+                $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
 
-                // Driver cancels â†’ service handles refunds + score
                 $this->rideService->cancelRide($ride->id, $driver);
 
-                $this->command->line("  âœ“ Driver cancelled ride #{$ride->id}");
+                $this->command->line("  âœ“ Driver cancelled ride #{$ride->id} (passenger refunded)");
 
             } catch (\Throwable $e) {
                 $this->command->warn("  âœ— Scenario E [{$i}]: " . $e->getMessage());
@@ -23289,125 +23772,144 @@ class Atarikaktestseeder extends Seeder
     }
 
     // =========================================================================
-    // SCENARIO F â€“ PASSENGER CANCELS (3 refund tiers)
-    //
-    // Tier 1 â€” cancel 1h after booking, 20h before departure (5% elapsed)
-    //   â†’ 100% refund, 0 score change
-    //
-    // Tier 2 â€” cancel 4h after booking, 10h before departure (40% elapsed)
-    //   â†’ 70% refund to passenger + 30% to driver
-    //
-    // Tier 3 â€” cancel 5h after booking, 6h before departure (83% elapsed)
-    //   â†’ 0% refund (all to driver)
+    // SCENARIO F â€“ PASSENGER CANCELS (3 REFUND TIERS)
     // =========================================================================
 
     private function scenarioF_PassengerCancels($drivers, $passengers): void
     {
         $tiers = [
-            ['hoursBeforeDepart' => 20, 'waitHours' => 1,  'label' => 'early  â†’ 100% refund'],
-            ['hoursBeforeDepart' => 10, 'waitHours' => 4,  'label' => 'mid    â†’ 70% refund'],
-            ['hoursBeforeDepart' => 6,  'waitHours' => 5,  'label' => 'late   â†’ 0% refund'],
+            ['label' => 'early (0-30%)',  'elapsed_hours' => 1,  'total_hours' => 48],
+            ['label' => 'mid   (30-50%)', 'elapsed_hours' => 17, 'total_hours' => 48],
+            ['label' => 'late  (50-100%)','elapsed_hours' => 40, 'total_hours' => 48],
         ];
 
-        foreach ($tiers as $tierIdx => $tier) {
-            for ($i = 0; $i < 3; $i++) {
-                try {
-                    $driver    = $drivers[($tierIdx + $i) % $drivers->count()];
-                    $passenger = $passengers[($tierIdx * 3 + $i + 10) % $passengers->count()];
-                    $departure = Carbon::now()->addHours($tier['hoursBeforeDepart']);
+        foreach ($tiers as $idx => $tier) {
+            try {
+                $driver    = $drivers[($idx + 7) % $drivers->count()];
+                $passenger = $passengers[($idx + 7) % $passengers->count()];
 
-                    $ride = $this->rideService->createRide(
-                        $this->makeRideDTO($driver, $departure, 'e-pay', 'direct'),
-                        $driver
-                    );
+                // Create ride at booking time (T=0)
+                Carbon::setTestNow(Carbon::now()->subHours($tier['total_hours']));
+                $departure = Carbon::now()->addHours($tier['total_hours']);
 
-                    $booking = $this->bookingService->bookRide(
-                        $this->makeBookDTO($passenger, $ride->id, 1),
-                        $passenger
-                    );
+                $ride = $this->rideService->createRide(
+                    $this->makeRideDTO($driver, $departure, 'e-pay', 'direct'),
+                    $driver
+                );
 
-                    // Advance time to hit the desired tier
-                    Carbon::setTestNow(Carbon::now()->addHours($tier['waitHours']));
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
 
-                    $this->bookingService->cancelBooking($booking->id, $passenger);
+                // Advance to the cancellation moment
+                Carbon::setTestNow(Carbon::now()->addHours($tier['elapsed_hours']));
 
-                    $this->command->line("  âœ“ Passenger cancelled booking #{$booking->id} ({$tier['label']})");
+                $this->bookingService->cancelBooking($booking->id, $passenger);
 
-                } catch (\Throwable $e) {
-                    $this->command->warn("  âœ— Scenario F tier{$tierIdx} [{$i}]: " . $e->getMessage());
-                } finally {
-                    Carbon::setTestNow(null);
-                }
+                $this->command->line("  âœ“ Passenger cancelled ({$tier['label']}) booking #{$booking->id}");
+
+            } catch (\Throwable $e) {
+                $this->command->warn("  âœ— Scenario F [{$idx}]: " . $e->getMessage());
+            } finally {
+                Carbon::setTestNow(null);
             }
         }
     }
 
     // =========================================================================
     // SCENARIO G â€“ REQUEST BOOKINGS
-    //
-    // Per ride: 3 booking requests
-    //   1. Driver accepts  â†’ booking confirmed, passenger charged
-    //   2. Driver rejects  â†’ booking cancelled, passenger never charged
-    //   3. Still pending   â†’ driver hasn't responded yet
     // =========================================================================
 
     private function scenarioG_RequestBookings($drivers, $passengers): void
     {
-        for ($i = 0; $i < 5; $i++) {
+        // Accepted
+        for ($i = 0; $i < 3; $i++) {
             try {
                 $driver    = $drivers[$i % $drivers->count()];
-                $departure = Carbon::now()->addHours(rand(5, 72));
+                $passenger = $passengers[($i + 15) % $passengers->count()];
+                $departure = Carbon::now()->addHours(rand(6, 72));
 
                 $ride = $this->rideService->createRide(
-                    $this->makeRideDTO($driver, $departure, 'e-pay', 'request', 6),
+                    $this->makeRideDTO($driver, $departure, 'e-pay', 'request'),
                     $driver
                 );
 
-                // Request 1: driver accepts â†’ payment charged now
-                $pass1    = $passengers[$i % $passengers->count()];
-                $booking1 = $this->bookingService->bookRide(
-                    $this->makeBookDTO($pass1, $ride->id, 1),
-                    $pass1
-                );
-                $this->bookingService->acceptBooking($booking1->id, $driver);
-
-                // Request 2: driver rejects
-                $pass2    = $passengers[($i + 1) % $passengers->count()];
-                $booking2 = $this->bookingService->bookRide(
-                    $this->makeBookDTO($pass2, $ride->id, 1),
-                    $pass2
-                );
-                $this->bookingService->rejectBooking($booking2->id, $driver);
-
-                // Request 3: pending (no response)
-                $pass3 = $passengers[($i + 2) % $passengers->count()];
-                $this->bookingService->bookRide(
-                    $this->makeBookDTO($pass3, $ride->id, 1),
-                    $pass3
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
                 );
 
-                $this->command->line("  âœ“ Request ride #{$ride->id}: accepted, rejected, pending");
+                $this->bookingService->acceptBooking($booking->id, $driver);
+
+                $this->command->line("  âœ“ Request booking #{$booking->id} accepted");
 
             } catch (\Throwable $e) {
-                $this->command->warn("  âœ— Scenario G [{$i}]: " . $e->getMessage());
+                $this->command->warn("  âœ— Scenario G (accept) [{$i}]: " . $e->getMessage());
+            }
+        }
+
+        // Rejected
+        for ($i = 0; $i < 2; $i++) {
+            try {
+                $driver    = $drivers[($i + 3) % $drivers->count()];
+                $passenger = $passengers[($i + 18) % $passengers->count()];
+                $departure = Carbon::now()->addHours(rand(6, 72));
+
+                $ride = $this->rideService->createRide(
+                    $this->makeRideDTO($driver, $departure, 'cash', 'request'),
+                    $driver
+                );
+
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
+
+                $this->bookingService->rejectBooking($booking->id, $driver);
+
+                $this->command->line("  âœ“ Request booking #{$booking->id} rejected");
+
+            } catch (\Throwable $e) {
+                $this->command->warn("  âœ— Scenario G (reject) [{$i}]: " . $e->getMessage());
+            }
+        }
+
+        // Pending (no driver action yet)
+        for ($i = 0; $i < 3; $i++) {
+            try {
+                $driver    = $drivers[($i + 5) % $drivers->count()];
+                $passenger = $passengers[$i % $passengers->count()];
+                $departure = Carbon::now()->addHours(rand(6, 72));
+
+                $ride = $this->rideService->createRide(
+                    $this->makeRideDTO($driver, $departure, 'e-pay', 'request'),
+                    $driver
+                );
+
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
+
+                $this->command->line("  âœ“ Request booking #{$booking->id} pending (no driver action)");
+
+            } catch (\Throwable $e) {
+                $this->command->warn("  âœ— Scenario G (pending) [{$i}]: " . $e->getMessage());
             }
         }
     }
 
     // =========================================================================
     // SCENARIO H â€“ PASSENGER NO-SHOW
-    //
-    // Confirmed passenger doesn't show up after departure.
-    // E-pay: SyCash â†’ 95% driver + 5% primary (no refund to passenger)
-    // Score: -15 to passenger (CASH only per your service logic)
     // =========================================================================
 
     private function scenarioH_PassengerNoShow($drivers, $passengers): void
     {
         for ($i = 0; $i < 4; $i++) {
             try {
-                $driver    = $drivers[($i + 4) % $drivers->count()];
-                $passenger = $passengers[($i + 8) % $passengers->count()];
+                $driver    = $drivers[$i % $drivers->count()];
+                $passenger = $passengers[($i + 12) % $passengers->count()];
 
                 Carbon::setTestNow(Carbon::now()->subHours(5));
                 $departure = Carbon::now()->addHours(1);
@@ -23422,12 +23924,12 @@ class Atarikaktestseeder extends Seeder
                     $passenger
                 );
 
-                // Advance past departure so no-show report is valid
-                Carbon::setTestNow($departure->copy()->addMinutes(20));
+                // Advance past departure before reporting no-show
+                Carbon::setTestNow($departure->copy()->addMinutes(30));
 
                 $this->bookingService->reportPassengerNoShow($booking->id, $driver);
 
-                $this->command->line("  âœ“ Passenger no-show on ride #{$ride->id}");
+                $this->command->line("  âœ“ Passenger no-show on booking #{$booking->id}");
 
             } catch (\Throwable $e) {
                 $this->command->warn("  âœ— Scenario H [{$i}]: " . $e->getMessage());
@@ -23439,18 +23941,14 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO I â€“ DRIVER NO-SHOW
-    //
-    // Driver doesn't show up after departure.
-    // E-pay: SyCash â†’ 100% refund to each confirmed passenger
-    // Score: -15 to driver
     // =========================================================================
 
     private function scenarioI_DriverNoShow($drivers, $passengers): void
     {
-        for ($i = 0; $i < 4; $i++) {
+        for ($i = 0; $i < 3; $i++) {
             try {
-                $driver    = $drivers[($i + 7) % $drivers->count()];
-                $passenger = $passengers[($i + 12) % $passengers->count()];
+                $driver    = $drivers[($i + 6) % $drivers->count()];
+                $passenger = $passengers[($i + 8) % $passengers->count()];
 
                 Carbon::setTestNow(Carbon::now()->subHours(5));
                 $departure = Carbon::now()->addHours(1);
@@ -23483,10 +23981,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO J â€“ CASH RIDES
-    //
-    // No wallet movements. Payment is offline.
-    // Completed cash rides: score +10 both parties.
-    // Scheduled cash rides: no action yet.
     // =========================================================================
 
     private function scenarioJ_CashRides($drivers, $passengers): void
@@ -23547,9 +24041,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO K â€“ PARTIAL SEAT CANCELLATION
-    //
-    // Passenger books 3 seats, then cancels 1 immediately (early tier â†’ 100% refund
-    // for the cancelled seat). Remains with 2 confirmed seats.
     // =========================================================================
 
     private function scenarioK_PartialCancel($drivers, $passengers): void
@@ -23586,9 +24077,6 @@ class Atarikaktestseeder extends Seeder
     // DTO FACTORIES
     // =========================================================================
 
-    /**
-     * Build a CreateRideDTO with sensible defaults.
-     */
     private function makeRideDTO(
         User   $driver,
         Carbon $departure,
@@ -23620,9 +24108,6 @@ class Atarikaktestseeder extends Seeder
         );
     }
 
-    /**
-     * Build a BookRideDTO with a unique idempotency key.
-     */
     private function makeBookDTO(User $passenger, int $rideId, int $seats): BookRideDTO
     {
         return new BookRideDTO(
@@ -23662,10 +24147,249 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
-        // Seed system wallets first â€” they must exist before any ride/booking data
+        // ORDER IS CRITICAL:
+        //
+        // 1. AdminUserSeeder  â€” creates the admin User row FIRST.
+        //    Atarikaktestseeder::createDrivers() does:
+        //      $adminUser = User::where('email', config('admin.primary.email'))->first();
+        //    If admin doesn't exist yet â†’ $adminUser is null â†’ no 3.0 rating seeded for anyone.
+        //
+        // 2. SystemWalletSeeder â€” creates Primary Escrow + SyCash wallets.
+        //    Atarikaktestseeder checks for these at startup and aborts if missing.
+        //
+        // 3. Atarikaktestseeder â€” creates all users (drivers + passengers + unverified)
+        //    AND runs every business scenario (completed rides, cancellations, no-showsâ€¦).
+        //    Do NOT also call DriverSeeder/PassengerSeeder â€” they would create duplicate users.
+
         $this->call([
-            SystemWalletSeeder::class,
+            AdminUserSeeder::class,     // admin User row (JWT principal + system rater)
+            SystemWalletSeeder::class,  // Primary Escrow + SyCash wallets
+            Atarikaktestseeder::class,  // all users + all ride scenarios
         ]);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\database\seeders\DriverSeeder.php =====
+
+<?php
+
+namespace Database\Seeders;
+
+use App\Interfaces\VerificationRepositoryInterface;
+use App\Models\Photo;
+use App\Models\User;
+use App\Models\Wallet;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Hash;
+
+/**
+ * DriverSeeder
+ *
+ * Creates 10 verified drivers.
+ *
+ * Flow for each driver:
+ *   1. User::create()
+ *      â†’ UserObserver::created() fires automatically:
+ *        a. Creates profile row (ProfileRepository::createFromUser)
+ *        b. Initialises trust score at 70 (ScoreService::initializeScore)
+ *        c. Seeds 3.0 base rating (UserRating via admin rater)
+ *   2. Insert Photo rows (license + mechanic_card) so verification checks pass.
+ *   3. Set verification_status = 'pending' (required by verifyDriver guard).
+ *   4. Call VerificationRepository::verifyDriver()
+ *      â†’ sets is_verified_driver = true, verification_status = 'approved'
+ *      â†’ calls UserRating::firstOrCreate (finds existing row, no duplicate)
+ *   5. Create a Wallet for the driver (needed for e-pay rides).
+ *   6. Update profile with vehicle details (type_of_car, color_of_car, etc.)
+ */
+class DriverSeeder extends Seeder
+{
+    // Syrian phone numbers in the format stored on rides/wallets
+    private const COMM_NUMBER = '+963983337214';
+
+    private array $drivers = [
+        ['suffix' => '1',  'vehicle' => 'pickup',  'color' => 'silver', 'seats' => 4],
+        ['suffix' => '2',  'vehicle' => 'sedan',   'color' => 'black',  'seats' => 4],
+        ['suffix' => '3',  'vehicle' => 'suv',     'color' => 'red',    'seats' => 6],
+        ['suffix' => '4',  'vehicle' => 'minivan',  'color' => 'silver', 'seats' => 7],
+        ['suffix' => '5',  'vehicle' => 'suv',     'color' => 'silver', 'seats' => 6],
+        ['suffix' => '6',  'vehicle' => 'sedan',   'color' => 'black',  'seats' => 4],
+        ['suffix' => '7',  'vehicle' => 'suv',     'color' => 'white',  'seats' => 6],
+        ['suffix' => '8',  'vehicle' => 'sedan',   'color' => 'black',  'seats' => 4],
+        ['suffix' => '9',  'vehicle' => 'pickup',  'color' => 'white',  'seats' => 4],
+        ['suffix' => '10', 'vehicle' => 'pickup',  'color' => 'red',    'seats' => 4],
+    ];
+
+    public function __construct(
+        private VerificationRepositoryInterface $verificationRepo
+    ) {}
+
+    public function run(): void
+    {
+        foreach ($this->drivers as $data) {
+            $n = $data['suffix'];
+
+            // â”€â”€ 1. Create user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Observer fires here: profile + score + 3.0 base rating seeded.
+            $user = User::create([
+                'first_name'          => "Driver{$n}",
+                'last_name'           => 'Test',
+                'email'               => "driver{$n}@syride.test",
+                'password'            => Hash::make('password'),
+                'gender'              => 'M',
+                'address'             => 'Ø¯Ù…Ø´Ù‚',
+                'status'              => 1,
+                'email_verified_at'   => now(),
+                'verification_status' => 'none',
+            ]);
+
+            // â”€â”€ 2. Insert document photo rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Paths are placeholders â€” files don't need to exist for the DB.
+            // These satisfy the photo-based driver checks in the admin panel.
+            foreach (['license', 'mechanic_card'] as $docType) {
+                Photo::create([
+                    'user_id' => $user->id,
+                    'type'    => $docType,
+                    'path'    => "verifications/{$docType}/driver{$n}_placeholder.jpg",
+                ]);
+            }
+
+            // â”€â”€ 3. Set pending (verifyDriver() guards against non-pending) â”€â”€
+            $user->update(['verification_status' => 'pending']);
+
+            // â”€â”€ 4. Approve through the repository â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Sets is_verified_driver = true, verification_status = 'approved'.
+            // Also calls UserRating::firstOrCreate â†’ finds the existing 3.0
+            // rating seeded in step 1 and does nothing (no duplicate).
+            $this->verificationRepo->verifyDriver($user->id);
+
+            // â”€â”€ 5. Create driver wallet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            $wallet = Wallet::create([
+                'user_id'      => $user->id,
+                'phone_number' => self::COMM_NUMBER,
+                'balance'      => 10000, // 10,000 SYP starting balance for testing
+            ]);
+
+            // Link wallet to user
+            $user->update(['wallet_id' => $wallet->id]);
+
+            // â”€â”€ 6. Update profile with vehicle details â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Profile was already created by the observer; we just fill vehicle info.
+            $user->profile()->update([
+                'type_of_car'     => $data['vehicle'],
+                'color_of_car'    => $data['color'],
+                'number_of_seats' => $data['seats'],
+                'radio'           => false,
+                'smoking'         => false,
+            ]);
+
+            $this->command->info("  âœ…  Driver{$n} created â†’ verified â†’ wallet ready.");
+        }
+
+        $this->command->info('âœ…  All 10 drivers seeded with 3.0 base rating.');
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\database\seeders\PassengerSeeder.php =====
+
+<?php
+
+namespace Database\Seeders;
+
+use App\Interfaces\VerificationRepositoryInterface;
+use App\Models\Photo;
+use App\Models\User;
+use App\Models\Wallet;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Hash;
+
+/**
+ * PassengerSeeder
+ *
+ * Creates 10 verified passengers.
+ *
+ * Flow for each passenger:
+ *   1. User::create()
+ *      â†’ UserObserver::created() fires automatically:
+ *        a. Creates profile row
+ *        b. Initialises trust score at 70
+ *        c. Seeds 3.0 base rating (UserRating via admin rater)
+ *   2. Insert Photo rows (face_id + back_id) so verification checks pass.
+ *   3. Set verification_status = 'pending'.
+ *   4. Call VerificationRepository::verifyPassenger()
+ *      â†’ sets is_verified_passenger = true, verification_status = 'approved'
+ *   5. Create a Wallet for the passenger (needed to pay for e-pay rides).
+ */
+class PassengerSeeder extends Seeder
+{
+    private const COMM_NUMBER = '+963983337214';
+
+    private array $passengers = [
+        ['suffix' => '1',  'gender' => 'M'],
+        ['suffix' => '2',  'gender' => 'F'],
+        ['suffix' => '3',  'gender' => 'M'],
+        ['suffix' => '4',  'gender' => 'F'],
+        ['suffix' => '5',  'gender' => 'M'],
+        ['suffix' => '6',  'gender' => 'F'],
+        ['suffix' => '7',  'gender' => 'M'],
+        ['suffix' => '8',  'gender' => 'F'],
+        ['suffix' => '9',  'gender' => 'M'],
+        ['suffix' => '10', 'gender' => 'F'],
+    ];
+
+    public function __construct(
+        private VerificationRepositoryInterface $verificationRepo
+    ) {}
+
+    public function run(): void
+    {
+        foreach ($this->passengers as $data) {
+            $n = $data['suffix'];
+
+            // â”€â”€ 1. Create user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Observer fires: profile + score + 3.0 base rating.
+            $user = User::create([
+                'first_name'          => "Passenger{$n}",
+                'last_name'           => 'Test',
+                'email'               => "passenger{$n}@syride.test",
+                'password'            => Hash::make('password'),
+                'gender'              => $data['gender'],
+                'address'             => 'Ø¯Ù…Ø´Ù‚',
+                'status'              => 1,
+                'email_verified_at'   => now(),
+                'verification_status' => 'none',
+            ]);
+
+            // â”€â”€ 2. Insert document photo rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            foreach (['face_id', 'back_id'] as $docType) {
+                Photo::create([
+                    'user_id' => $user->id,
+                    'type'    => $docType,
+                    'path'    => "verifications/{$docType}/passenger{$n}_placeholder.jpg",
+                ]);
+            }
+
+            // â”€â”€ 3. Set pending â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            $user->update(['verification_status' => 'pending']);
+
+            // â”€â”€ 4. Approve through the repository â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Sets is_verified_passenger = true, verification_status = 'approved'.
+            $this->verificationRepo->verifyPassenger($user->id);
+
+            // â”€â”€ 5. Create passenger wallet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            $wallet = Wallet::create([
+                'user_id'      => $user->id,
+                'phone_number' => self::COMM_NUMBER,
+                'balance'      => 50000, // 50,000 SYP starting balance for testing
+            ]);
+
+            $user->update(['wallet_id' => $wallet->id]);
+
+            $this->command->info("  âœ…  Passenger{$n} created â†’ verified â†’ wallet ready.");
+        }
+
+        $this->command->info('âœ…  All 10 passengers seeded with 3.0 base rating.');
     }
 }
 
@@ -23677,75 +24401,426 @@ class DatabaseSeeder extends Seeder
 namespace Database\Seeders;
 
 use App\Models\Wallet;
-use App\Models\WalletTransaction;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 /**
  * SystemWalletSeeder
  *
- * Seeds the two system wallets once.  Safe to run multiple times (idempotent).
+ * Creates the two admin-controlled system wallets:
+ *   - Primary Escrow  (receives platform fees)
+ *   - SyCash          (holds passenger escrow funds)
  *
- * System wallets are NOT tied to any user account.
- * They are identified solely by their phone_number (from config/admin.php)
- * and by the `name` column for human readability.
+ * These wallets have no user_id â€” they belong to the platform, not a person.
+ * WalletTransactionService resolves them by phone number from config/admin.php.
  *
- * Run via: php artisan db:seed --class=SystemWalletSeeder
- * Or add it to DatabaseSeeder::run().
+ * Uses firstOrCreate so re-seeding never duplicates wallets or resets balances.
  */
 class SystemWalletSeeder extends Seeder
 {
     public function run(): void
     {
-        $this->seedWallet(
-            name:         'Primary Escrow',
-            phone:        config('admin.primary.phone'),
-            walletPrefix: config('admin.primary.wallet_prefix', 'PRM'),
+        // Primary Escrow wallet â€” receives 5% platform fee on every completed ride
+        Wallet::firstOrCreate(
+            ['phone_number' => config('admin.primary.phone')],
+            [
+                'name'    => 'Primary Escrow',
+                'user_id' => null,   // system wallet â€” no owner
+                'balance' => 0,
+            ]
         );
 
-        $this->seedWallet(
-            name:         'SyCash',
-            phone:        config('admin.sycash.phone'),
-            walletPrefix: config('admin.sycash.wallet_prefix', 'SYC'),
+        // SyCash wallet â€” holds passenger payments until ride completes/cancels
+        Wallet::firstOrCreate(
+            ['phone_number' => config('admin.sycash.phone')],
+            [
+                'name'    => 'SyCash',
+                'user_id' => null,   // system wallet â€” no owner
+                'balance' => 0,
+            ]
         );
 
-        $this->command->info('System wallets seeded successfully.');
+        $this->command->info('âœ…  System wallets ready (Primary Escrow + SyCash).');
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\database\seeders\UserRealFlowSeeder.php =====
+
+<?php
+
+namespace Database\Seeders;
+
+use App\Domain\ValueObjects\Money;
+use App\Domain\ValueObjects\PhoneNumber;
+use App\DTOs\Ride\BookRideDTO;
+use App\Models\Booking;
+use App\Models\Profile;
+use App\Models\Ride;
+use App\Models\User;
+use App\Models\UserScore;
+use App\Models\Wallet;
+use App\Repositories\RideRepository;
+use App\Services\Admin\AdminWalletService;
+use App\Services\Ride\BookingService;
+use App\Services\Ride\RideService;
+use Carbon\Carbon;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
+
+/**
+ * UserRealFlowSeeder
+ *
+ * Simulates the full production flow for user #36.
+ *
+ * KEY RULE â€” departure_time must be:
+ *   PAST   â†’ rides that will be finished (finishRide requires departure passed)
+ *   FUTURE â†’ rides that will be cancelled (validateCanCancelRide rejects past/near rides)
+ *
+ * AS DRIVER (cash â€” no driver wallet needed):
+ *   3 Ã— finished              â†’ as_driver.completed  = 3
+ *   2 Ã— cancelled             â†’ as_driver.cancelled  = 2
+ *   1 Ã— awaiting_confirmation â†’ as_driver.no_show    = 1
+ *
+ * AS PASSENGER (e-pay â€” real wallet flow):
+ *   3 Ã— completed booking     â†’ as_passenger.completed = 3
+ *   2 Ã— cancelled booking     â†’ as_passenger.cancelled = 2
+ *   1 Ã— no_show  booking      â†’ as_passenger.no_show   = 1
+ *
+ * Run:
+ *   php artisan db:seed --class=UserRealFlowSeeder
+ */
+class UserRealFlowSeeder extends Seeder
+{
+    private const TARGET_USER_ID  = 36;
+    private const PASSENGER_PHONE = '0991110036';
+    private const DUMMY_PHONE     = '0991110099';
+    private const PRICE_PER_SEAT  = 2500;          // SYP
+    private const WALLET_TOP_UP   = 100000;        // enough for all e-pay bookings
+
+    // Valid Syrian coordinates
+    private const PICKUP = ['lat' => 33.5102, 'lng' => 36.2765];
+    private const DEST   = ['lat' => 32.6244, 'lng' => 36.1021];
+
+    private RideRepository     $rideRepo;
+    private RideService        $rideService;
+    private BookingService     $bookingService;
+    private AdminWalletService $walletService;
+
+    public function run(): void
+
+    {
+        $this->rideRepo       = app(RideRepository::class);
+        $this->rideService    = app(RideService::class);
+        $this->bookingService = app(BookingService::class);
+        $this->walletService  = app(AdminWalletService::class);
+
+        $target = $this->prepareUser(self::TARGET_USER_ID, self::PASSENGER_PHONE);
+        $this->info("User #{$target->id} ({$target->first_name}) ready.");
+
+        $dummy = $this->prepareDummyDriver();
+        $this->info("Dummy driver #{$dummy->id} ready.");
+
+        $this->seedDriverRides($target);
+        $this->seedPassengerBookings($target, $dummy);
+
+        $this->info('');
+        $this->info('Done. Call GET /profile/' . self::TARGET_USER_ID . ' and verify ride_history.');
     }
 
-    private function seedWallet(string $name, string $phone, string $walletPrefix): void
+    // =========================================================================
+    // DRIVER SIDE
+    // =========================================================================
+
+    private function seedDriverRides(User $driver): void
     {
-        // Idempotent â€” skip if already exists
-        if (Wallet::where('phone_number', $phone)->exists()) {
-            $this->command->info("  [{$name}] already exists â€” skipped.");
-            return;
+        // â”€â”€ 3 Ã— finished â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Departure in the PAST so finishRide() is allowed
+        for ($i = 0; $i < 3; $i++) {
+            $ride = $this->createCashRide($driver, departurePast: true);
+            $this->rideService->finishRide($ride->id, $driver);
+            $this->info("  [driver] finished ride #{$ride->id}");
         }
 
-        DB::transaction(function () use ($name, $phone, $walletPrefix) {
-            $wallet = Wallet::create([
-                'name'          => $name,
-                'user_id'       => null,          // no user owner
-                'phone_number'  => $phone,
-                'balance'       => 0.00,
-                // wallet_number is auto-generated by the Wallet model booted() hook
-            ]);
+        // â”€â”€ 2 Ã— cancelled â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Departure in the FUTURE (â‰¥ 2 h) so validateCanCancelRide() passes
+        for ($i = 0; $i < 2; $i++) {
+            $ride = $this->createCashRide($driver, departurePast: false);
+            $this->rideService->cancelRide($ride->id, $driver);
+            $this->info("  [driver] cancelled ride #{$ride->id}");
+        }
 
-            // Audit trail â€” initial creation transaction
-            WalletTransaction::create([
-                'wallet_id'        => $wallet->id,
-                'user_id'          => null,
-                'type'             => 'system_wallet_init',
-                'amount'           => 0.00,
-                'previous_balance' => 0.00,
-                'new_balance'      => 0.00,
-                'description'      => "{$name} system wallet created",
-                'transaction_id'   => strtoupper($walletPrefix) . '_INIT_' . now()->format('YmdHis') . '_' . Str::random(6),
-                'status'           => 'completed',
+        // â”€â”€ 1 Ã— awaiting_confirmation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Departure past â†’ driver can finish, but ghost passenger never confirms
+        $ride  = $this->createCashRide($driver, departurePast: true);
+        $ghost = $this->ghostPassenger();
+        $this->forceConfirmedBooking($ghost->id, $ride->id);
 
-            ]);
+        $this->rideService->finishRide($ride->id, $driver);
+        // Driver confirms their side
+        $this->rideService->driverConfirmCompletion($ride->id, $driver);
+        // Passenger deliberately does NOT confirm â†’ stays awaiting_confirmation
+        $this->info("  [driver] awaiting_confirmation ride #{$ride->id}");
+    }
 
-            $this->command->info("  [{$name}] wallet created â€” phone: {$phone}, number: {$wallet->wallet_number}");
-        });
+    // =========================================================================
+    // PASSENGER SIDE
+    // =========================================================================
+
+    private function seedPassengerBookings(User $passenger, User $dummyDriver): void
+    {
+        // â”€â”€ 3 Ã— completed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Departure past so finishRide is valid; full confirm loop
+        for ($i = 0; $i < 3; $i++) {
+            $ride    = $this->createEpayRide($dummyDriver, departurePast: true);
+            $booking = $this->bookEpay($passenger, $ride);
+
+            $this->rideService->finishRide($ride->id, $dummyDriver);
+            $this->rideService->driverConfirmCompletion($ride->id, $dummyDriver);
+            $this->bookingService->passengerConfirmCompletion($booking->id, $passenger);
+
+            $this->info("  [passenger] completed booking #{$booking->id}");
+        }
+
+        // â”€â”€ 2 Ã— cancelled â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Departure FUTURE so the refund policy has time elapsed = 0% â†’ full refund
+        for ($i = 0; $i < 2; $i++) {
+            $ride    = $this->createEpayRide($dummyDriver, departurePast: false);
+            $booking = $this->bookEpay($passenger, $ride);
+
+            $this->bookingService->cancelBooking($booking->id, $passenger);
+            $this->info("  [passenger] cancelled booking #{$booking->id}");
+        }
+
+        // â”€â”€ 1 Ã— no_show â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Departure past so driver can report no-show after departure time
+        $ride    = $this->createEpayRide($dummyDriver, departurePast: true);
+        $booking = $this->bookEpay($passenger, $ride);
+
+        $this->bookingService->reportPassengerNoShow($booking->id, $dummyDriver);
+        $this->info("  [passenger] no_show booking #{$booking->id}");
+    }
+
+    // =========================================================================
+    // RIDE FACTORIES
+    // =========================================================================
+
+    /**
+     * @param bool $departurePast  true â†’ past (finished/no-show), false â†’ future (cancel)
+     */
+    private function createCashRide(User $driver, bool $departurePast): Ride
+    {
+        $departure = $departurePast
+            ? Carbon::now()->subHours(rand(3, 72))   // well in the past
+            : Carbon::now()->addHours(rand(3, 48));  // well in the future
+
+        return $this->rideRepo->createRideWithGeometry([
+            'driver_id'            => $driver->id,
+            'pickup_location'      => self::PICKUP,
+            'destination_location' => self::DEST,
+            'pickup_address'       => 'Ø¯Ù…Ø´Ù‚ - Ø³Ø§Ø­Ø© Ø§Ù„Ø£Ù…ÙˆÙŠÙŠÙ†',
+            'destination_address'  => 'Ø¯Ø±Ø¹Ø§ - Ø§Ù„Ù…Ø­Ø·Ø© Ø§Ù„Ù…Ø±ÙƒØ²ÙŠØ©',
+            'departure_time'       => $departure->toDateTimeString(),
+            'available_seats'      => 3,
+            'price_per_seat'       => self::PRICE_PER_SEAT,
+            'vehicle_type'         => 'Ø³ÙŠØ¯Ø§Ù†',
+            'payment_method'       => 'cash',
+            'booking_type'         => 'direct',
+            'communication_number' => '0991234567',
+            'distance'             => 120000,
+            'duration'             => 5400,
+            'route_geometry'       => $this->lineString(),
+            'chosen_route_index'   => 0,
+            'notes'                => null,
+        ]);
+    }
+
+    private function createEpayRide(User $driver, bool $departurePast): Ride
+    {
+        $departure = $departurePast
+            ? Carbon::now()->subHours(rand(3, 72))
+            : Carbon::now()->addHours(rand(3, 48));
+
+        return $this->rideRepo->createRideWithGeometry([
+            'driver_id'            => $driver->id,
+            'pickup_location'      => self::PICKUP,
+            'destination_location' => self::DEST,
+            'pickup_address'       => 'Ø¯Ù…Ø´Ù‚ - Ø³Ø§Ø­Ø© Ø§Ù„Ø£Ù…ÙˆÙŠÙŠÙ†',
+            'destination_address'  => 'Ø¯Ø±Ø¹Ø§ - Ø§Ù„Ù…Ø­Ø·Ø© Ø§Ù„Ù…Ø±ÙƒØ²ÙŠØ©',
+            'departure_time'       => $departure->toDateTimeString(),
+            'available_seats'      => 3,
+            'price_per_seat'       => self::PRICE_PER_SEAT,
+            'vehicle_type'         => 'Ø³ÙŠØ¯Ø§Ù†',
+            'payment_method'       => 'e-pay',
+            'booking_type'         => 'direct',
+            'communication_number' => '0991234568',
+            'distance'             => 120000,
+            'duration'             => 5400,
+            'route_geometry'       => $this->lineString(),
+            'chosen_route_index'   => 0,
+            'notes'                => null,
+        ]);
+    }
+
+    private function lineString(): array
+    {
+        return [
+            'type'        => 'LineString',
+            'coordinates' => [
+                [self::PICKUP['lng'], self::PICKUP['lat']],
+                [self::DEST['lng'],   self::DEST['lat']],
+            ],
+        ];
+    }
+
+    // =========================================================================
+    // BOOKING HELPERS
+    // =========================================================================
+
+    private function bookEpay(User $passenger, Ride $ride): Booking
+    {
+        $dto = new BookRideDTO(
+            passengerId:         $passenger->id,
+            rideId:              $ride->id,
+            seats:               1,
+            communicationNumber: PhoneNumber::from(self::PASSENGER_PHONE),
+            idempotencyKey:      (string) Str::uuid(),
+        );
+
+        return $this->bookingService->bookRide($dto, $passenger);
+    }
+
+    /**
+     * Force a confirmed booking without going through the payment flow.
+     * Only used for the awaiting_confirmation scenario (ghost passenger).
+     */
+    private function forceConfirmedBooking(int $userId, int $rideId): Booking
+    {
+        $booking = Booking::create([
+            'user_id'              => $userId,
+            'ride_id'              => $rideId,
+            'seats'                => 1,
+            'status'               => 'confirmed',
+            'communication_number' => '0990000000',
+        ]);
+
+        Ride::where('id', $rideId)->decrement('available_seats', 1);
+
+        return $booking;
+    }
+
+    // =========================================================================
+    // USER / WALLET SETUP
+    // =========================================================================
+
+    private function prepareUser(int $userId, string $phone): User
+    {
+        $user = User::findOrFail($userId);
+
+        $user->update([
+            'is_verified_driver'    => true,
+            'is_verified_passenger' => true,
+            'verification_status'   => 'approved',
+        ]);
+
+        UserScore::firstOrCreate(
+            ['user_id' => $user->id],
+            ['score' => 70, 'total_rides' => 0, 'total_cancellations' => 0]
+        );
+
+        $wallet = Wallet::firstOrCreate(
+            ['user_id' => $user->id],
+            ['phone_number' => $phone, 'balance' => 0]
+        );
+
+        $user->wallet_id = $wallet->id;
+        $user->save();
+
+        // Top up via the real AdminWalletService (transaction recorded in DB)
+        $adminConfig = array_merge(config('admin.primary'), ['type' => 'primary']);
+        $this->walletService->chargeWallet(
+            $phone,
+            Money::from(self::WALLET_TOP_UP),
+            $adminConfig
+        );
+
+        $this->info("  Wallet #{$wallet->id} topped up with " . self::WALLET_TOP_UP . " SYP.");
+
+        return $user->fresh();
+    }
+
+    private function prepareDummyDriver(): User
+    {
+        $driver = User::firstOrCreate(
+            ['email' => 'seed.driver.real@syride.test'],
+            [
+                'first_name'            => 'Test',
+                'last_name'             => 'Driver',
+                'password'              => Hash::make('password123'),
+                'gender'                => 'M',
+                'address'               => 'Ø¯Ù…Ø´Ù‚',
+                'status'                => 1,
+                'is_verified_driver'    => true,
+                'is_verified_passenger' => true,
+                'verification_status'   => 'approved',
+            ]
+        );
+
+        Profile::firstOrCreate(
+            ['user_id' => $driver->id],
+            ['full_name' => 'Test Driver', 'number_of_rides' => 0, 'radio' => false, 'smoking' => false]
+        );
+
+        UserScore::firstOrCreate(
+            ['user_id' => $driver->id],
+            ['score' => 70, 'total_rides' => 0, 'total_cancellations' => 0]
+        );
+
+        $wallet = Wallet::firstOrCreate(
+            ['user_id' => $driver->id],
+            ['phone_number' => self::DUMMY_PHONE, 'balance' => 0]
+        );
+
+        $driver->wallet_id = $wallet->id;
+        $driver->save();
+
+        return $driver->fresh();
+    }
+
+    private function ghostPassenger(): User
+    {
+        $ghost = User::firstOrCreate(
+            ['email' => 'seed.ghost.passenger@syride.test'],
+            [
+                'first_name'            => 'Ghost',
+                'last_name'             => 'Passenger',
+                'password'              => Hash::make('password123'),
+                'gender'                => 'M',
+                'address'               => 'Ø¯Ù…Ø´Ù‚',
+                'status'                => 1,
+                'is_verified_passenger' => true,
+                'verification_status'   => 'approved',
+            ]
+        );
+
+        Profile::firstOrCreate(
+            ['user_id' => $ghost->id],
+            ['full_name' => 'Ghost Passenger', 'number_of_rides' => 0, 'radio' => false, 'smoking' => false]
+        );
+
+        UserScore::firstOrCreate(
+            ['user_id' => $ghost->id],
+            ['score' => 70, 'total_rides' => 0, 'total_cancellations' => 0]
+        );
+
+        return $ghost;
+    }
+
+    // =========================================================================
+
+    private function info(string $msg): void
+    {
+        $this->command?->info($msg);
     }
 }
 
@@ -25187,6 +26262,7 @@ export const messaging = getMessaging(app);
 use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\AdminDriverController;
 use App\Http\Controllers\API\AdminTripController;
+use App\Http\Controllers\API\AdminUserController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
@@ -25403,7 +26479,12 @@ Route::middleware('jwt')->group(function () {
 // ========================================
 
 Route::prefix('admin')->group(function () {
-
+    Route::get('users', [AdminUserController::class, 'index']);
+   /* GET /api/admin/users
+GET /api/admin/users?type=driver
+    GET /api/admin/users?type=passenger&status=pending
+        GET /api/admin/users?status=verified&date=last_30_days
+            GET /api/admin/users?type=driver&status=all&date=last_6_months&search=ahmed*/
     Route::get('drivers/verification-efficiency', [AdminDriverController::class, 'verificationEfficiency']);
     Route::get('drivers/dashboard',  [AdminDriverController::class, 'dashboard']);
 
@@ -25415,9 +26496,9 @@ Route::prefix('admin')->group(function () {
     Route::get('drivers',            [AdminDriverController::class, 'index']);
 
 //  Single driver profile / detail view
-    Route::get('drivers/{driverId}/profile', [AdminDriverController::class, 'driverProfile']);
-
-
+    //  Single driver profile / detail view
+    Route::get('drivers/{driverId}/profile',   [AdminDriverController::class, 'driverProfile']);
+    Route::get('drivers/{driverId}/dashboard', [AdminDriverController::class, 'driverDashboard']);
     // â”€â”€ Public admin auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Route::post('/login',   [AdminDashboardController::class, 'login']);
     Route::post('/refresh', [AdminDashboardController::class, 'refresh']);

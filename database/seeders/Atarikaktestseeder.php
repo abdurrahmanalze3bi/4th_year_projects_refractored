@@ -34,8 +34,11 @@ use Illuminate\Support\Str;
  *   - Inconsistent data = a bug in your code, not the seeder
  *   - Every scenario exercises your real business logic
  *
- * Run:
- *   php artisan migrate:fresh
+ * Run via DatabaseSeeder (recommended):
+ *   php artisan migrate:fresh --seed
+ *
+ * Or standalone:
+ *   php artisan db:seed --class=AdminUserSeeder
  *   php artisan db:seed --class=SystemWalletSeeder
  *   php artisan db:seed --class=Atarikaktestseeder
  */
@@ -73,18 +76,18 @@ class Atarikaktestseeder extends Seeder
         config(['broadcasting.default' => 'log']);
         config(['mail.default'         => 'log']);
 
-        // Suppress UserObserver — we create Profile + UserScore manually
+        // Suppress UserObserver — we create Profile + UserScore manually below.
         // (flushEventListeners only removes User model listeners, not Wallet etc.)
         \App\Models\User::flushEventListeners();
 
         $this->command->info('🚀 Atarikak Test Seeder starting...');
 
-        // Verify system wallets exist
+        // Verify system wallets exist (AdminUserSeeder + SystemWalletSeeder must run first)
         $syCash  = Wallet::where('phone_number', config('admin.sycash.phone'))->first();
         $primary = Wallet::where('phone_number', config('admin.primary.phone'))->first();
 
         if (!$syCash || !$primary) {
-            $this->command->error('System wallets not found. Run: php artisan db:seed --class=SystemWalletSeeder');
+            $this->command->error('System wallets not found. Run AdminUserSeeder + SystemWalletSeeder first.');
             return;
         }
 
@@ -145,12 +148,15 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // USER CREATION
-    // (Observer is off — we create Profile + UserScore manually here)
+    // Observer is OFF — we create Profile + UserScore + UserRating manually.
+    // Every user gets a 3.0 base rating from the admin rater so avg_rating
+    // is never null (matching what UserObserver::created() does in production).
     // =========================================================================
 
     private function createDrivers(int $count): \Illuminate\Support\Collection
     {
         $drivers   = collect();
+        // Must exist (AdminUserSeeder runs before this seeder)
         $adminUser = User::where('email', config('admin.primary.email'))->first();
 
         for ($i = 1; $i <= $count; $i++) {
@@ -182,7 +188,7 @@ class Atarikaktestseeder extends Seeder
                 'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             ]);
 
-            // High balance so wallet never blocks seeding
+            // Unique phone per driver — avoids unique constraint crash
             $wallet = Wallet::create([
                 'user_id'      => $user->id,
                 'phone_number' => '+9639' . str_pad($i, 8, '0', STR_PAD_LEFT),
@@ -191,7 +197,7 @@ class Atarikaktestseeder extends Seeder
             $user->wallet_id = $wallet->id;
             $user->save();
 
-            // Score starts at 70 (matches SRS) — above driver gate of 50
+            // Score starts at 70 (Silver tier) — above driver gate of 50
             UserScore::create([
                 'user_id'             => $user->id,
                 'score'               => 70,
@@ -199,14 +205,17 @@ class Atarikaktestseeder extends Seeder
                 'total_cancellations' => 0,
             ]);
 
-            // Seed initial 3-star admin rating (same as verifyDriver does)
+            // ── Base 3.0 rating ────────────────────────────────────────────
+            // Observer is off, so we seed it manually here.
+            // firstOrCreate: safe if seeder is run more than once.
             if ($adminUser) {
                 UserRating::firstOrCreate(
                     ['rater_id' => $adminUser->id, 'rated_user_id' => $user->id],
                     ['rating'   => 3.0]
                 );
             }
-// Insert required verification documents (fake paths — seeder only)
+
+            // Insert required verification documents (fake paths — seeder only)
             foreach (['face_id', 'back_id', 'license', 'mechanic_card'] as $docType) {
                 \App\Models\Photo::create([
                     'user_id' => $user->id,
@@ -214,15 +223,19 @@ class Atarikaktestseeder extends Seeder
                     'path'    => "verifications/{$docType}/seeded_{$user->id}.jpg",
                 ]);
             }
+
             $drivers->push($user);
         }
 
+        $this->command->info("  ✅ {$count} drivers created with 3.0 base rating.");
         return $drivers;
     }
 
     private function createPassengers(int $count): \Illuminate\Support\Collection
     {
         $passengers = collect();
+        // Fetch admin rater — same pattern as createDrivers
+        $adminUser  = User::where('email', config('admin.primary.email'))->first();
 
         for ($i = 1; $i <= $count; $i++) {
             $user = User::create([
@@ -250,7 +263,7 @@ class Atarikaktestseeder extends Seeder
                 'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             ]);
 
-            // High balance so wallet never blocks seeding
+            // Unique phone per passenger (100-series to avoid clash with drivers)
             $wallet = Wallet::create([
                 'user_id'      => $user->id,
                 'phone_number' => '+9639' . str_pad(100 + $i, 8, '0', STR_PAD_LEFT),
@@ -267,15 +280,35 @@ class Atarikaktestseeder extends Seeder
                 'total_cancellations' => 0,
             ]);
 
+            // ── Base 3.0 rating ────────────────────────────────────────────
+            // FIX: was missing for passengers — added to match driver behaviour.
+            if ($adminUser) {
+                UserRating::firstOrCreate(
+                    ['rater_id' => $adminUser->id, 'rated_user_id' => $user->id],
+                    ['rating'   => 3.0]
+                );
+            }
+
+            // Insert required verification documents
+            foreach (['face_id', 'back_id'] as $docType) {
+                \App\Models\Photo::create([
+                    'user_id' => $user->id,
+                    'type'    => $docType,
+                    'path'    => "verifications/{$docType}/seeded_{$user->id}.jpg",
+                ]);
+            }
+
             $passengers->push($user);
         }
 
+        $this->command->info("  ✅ {$count} passengers created with 3.0 base rating.");
         return $passengers;
     }
 
     private function createUnverifiedUsers(int $count): void
     {
-        $statuses = ['pending', 'none', 'pending', 'none', 'rejected'];
+        $statuses  = ['pending', 'none', 'pending', 'none', 'rejected'];
+        $adminUser = User::where('email', config('admin.primary.email'))->first();
 
         for ($i = 1; $i <= $count; $i++) {
             $user = User::create([
@@ -309,23 +342,22 @@ class Atarikaktestseeder extends Seeder
                 'total_rides'         => 0,
                 'total_cancellations' => 0,
             ]);
+
+            // ── Base 3.0 rating ────────────────────────────────────────────
+            // FIX: was missing for unverified users — added for consistency.
+            if ($adminUser) {
+                UserRating::firstOrCreate(
+                    ['rater_id' => $adminUser->id, 'rated_user_id' => $user->id],
+                    ['rating'   => 3.0]
+                );
+            }
         }
+
+        $this->command->info("  ✅ {$count} unverified users created with 3.0 base rating.");
     }
 
     // =========================================================================
     // SCENARIO A – COMPLETED RIDES (e-pay)
-    //
-    // Timeline (using Carbon fake time):
-    //   T-10d  → create ride, book it
-    //   T-10d+3h → finish ride
-    //   T-10d+3h → driver confirms
-    //   T-10d+3h → passenger confirms → checkAndCompleteRide() → payment released
-    //
-    // Expected result:
-    //   - ride.status = finished
-    //   - booking.status = completed
-    //   - SyCash → 95% driver wallet + 5% primary wallet
-    //   - score +10 both driver and passenger
     // =========================================================================
 
     private function scenarioA_CompletedRides($drivers, $passengers): void
@@ -335,7 +367,6 @@ class Atarikaktestseeder extends Seeder
                 $driver    = $drivers[$i % $drivers->count()];
                 $passenger = $passengers[$i % $passengers->count()];
 
-                // Go back in time so "departure" is truly in the past
                 Carbon::setTestNow(Carbon::now()->subDays(10 + $i));
                 $departure = Carbon::now()->addHours(2);
 
@@ -349,7 +380,6 @@ class Atarikaktestseeder extends Seeder
                     $passenger
                 );
 
-                // Advance time past departure before finishing
                 Carbon::setTestNow($departure->copy()->addHours(1));
 
                 $this->rideService->finishRide($ride->id, $driver);
@@ -370,10 +400,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO B – AWAITING CONFIRMATION
-    //
-    // Driver finished and confirmed. Passenger has NOT confirmed yet.
-    // ride.status stays = awaiting_confirmation
-    // Payment is NOT released yet.
     // =========================================================================
 
     private function scenarioB_AwaitingConfirmation($drivers, $passengers): void
@@ -414,9 +440,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO C – SCHEDULED RIDES
-    //
-    // Future departure, currently accepting bookings.
-    // Mix of e-pay and cash, some with bookings some empty.
     // =========================================================================
 
     private function scenarioC_ScheduledRides($drivers, $passengers): void
@@ -449,37 +472,32 @@ class Atarikaktestseeder extends Seeder
     }
 
     // =========================================================================
-    // SCENARIO D – ACTIVE / ON-ROAD
-    //
-    // Departure has already passed, ride is running, not finished.
+    // SCENARIO D – ACTIVE ON-ROAD RIDES
     // =========================================================================
 
     private function scenarioD_ActiveRides($drivers, $passengers): void
     {
-        for ($i = 0; $i < 6; $i++) {
+        for ($i = 0; $i < 5; $i++) {
             try {
                 $driver    = $drivers[($i + 5) % $drivers->count()];
                 $passenger = $passengers[($i + 10) % $passengers->count()];
 
-                // Create ride 3 hours ago with departure 1 hour ago
+                // Create the ride in the past so departure_time has already passed
                 Carbon::setTestNow(Carbon::now()->subHours(3));
-                $departure = Carbon::now()->addHours(1); // = 2 hours ago in real time
+                $departure = Carbon::now()->addMinutes(30);
 
                 $ride = $this->rideService->createRide(
                     $this->makeRideDTO($driver, $departure, 'e-pay', 'direct'),
                     $driver
                 );
 
-                // Reset to real now — departure is now in the past, ride is on-road
-                Carbon::setTestNow(null);
-
                 $this->bookingService->bookRide(
                     $this->makeBookDTO($passenger, $ride->id, 1),
                     $passenger
                 );
 
-                // Do NOT call finishRide — the ride is currently running
-                $this->command->line("  ✓ Active on-road ride #{$ride->id}");
+                // Don't finish — departure passed, ride is "on the road"
+                $this->command->line("  ✓ Active ride #{$ride->id} (departed, not finished)");
 
             } catch (\Throwable $e) {
                 $this->command->warn("  ✗ Scenario D [{$i}]: " . $e->getMessage());
@@ -491,16 +509,14 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO E – DRIVER CANCELS RIDE
-    //
-    // Confirmed e-pay passengers → 100% refund from SyCash escrow
-    // Driver score penalty applied by ScoreService
     // =========================================================================
 
     private function scenarioE_DriverCancelsRide($drivers, $passengers): void
     {
-        for ($i = 0; $i < 6; $i++) {
+        for ($i = 0; $i < 5; $i++) {
             try {
-                $driver    = $drivers[($i + 2) % $drivers->count()];
+                $driver    = $drivers[$i % $drivers->count()];
+                $passenger = $passengers[($i + 3) % $passengers->count()];
                 $departure = Carbon::now()->addHours(rand(3, 48));
 
                 $ride = $this->rideService->createRide(
@@ -508,19 +524,14 @@ class Atarikaktestseeder extends Seeder
                     $driver
                 );
 
-                // 1-2 passengers book the ride
-                for ($p = 0; $p < rand(1, 2); $p++) {
-                    $passenger = $passengers[($i + $p) % $passengers->count()];
-                    $this->bookingService->bookRide(
-                        $this->makeBookDTO($passenger, $ride->id, 1),
-                        $passenger
-                    );
-                }
+                $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
 
-                // Driver cancels → service handles refunds + score
                 $this->rideService->cancelRide($ride->id, $driver);
 
-                $this->command->line("  ✓ Driver cancelled ride #{$ride->id}");
+                $this->command->line("  ✓ Driver cancelled ride #{$ride->id} (passenger refunded)");
 
             } catch (\Throwable $e) {
                 $this->command->warn("  ✗ Scenario E [{$i}]: " . $e->getMessage());
@@ -529,125 +540,144 @@ class Atarikaktestseeder extends Seeder
     }
 
     // =========================================================================
-    // SCENARIO F – PASSENGER CANCELS (3 refund tiers)
-    //
-    // Tier 1 — cancel 1h after booking, 20h before departure (5% elapsed)
-    //   → 100% refund, 0 score change
-    //
-    // Tier 2 — cancel 4h after booking, 10h before departure (40% elapsed)
-    //   → 70% refund to passenger + 30% to driver
-    //
-    // Tier 3 — cancel 5h after booking, 6h before departure (83% elapsed)
-    //   → 0% refund (all to driver)
+    // SCENARIO F – PASSENGER CANCELS (3 REFUND TIERS)
     // =========================================================================
 
     private function scenarioF_PassengerCancels($drivers, $passengers): void
     {
         $tiers = [
-            ['hoursBeforeDepart' => 20, 'waitHours' => 1,  'label' => 'early  → 100% refund'],
-            ['hoursBeforeDepart' => 10, 'waitHours' => 4,  'label' => 'mid    → 70% refund'],
-            ['hoursBeforeDepart' => 6,  'waitHours' => 5,  'label' => 'late   → 0% refund'],
+            ['label' => 'early (0-30%)',  'elapsed_hours' => 1,  'total_hours' => 48],
+            ['label' => 'mid   (30-50%)', 'elapsed_hours' => 17, 'total_hours' => 48],
+            ['label' => 'late  (50-100%)','elapsed_hours' => 40, 'total_hours' => 48],
         ];
 
-        foreach ($tiers as $tierIdx => $tier) {
-            for ($i = 0; $i < 3; $i++) {
-                try {
-                    $driver    = $drivers[($tierIdx + $i) % $drivers->count()];
-                    $passenger = $passengers[($tierIdx * 3 + $i + 10) % $passengers->count()];
-                    $departure = Carbon::now()->addHours($tier['hoursBeforeDepart']);
+        foreach ($tiers as $idx => $tier) {
+            try {
+                $driver    = $drivers[($idx + 7) % $drivers->count()];
+                $passenger = $passengers[($idx + 7) % $passengers->count()];
 
-                    $ride = $this->rideService->createRide(
-                        $this->makeRideDTO($driver, $departure, 'e-pay', 'direct'),
-                        $driver
-                    );
+                // Create ride at booking time (T=0)
+                Carbon::setTestNow(Carbon::now()->subHours($tier['total_hours']));
+                $departure = Carbon::now()->addHours($tier['total_hours']);
 
-                    $booking = $this->bookingService->bookRide(
-                        $this->makeBookDTO($passenger, $ride->id, 1),
-                        $passenger
-                    );
+                $ride = $this->rideService->createRide(
+                    $this->makeRideDTO($driver, $departure, 'e-pay', 'direct'),
+                    $driver
+                );
 
-                    // Advance time to hit the desired tier
-                    Carbon::setTestNow(Carbon::now()->addHours($tier['waitHours']));
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
 
-                    $this->bookingService->cancelBooking($booking->id, $passenger);
+                // Advance to the cancellation moment
+                Carbon::setTestNow(Carbon::now()->addHours($tier['elapsed_hours']));
 
-                    $this->command->line("  ✓ Passenger cancelled booking #{$booking->id} ({$tier['label']})");
+                $this->bookingService->cancelBooking($booking->id, $passenger);
 
-                } catch (\Throwable $e) {
-                    $this->command->warn("  ✗ Scenario F tier{$tierIdx} [{$i}]: " . $e->getMessage());
-                } finally {
-                    Carbon::setTestNow(null);
-                }
+                $this->command->line("  ✓ Passenger cancelled ({$tier['label']}) booking #{$booking->id}");
+
+            } catch (\Throwable $e) {
+                $this->command->warn("  ✗ Scenario F [{$idx}]: " . $e->getMessage());
+            } finally {
+                Carbon::setTestNow(null);
             }
         }
     }
 
     // =========================================================================
     // SCENARIO G – REQUEST BOOKINGS
-    //
-    // Per ride: 3 booking requests
-    //   1. Driver accepts  → booking confirmed, passenger charged
-    //   2. Driver rejects  → booking cancelled, passenger never charged
-    //   3. Still pending   → driver hasn't responded yet
     // =========================================================================
 
     private function scenarioG_RequestBookings($drivers, $passengers): void
     {
-        for ($i = 0; $i < 5; $i++) {
+        // Accepted
+        for ($i = 0; $i < 3; $i++) {
             try {
                 $driver    = $drivers[$i % $drivers->count()];
-                $departure = Carbon::now()->addHours(rand(5, 72));
+                $passenger = $passengers[($i + 15) % $passengers->count()];
+                $departure = Carbon::now()->addHours(rand(6, 72));
 
                 $ride = $this->rideService->createRide(
-                    $this->makeRideDTO($driver, $departure, 'e-pay', 'request', 6),
+                    $this->makeRideDTO($driver, $departure, 'e-pay', 'request'),
                     $driver
                 );
 
-                // Request 1: driver accepts → payment charged now
-                $pass1    = $passengers[$i % $passengers->count()];
-                $booking1 = $this->bookingService->bookRide(
-                    $this->makeBookDTO($pass1, $ride->id, 1),
-                    $pass1
-                );
-                $this->bookingService->acceptBooking($booking1->id, $driver);
-
-                // Request 2: driver rejects
-                $pass2    = $passengers[($i + 1) % $passengers->count()];
-                $booking2 = $this->bookingService->bookRide(
-                    $this->makeBookDTO($pass2, $ride->id, 1),
-                    $pass2
-                );
-                $this->bookingService->rejectBooking($booking2->id, $driver);
-
-                // Request 3: pending (no response)
-                $pass3 = $passengers[($i + 2) % $passengers->count()];
-                $this->bookingService->bookRide(
-                    $this->makeBookDTO($pass3, $ride->id, 1),
-                    $pass3
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
                 );
 
-                $this->command->line("  ✓ Request ride #{$ride->id}: accepted, rejected, pending");
+                $this->bookingService->acceptBooking($booking->id, $driver);
+
+                $this->command->line("  ✓ Request booking #{$booking->id} accepted");
 
             } catch (\Throwable $e) {
-                $this->command->warn("  ✗ Scenario G [{$i}]: " . $e->getMessage());
+                $this->command->warn("  ✗ Scenario G (accept) [{$i}]: " . $e->getMessage());
+            }
+        }
+
+        // Rejected
+        for ($i = 0; $i < 2; $i++) {
+            try {
+                $driver    = $drivers[($i + 3) % $drivers->count()];
+                $passenger = $passengers[($i + 18) % $passengers->count()];
+                $departure = Carbon::now()->addHours(rand(6, 72));
+
+                $ride = $this->rideService->createRide(
+                    $this->makeRideDTO($driver, $departure, 'cash', 'request'),
+                    $driver
+                );
+
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
+
+                $this->bookingService->rejectBooking($booking->id, $driver);
+
+                $this->command->line("  ✓ Request booking #{$booking->id} rejected");
+
+            } catch (\Throwable $e) {
+                $this->command->warn("  ✗ Scenario G (reject) [{$i}]: " . $e->getMessage());
+            }
+        }
+
+        // Pending (no driver action yet)
+        for ($i = 0; $i < 3; $i++) {
+            try {
+                $driver    = $drivers[($i + 5) % $drivers->count()];
+                $passenger = $passengers[$i % $passengers->count()];
+                $departure = Carbon::now()->addHours(rand(6, 72));
+
+                $ride = $this->rideService->createRide(
+                    $this->makeRideDTO($driver, $departure, 'e-pay', 'request'),
+                    $driver
+                );
+
+                $booking = $this->bookingService->bookRide(
+                    $this->makeBookDTO($passenger, $ride->id, 1),
+                    $passenger
+                );
+
+                $this->command->line("  ✓ Request booking #{$booking->id} pending (no driver action)");
+
+            } catch (\Throwable $e) {
+                $this->command->warn("  ✗ Scenario G (pending) [{$i}]: " . $e->getMessage());
             }
         }
     }
 
     // =========================================================================
     // SCENARIO H – PASSENGER NO-SHOW
-    //
-    // Confirmed passenger doesn't show up after departure.
-    // E-pay: SyCash → 95% driver + 5% primary (no refund to passenger)
-    // Score: -15 to passenger (CASH only per your service logic)
     // =========================================================================
 
     private function scenarioH_PassengerNoShow($drivers, $passengers): void
     {
         for ($i = 0; $i < 4; $i++) {
             try {
-                $driver    = $drivers[($i + 4) % $drivers->count()];
-                $passenger = $passengers[($i + 8) % $passengers->count()];
+                $driver    = $drivers[$i % $drivers->count()];
+                $passenger = $passengers[($i + 12) % $passengers->count()];
 
                 Carbon::setTestNow(Carbon::now()->subHours(5));
                 $departure = Carbon::now()->addHours(1);
@@ -662,12 +692,12 @@ class Atarikaktestseeder extends Seeder
                     $passenger
                 );
 
-                // Advance past departure so no-show report is valid
-                Carbon::setTestNow($departure->copy()->addMinutes(20));
+                // Advance past departure before reporting no-show
+                Carbon::setTestNow($departure->copy()->addMinutes(30));
 
                 $this->bookingService->reportPassengerNoShow($booking->id, $driver);
 
-                $this->command->line("  ✓ Passenger no-show on ride #{$ride->id}");
+                $this->command->line("  ✓ Passenger no-show on booking #{$booking->id}");
 
             } catch (\Throwable $e) {
                 $this->command->warn("  ✗ Scenario H [{$i}]: " . $e->getMessage());
@@ -679,18 +709,14 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO I – DRIVER NO-SHOW
-    //
-    // Driver doesn't show up after departure.
-    // E-pay: SyCash → 100% refund to each confirmed passenger
-    // Score: -15 to driver
     // =========================================================================
 
     private function scenarioI_DriverNoShow($drivers, $passengers): void
     {
-        for ($i = 0; $i < 4; $i++) {
+        for ($i = 0; $i < 3; $i++) {
             try {
-                $driver    = $drivers[($i + 7) % $drivers->count()];
-                $passenger = $passengers[($i + 12) % $passengers->count()];
+                $driver    = $drivers[($i + 6) % $drivers->count()];
+                $passenger = $passengers[($i + 8) % $passengers->count()];
 
                 Carbon::setTestNow(Carbon::now()->subHours(5));
                 $departure = Carbon::now()->addHours(1);
@@ -723,10 +749,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO J – CASH RIDES
-    //
-    // No wallet movements. Payment is offline.
-    // Completed cash rides: score +10 both parties.
-    // Scheduled cash rides: no action yet.
     // =========================================================================
 
     private function scenarioJ_CashRides($drivers, $passengers): void
@@ -787,9 +809,6 @@ class Atarikaktestseeder extends Seeder
 
     // =========================================================================
     // SCENARIO K – PARTIAL SEAT CANCELLATION
-    //
-    // Passenger books 3 seats, then cancels 1 immediately (early tier → 100% refund
-    // for the cancelled seat). Remains with 2 confirmed seats.
     // =========================================================================
 
     private function scenarioK_PartialCancel($drivers, $passengers): void
@@ -826,9 +845,6 @@ class Atarikaktestseeder extends Seeder
     // DTO FACTORIES
     // =========================================================================
 
-    /**
-     * Build a CreateRideDTO with sensible defaults.
-     */
     private function makeRideDTO(
         User   $driver,
         Carbon $departure,
@@ -860,9 +876,6 @@ class Atarikaktestseeder extends Seeder
         );
     }
 
-    /**
-     * Build a BookRideDTO with a unique idempotency key.
-     */
     private function makeBookDTO(User $passenger, int $rideId, int $seats): BookRideDTO
     {
         return new BookRideDTO(

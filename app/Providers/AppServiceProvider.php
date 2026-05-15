@@ -93,6 +93,7 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(\App\Services\Admin\AdminExportService::class);
         $this->app->singleton(\App\Services\Admin\AdminTripService::class);
         $this->app->singleton(\App\Services\Admin\AdminDriverService::class);
+        $this->app->singleton(\App\Services\Admin\AdminUserService::class);
         // ========================================
         // NOTIFICATION SERVICE
         // ========================================

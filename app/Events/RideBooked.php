@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
@@ -16,7 +17,7 @@ use Illuminate\Queue\SerializesModels;
  *
  * FIXED: Explicit data arrays instead of only() to prevent accidental exposure
  */
-class RideBooked implements ShouldBroadcast
+class RideBooked implements  ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
