@@ -28,7 +28,7 @@ COPY . .
 RUN composer run-script post-autoload-dump
 
 # ============================================================
-# Stage 3: Final image — PHP 8.2 + Apache
+# Stage 3: Final image â€” PHP 8.2 + Apache
 # ============================================================
 FROM php:8.2-apache
 
