@@ -46,26 +46,33 @@ jobs:
             git reset --hard origin/samer
             git clean -fd
 
+            echo "Checking Composer..."
             if command -v composer >/dev/null 2>&1; then
+              echo "Installing Composer dependencies..."
               composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
             else
-              echo "Composer is not installed on the VPS." >&2
+              echo "::error::Composer is not installed on the VPS."
               exit 1
             fi
 
+            echo "Checking NPM..."
             if command -v npm >/dev/null 2>&1; then
+              echo "Installing NPM dependencies..."
               npm ci
+              echo "Building assets..."
               npm run build
             else
-              echo "Node.js/npm are not installed on the VPS." >&2
+              echo "::error::Node.js/npm are not installed on the VPS."
               exit 1
             fi
 
+            echo "Running Laravel optimizations..."
             php artisan optimize:clear
             php artisan migrate --force
             php artisan storage:link || true
             php artisan config:cache
             php artisan view:cache
             php artisan queue:restart || true
+            echo "Deployment finished successfully!"
 
 
