@@ -25,7 +25,7 @@ class UserObserver
         // Seed a 3.0 base rating so every new user starts visible with a rating.
         // The admin account acts as the system rater (same pattern as verifyDriver).
         // firstOrCreate prevents duplicates if the observer fires more than once.
-        $adminUser = User::where('email', config('admin.primary.email'))->first();
+        $adminUser = User::where('email', config('admin.system_admin.email'))->first();
         if ($adminUser) {
             UserRating::firstOrCreate(
                 [

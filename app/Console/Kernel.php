@@ -12,9 +12,9 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        // $schedule->command('inspire')->hourly();
+        $schedule->command('tokens:cleanup')->daily();
+        $schedule->command('staff-tokens:cleanup')->daily();
     }
-
     /**
      * Register the commands for the application.
      */

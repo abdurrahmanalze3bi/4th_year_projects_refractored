@@ -1,8 +1,8 @@
 <?php
 
 return [
-    'primary' => [
-        'email'    => env('ADMIN_PRIMARY_EMAIL',    'primary@admin.com'),
+    'system_admin' => [
+        'email'    => env('ADMIN_PRIMARY_EMAIL',    'system_admin@admin.com'),
         'username' => env('ADMIN_PRIMARY_USERNAME', 'admin'),
         'password' => env('ADMIN_PRIMARY_PASSWORD', 'admin'),// ✅ Added default
         'phone' => env('ADMIN_PRIMARY_PHONE', '0912345678'),

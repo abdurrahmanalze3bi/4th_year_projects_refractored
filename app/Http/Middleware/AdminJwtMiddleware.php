@@ -93,7 +93,7 @@ final class AdminJwtMiddleware
      */
     private function resolveAdminConfig(string $email): ?array
     {
-        foreach (['primary', 'sycash'] as $type) {
+        foreach (['system_admin', 'sycash'] as $type) {
             $config = config("admin.{$type}");
 
             if (isset($config['email']) && $config['email'] === $email) {

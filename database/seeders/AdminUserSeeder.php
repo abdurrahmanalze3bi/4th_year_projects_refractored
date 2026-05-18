@@ -23,16 +23,16 @@ class AdminUserSeeder extends Seeder
     {
         // firstOrCreate: safe to re-run after migrate:fresh --seed
         User::firstOrCreate(
-            ['email' => config('admin.primary.email')],
+            ['email' => config('admin.system_admin.email')],
             [
-                'first_name'         => config('admin.primary.first_name', 'Admin'),
-                'last_name'          => config('admin.primary.last_name',  'Primary'),
-                'password'           => Hash::make(config('admin.primary.password')),
-                'gender'             => 'M',
-                'address'            => 'دمشق',
-                'status'             => 1,
-                'email_verified_at'  => now(),
-                'verification_status'=> 'none',
+                'first_name'          => config('admin.system_admin.first_name', 'Admin'),
+                'last_name'           => config('admin.system_admin.last_name',  'User'),
+                'password'            => Hash::make(config('admin.system_admin.password')),
+                'gender'              => 'M',
+                'address'             => 'دمشق',
+                'status'              => 1,
+                'email_verified_at'   => now(),
+                'verification_status' => 'none',
             ]
         );
 
