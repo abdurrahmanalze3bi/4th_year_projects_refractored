@@ -46,33 +46,25 @@ jobs:
             git reset --hard origin/samer
             git clean -fd
 
-            echo "Checking Composer..."
-            if command -v composer >/dev/null 2>&1; then
-              echo "Installing Composer dependencies..."
-              composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
-            else
-              echo "::error::Composer is not installed on the VPS."
+            echo "Checking Docker..."
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "::error::Docker is not installed on the VPS."
               exit 1
             fi
 
-            echo "Checking NPM..."
-            if command -v npm >/dev/null 2>&1; then
-              echo "Installing NPM dependencies..."
-              npm ci
-              echo "Building assets..."
-              npm run build
-            else
-              echo "::error::Node.js/npm are not installed on the VPS."
-              exit 1
-            fi
+            echo "Starting Docker Compose build and deployment..."
+            # Build and start containers in detached mode
+            docker compose up -d --build
 
-            echo "Running Laravel optimizations..."
-            php artisan optimize:clear
-            php artisan migrate --force
-            php artisan storage:link || true
-            php artisan config:cache
-            php artisan view:cache
-            php artisan queue:restart || true
+            echo "Running migrations inside the container..."
+            docker compose exec -T app php artisan migrate --force
+
+            echo "Optimizing Laravel..."
+            docker compose exec -T app php artisan optimize
+
+            echo "Cleaning up old images..."
+            docker image prune -f
+
             echo "Deployment finished successfully!"
 
 
