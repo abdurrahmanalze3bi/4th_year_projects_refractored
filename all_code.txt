@@ -4688,6 +4688,289 @@ final class StaffReviewController  extends Controller
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\AdminBanController.php =====
+
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use App\Models\User;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+
+/**
+ * AdminBanController
+ *
+ * UC-ADM-12: Ban / Unban User
+ *
+ * Status codes:
+ *   -1 = banned
+ *    0 = logged out
+ *    1 = active
+ *
+ * Routes (all behind auth.admin middleware):
+ *   POST /api/admin/users/{userId}/ban    â†’ ban()
+ *   POST /api/admin/users/{userId}/unban  â†’ unban()
+ *   GET  /api/admin/users/{userId}/status â†’ userStatus()
+ */
+final class AdminBanController extends Controller
+{
+    // â”€â”€ POST /api/admin/users/{userId}/ban â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Ban a user.
+     *
+     * Body:
+     *   reason      string   required, min 10
+     *   type        string   required: permanent | temporary
+     *   expires_at  string   required when type=temporary (e.g. "2025-06-01 00:00:00")
+     */
+    public function ban(int $userId, Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'reason'     => 'required|string|min:10|max:1000',
+            'type'       => 'required|in:permanent,temporary',
+            'expires_at' => 'required_if:type,temporary|nullable|date|after:now',
+        ], [
+            'reason.required'        => 'A ban reason is required.',
+            'reason.min'             => 'Ban reason must be at least 10 characters.',
+            'type.required'          => 'Ban type is required (permanent or temporary).',
+            'type.in'                => 'Ban type must be permanent or temporary.',
+            'expires_at.required_if' => 'An expiry date is required for temporary bans.',
+            'expires_at.after'       => 'Expiry date must be in the future.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $user = User::findOrFail($userId);
+
+            // Prevent banning admin accounts
+            $adminEmails = array_filter([
+                config('admin.system_admin.email'),
+                config('admin.sycash.email'),
+            ]);
+            if (in_array($user->email, $adminEmails)) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Admin accounts cannot be banned.',
+                ], 422);
+            }
+
+            if ($user->status == -1) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'This user is already banned.',
+                ], 422);
+            }
+
+            $user->update([
+                'status'         => -1,
+                'ban_reason'     => $request->input('reason'),
+                'ban_type'       => $request->input('type'),
+                'banned_at'      => now(),
+                'ban_expires_at' => $request->input('type') === 'temporary'
+                    ? $request->input('expires_at')
+                    : null,
+                'banned_by'      => $request->user()?->id,
+            ]);
+
+            // Revoke all tokens â€” ban takes effect on the very next request
+            app(\App\Services\JwtService::class)->revokeAllTokens($user->id);
+
+            Log::info('User banned', [
+                'user_id'    => $user->id,
+                'banned_by'  => $request->user()?->id,
+                'type'       => $request->input('type'),
+                'expires_at' => $request->input('expires_at'),
+            ]);
+
+            // Notify user
+            try {
+                $expiryNote = $request->input('type') === 'temporary'
+                    ? ' Your ban expires at ' . $request->input('expires_at') . '.'
+                    : '';
+
+                app(\App\Services\NotificationService::class)->createNotification(
+                    $user,
+                    'account_banned',
+                    'Account Banned',
+                    'Your account has been banned. Reason: ' . $request->input('reason') . $expiryNote,
+                    ['ban_type' => $request->input('type')],
+                    'high',
+                    'system'
+                );
+            } catch (\Throwable) {
+                // Notification failure must never block the ban
+            }
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'User has been banned successfully.',
+                'data'    => $this->formatUserStatus($user->fresh()),
+            ]);
+
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
+        } catch (\Exception $e) {
+            Log::error('Ban failed', ['user_id' => $userId, 'error' => $e->getMessage()]);
+            return $this->serverError();
+        }
+    }
+
+    // â”€â”€ POST /api/admin/users/{userId}/unban â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Lift a ban from a user.
+     *
+     * Body (optional):
+     *   admin_notes  string  reason for lifting the ban
+     */
+    public function unban(int $userId, Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'admin_notes' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $user = User::findOrFail($userId);
+
+            if ($user->status != -1) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'This user is not currently banned.',
+                ], 422);
+            }
+
+            $user->update([
+                'status'         => 0,   // logged out â€” user must log in again
+                'ban_reason'     => null,
+                'ban_type'       => null,
+                'banned_at'      => null,
+                'ban_expires_at' => null,
+                'banned_by'      => null,
+            ]);
+
+            Log::info('User unbanned', [
+                'user_id'     => $userId,
+                'unbanned_by' => $request->user()?->id,
+                'notes'       => $request->input('admin_notes'),
+            ]);
+
+            // Notify user
+            try {
+                app(\App\Services\NotificationService::class)->createNotification(
+                    $user,
+                    'account_unbanned',
+                    'Account Restored',
+                    'Your account ban has been lifted. You can now log in again.'
+                    . ($request->input('admin_notes')
+                        ? ' Note: ' . $request->input('admin_notes')
+                        : ''),
+                    [],
+                    'high',
+                    'system'
+                );
+            } catch (\Throwable) {
+                // Notification failure must never block the unban
+            }
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'User has been unbanned. They can now log in again.',
+                'data'    => $this->formatUserStatus($user->fresh()),
+            ]);
+
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
+        } catch (\Exception $e) {
+            Log::error('Unban failed', ['user_id' => $userId, 'error' => $e->getMessage()]);
+            return $this->serverError();
+        }
+    }
+
+    // â”€â”€ GET /api/admin/users/{userId}/status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function userStatus(int $userId): JsonResponse
+    {
+        try {
+            $user = User::findOrFail($userId);
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $this->formatUserStatus($user),
+            ]);
+
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
+        }
+    }
+
+    // â”€â”€ Private â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function formatUserStatus(User $user): array
+    {
+        $accountStatus = match ((int) $user->status) {
+            -1 => 'banned',
+            0 => 'logged_out',
+            1 => 'active',
+            default => 'unknown',
+        };
+
+        $data = [
+            'user_id'        => $user->id,
+            'name'           => trim("{$user->first_name} {$user->last_name}"),
+            'email'          => $user->email,
+            'account_status' => $accountStatus,
+            'status_code'    => (int) $user->status,
+            'ban'            => null,
+        ];
+
+        if ($user->status == -1) {
+            $bannedBy = $user->banned_by
+                ? User::select('id', 'first_name', 'last_name')->find($user->banned_by)
+                : null;
+
+            $isExpired = $user->ban_type === 'temporary'
+                && $user->ban_expires_at !== null
+                && now()->gt($user->ban_expires_at);
+
+            $data['ban'] = [
+                'reason'     => $user->ban_reason,
+                'type'       => $user->ban_type,
+                'banned_at'  => $user->banned_at?->toIso8601String(),
+                'expires_at' => $user->ban_expires_at?->toIso8601String(),
+                'is_expired' => $isExpired,
+                'banned_by'  => $bannedBy ? [
+                    'id'   => $bannedBy->id,
+                    'name' => trim("{$bannedBy->first_name} {$bannedBy->last_name}"),
+                ] : null,
+            ];
+        }
+
+        return $data;
+    }
+
+    private function serverError(): JsonResponse
+    {
+        return response()->json([
+            'status'  => 'error',
+            'message' => 'An unexpected error occurred. Please try again.',
+        ], 500);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\AdminDashboardController.php =====
 
 <?php
@@ -5778,6 +6061,338 @@ final class AdminUserController extends Controller
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\AdminWalletRequestController.php =====
+
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use App\Models\Wallet;
+use App\Models\WalletRequest;
+use App\Models\WalletTransaction;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+
+/**
+ * AdminWalletRequestController
+ *
+ * Admin endpoints for reviewing and acting on wallet charge/withdraw requests.
+ *
+ * Routes (all behind `auth.admin` middleware):
+ *   GET   /api/admin/wallet/requests           â†’ index()
+ *   POST  /api/admin/wallet/requests/{id}/approve â†’ approve()
+ *   POST  /api/admin/wallet/requests/{id}/reject  â†’ reject()
+ */
+final class AdminWalletRequestController extends Controller
+{
+    // â”€â”€ GET /api/admin/wallet/requests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * List wallet requests with optional filters.
+     *
+     * Query params:
+     *   status  = pending | approved | rejected   (default: pending)
+     *   type    = charge | withdraw               (default: all)
+     *   per_page = 1-50                           (default: 15)
+     *   page    = int
+     */
+    public function index(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'status'   => 'sometimes|in:pending,approved,rejected',
+            'type'     => 'sometimes|in:charge,withdraw',
+            'per_page' => 'sometimes|integer|min:1|max:50',
+            'page'     => 'sometimes|integer|min:1',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        $query = WalletRequest::with([
+            'user:id,first_name,last_name,email',
+            'wallet:id,wallet_number,phone_number,balance',
+        ])->orderByDesc('created_at');
+
+        $status = $request->get('status', 'pending');
+        $query->where('status', $status);
+
+        if ($request->filled('type')) {
+            $query->where('type', $request->input('type'));
+        }
+
+        $paginator = $query->paginate(
+            (int) $request->get('per_page', 15),
+            ['*'],
+            'page',
+            (int) $request->get('page', 1)
+        );
+
+        // Counts for tab badges
+        $counts = [
+            'pending'  => WalletRequest::where('status', 'pending')->count(),
+            'approved' => WalletRequest::where('status', 'approved')->count(),
+            'rejected' => WalletRequest::where('status', 'rejected')->count(),
+        ];
+
+        return response()->json([
+            'status' => 'success',
+            'data'   => $paginator->getCollection()
+                ->map(fn($r) => $this->formatRequest($r))
+                ->values(),
+            'meta'   => [
+                'current_page' => $paginator->currentPage(),
+                'last_page'    => $paginator->lastPage(),
+                'per_page'     => $paginator->perPage(),
+                'total'        => $paginator->total(),
+            ],
+            'counts' => $counts,
+        ]);
+    }
+
+    // â”€â”€ POST /api/admin/wallet/requests/{id}/approve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Approve a pending request.
+     *
+     * Charge  â†’ adds  amount to user's wallet balance.
+     * Withdraw â†’ deducts amount from user's wallet balance (re-checks balance).
+     *
+     * Both operations are wrapped in a DB transaction so the balance
+     * update and the request status change are atomic.
+     */
+    public function approve(int $id, Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'admin_notes' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $walletRequest = WalletRequest::with('wallet')->findOrFail($id);
+
+            if (!$walletRequest->isPending()) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "This request has already been {$walletRequest->status}.",
+                ], 422);
+            }
+
+            DB::transaction(function () use ($walletRequest, $request) {
+                $wallet = Wallet::lockForUpdate()->findOrFail($walletRequest->wallet_id);
+                $amount = (float) $walletRequest->amount;
+
+                if ($walletRequest->isWithdraw()) {
+                    // Re-check balance at approval time
+                    if ($amount > (float) $wallet->balance) {
+                        throw new \DomainException(
+                            "Insufficient wallet balance ({$wallet->balance} SYP) to process withdrawal of {$amount} SYP."
+                        );
+                    }
+                    $previousBalance = (float) $wallet->balance;
+                    $newBalance      = $previousBalance - $amount;
+                    $wallet->balance = $newBalance;
+                    $transactionType = 'withdrawal';
+                    $description     = "Withdrawal processed by admin";
+                } else {
+                    // Charge: add to balance
+                    $previousBalance = (float) $wallet->balance;
+                    $newBalance      = $previousBalance + $amount;
+                    $wallet->balance = $newBalance;
+                    $transactionType = 'admin_charge';
+                    $description     = "Balance topped up by admin";
+                }
+
+                $wallet->save();
+
+                // Record the wallet transaction for audit trail
+                WalletTransaction::create([
+                    'wallet_id'        => $wallet->id,
+                    'user_id'          => $walletRequest->user_id,
+                    'type'             => $transactionType,
+                    'amount'           => $amount,
+                    'previous_balance' => $previousBalance,
+                    'new_balance'      => $newBalance,
+                    'description'      => $description,
+                    'transaction_id'   => 'WR-' . $walletRequest->id . '-' . now()->timestamp,
+                    'status'           => 'completed',
+                    'reference'        => 'wallet_request:' . $walletRequest->id,
+                ]);
+
+                // Mark request as approved
+                $walletRequest->update([
+                    'status'       => 'approved',
+                    'admin_notes'  => $request->input('admin_notes'),
+                    'processed_by' => $request->user()?->id,
+                    'processed_at' => now(),
+                ]);
+
+                Log::info('Wallet request approved', [
+                    'request_id'       => $walletRequest->id,
+                    'type'             => $walletRequest->type,
+                    'amount'           => $amount,
+                    'user_id'          => $walletRequest->user_id,
+                    'previous_balance' => $previousBalance,
+                    'new_balance'      => $newBalance,
+                ]);
+            });
+
+            $walletRequest->refresh()->load('wallet');
+
+            // Notify user
+            try {
+                $label = $walletRequest->isCharge() ? 'Wallet Charge' : 'Wallet Withdrawal';
+                $msg   = $walletRequest->isCharge()
+                    ? "Your wallet charge request of {$walletRequest->amount} SYP has been approved."
+                    : "Your withdrawal request of {$walletRequest->amount} SYP has been approved.";
+
+                app(\App\Services\NotificationService::class)->createNotification(
+                    $walletRequest->user,
+                    'wallet_request_approved',
+                    $label . ' - Ù…ÙˆØ§ÙÙ‚',
+                    $msg,
+                    ['wallet_request_id' => $walletRequest->id],
+                    'high',
+                    'system'
+                );
+            } catch (\Throwable) {
+                // Notification failure must never block the approval
+            }
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => ucfirst($walletRequest->type) . ' request approved. Wallet balance updated.',
+                'data'    => $this->formatRequest($walletRequest),
+            ]);
+
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'Request not found.'], 404);
+        } catch (\DomainException $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        } catch (\Exception $e) {
+            Log::error('Wallet request approval failed', ['id' => $id, 'error' => $e->getMessage()]);
+            return $this->serverError();
+        }
+    }
+
+    // â”€â”€ POST /api/admin/wallet/requests/{id}/reject â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Reject a pending request â€” no balance change occurs.
+     *
+     * Body: { "admin_notes": "reason..." }   (recommended)
+     */
+    public function reject(int $id, Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'admin_notes' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $walletRequest = WalletRequest::findOrFail($id);
+
+            if (!$walletRequest->isPending()) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "This request has already been {$walletRequest->status}.",
+                ], 422);
+            }
+
+            $walletRequest->update([
+                'status'       => 'rejected',
+                'admin_notes'  => $request->input('admin_notes'),
+                'processed_by' => $request->user()?->id,
+                'processed_at' => now(),
+            ]);
+
+            Log::info('Wallet request rejected', [
+                'request_id' => $walletRequest->id,
+                'type'       => $walletRequest->type,
+                'amount'     => $walletRequest->amount,
+                'user_id'    => $walletRequest->user_id,
+            ]);
+
+            // Notify user
+            try {
+                $label = $walletRequest->isCharge() ? 'Wallet Charge' : 'Wallet Withdrawal';
+                $reason = $request->input('admin_notes') ? ' Reason: ' . $request->input('admin_notes') : '';
+
+                app(\App\Services\NotificationService::class)->createNotification(
+                    $walletRequest->user,
+                    'wallet_request_rejected',
+                    $label . ' - Rejected',
+                    "Your request for {$walletRequest->amount} SYP has been rejected.{$reason}",
+                    ['wallet_request_id' => $walletRequest->id],
+                    'normal',
+                    'system'
+                );
+            } catch (\Throwable) {
+                // Notification failure must never block the rejection
+            }
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Request rejected.',
+                'data'    => $this->formatRequest($walletRequest),
+            ]);
+
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'Request not found.'], 404);
+        } catch (\Exception $e) {
+            Log::error('Wallet request rejection failed', ['id' => $id, 'error' => $e->getMessage()]);
+            return $this->serverError();
+        }
+    }
+
+    // â”€â”€ Private â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function formatRequest(WalletRequest $r): array
+    {
+        return [
+            'id'             => $r->id,
+            'type'           => $r->type,
+            'amount'         => (float) $r->amount,
+            'status'         => $r->status,
+            'user_notes'     => $r->user_notes,
+            'admin_notes'    => $r->admin_notes,
+            'processed_at'   => $r->processed_at?->toIso8601String(),
+            'created_at'     => $r->created_at->toIso8601String(),
+            'user' => $r->user ? [
+                'id'    => $r->user->id,
+                'name'  => trim("{$r->user->first_name} {$r->user->last_name}"),
+                'email' => $r->user->email,
+            ] : null,
+            'wallet' => $r->wallet ? [
+                'id'             => $r->wallet->id,
+                'wallet_number'  => $r->wallet->wallet_number,
+                'phone_number'   => $r->wallet->phone_number,
+                'current_balance'=> (float) $r->wallet->balance,
+            ] : null,
+        ];
+    }
+
+    private function serverError(): JsonResponse
+    {
+        return response()->json([
+            'status'  => 'error',
+            'message' => 'An unexpected error occurred. Please try again.',
+        ], 500);
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\ChatController.php =====
 
 <?php
@@ -6818,6 +7433,602 @@ class OtpController extends Controller
         return response()->json($result, $result['success'] ? 200 : 400);
     }
 }
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\PassengerProfileController.php =====
+
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use App\Models\Booking;
+use App\Models\Complaint;
+use App\Models\Profile;
+use App\Models\Ride;
+use App\Models\User;
+use App\Models\UserRating;
+use App\Models\WalletTransaction;
+use App\Services\JwtService;
+use App\Services\NotificationService;
+use Carbon\Carbon;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+
+/**
+ * PassengerProfileController
+ *
+ * Provides the admin-facing passenger profile dashboard.
+ *
+ * â”€â”€ Routes (all behind auth.admin middleware) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ *
+ *  BFF (single call, returns full page):
+ *    GET  /api/admin/passengers/{userId}/full-profile   â†’ fullProfile()
+ *
+ *  Individual (for partial refreshes):
+ *    GET  /api/admin/passengers/{userId}/stats          â†’ stats()
+ *    GET  /api/admin/passengers/{userId}/monthly-trips  â†’ monthlyTrips()
+ *    GET  /api/admin/passengers/{userId}/recent-trips   â†’ recentTrips()
+ *    GET  /api/admin/passengers/{userId}/complaints     â†’ complaints()
+ *    GET  /api/admin/passengers/{userId}/wallet-charges â†’ walletCharges()
+ *
+ *  Actions:
+ *    POST /api/admin/passengers/{userId}/charge-wallet  â†’ chargeWallet()
+ *    POST /api/admin/users/{userId}/ban                 â†’ ban()   (AdminBanController)
+ *    POST /api/admin/users/{userId}/unban               â†’ unban() (AdminBanController)
+ */
+final class PassengerProfileController extends Controller
+{
+    public function __construct(
+        private readonly JwtService           $jwtService,
+        private readonly NotificationService  $notificationService,
+    ) {}
+
+    // =========================================================================
+    // BFF â€” full page in one call
+    // =========================================================================
+
+    /**
+     * GET /api/admin/passengers/{userId}/full-profile
+     *
+     * Returns everything the passenger profile dashboard page needs.
+     */
+    public function fullProfile(int $userId): JsonResponse
+    {
+        try {
+            $user = User::with(['profile', 'wallet', 'photos'])->findOrFail($userId);
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => [
+                    'user'          => $this->formatUser($user),
+                    'stats'         => $this->buildStats($user),
+                    'monthly_trips' => $this->buildMonthlyTrips($userId),
+                    'recent_trips'  => $this->buildRecentTrips($userId),
+                    'complaints'    => $this->buildComplaints($userId),
+                    'wallet_charges'=> $this->buildWalletCharges($userId),
+                ],
+            ]);
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
+        } catch (\Exception $e) {
+            Log::error('PassengerProfile: fullProfile failed', ['user_id' => $userId, 'error' => $e->getMessage()]);
+            return $this->serverError();
+        }
+    }
+
+    // =========================================================================
+    // INDIVIDUAL REFRESH ENDPOINTS
+    // =========================================================================
+
+    /**
+     * GET /api/admin/passengers/{userId}/stats
+     */
+    public function stats(int $userId): JsonResponse
+    {
+        try {
+            $user = User::with('wallet')->findOrFail($userId);
+            return response()->json(['status' => 'success', 'data' => $this->buildStats($user)]);
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
+        }
+    }
+
+    /**
+     * GET /api/admin/passengers/{userId}/monthly-trips
+     *
+     * Query params:
+     *   months = 1-12 (default 6)
+     */
+    public function monthlyTrips(int $userId, Request $request): JsonResponse
+    {
+        $months = min(12, max(1, (int) $request->get('months', 6)));
+        return response()->json([
+            'status' => 'success',
+            'data'   => $this->buildMonthlyTrips($userId, $months),
+        ]);
+    }
+
+    /**
+     * GET /api/admin/passengers/{userId}/recent-trips
+     *
+     * Query params:
+     *   limit = 1-50 (default 10)
+     */
+    public function recentTrips(int $userId, Request $request): JsonResponse
+    {
+        $limit = min(50, max(1, (int) $request->get('limit', 10)));
+        return response()->json([
+            'status' => 'success',
+            'data'   => $this->buildRecentTrips($userId, $limit),
+        ]);
+    }
+
+    /**
+     * GET /api/admin/passengers/{userId}/complaints
+     *
+     * Query params:
+     *   status = all | pending | in_review | resolved | closed | escalated
+     *   type   = all | trip_safety | driver_behavior | ... (see ComplaintType enum)
+     *   per_page = 1-50 (default 15)
+     *   page     = int
+     */
+    public function complaints(int $userId, Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'status'   => 'sometimes|in:all,pending,in_review,resolved,closed,escalated',
+            'type'     => 'sometimes|in:all,trip_safety,driver_behavior,passenger_behavior,ride_cancellation,financial_issue,account_issue,technical_issue,other',
+            'per_page' => 'sometimes|integer|min:1|max:50',
+            'page'     => 'sometimes|integer|min:1',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        $query = Complaint::with(['assignedAgent:id,first_name,last_name', 'attachments'])
+            ->where('user_id', $userId);
+
+        $status = $request->get('status', 'all');
+        if ($status !== 'all') {
+            $query->where('status', $status);
+        }
+
+        $type = $request->get('type', 'all');
+        if ($type !== 'all') {
+            $query->where('type', $type);
+        }
+
+        $paginator = $query
+            ->orderByDesc('created_at')
+            ->paginate(
+                (int) $request->get('per_page', 15),
+                ['*'],
+                'page',
+                (int) $request->get('page', 1)
+            );
+
+        return response()->json([
+            'status' => 'success',
+            'data'   => $paginator->getCollection()
+                ->map(fn($c) => $this->formatComplaint($c))
+                ->values(),
+            'meta'   => [
+                'current_page' => $paginator->currentPage(),
+                'last_page'    => $paginator->lastPage(),
+                'per_page'     => $paginator->perPage(),
+                'total'        => $paginator->total(),
+            ],
+            // Tab badge counts for this user only
+            'counts' => $this->complaintCounts($userId),
+        ]);
+    }
+
+    /**
+     * GET /api/admin/passengers/{userId}/wallet-charges
+     *
+     * Returns wallet top-up transactions for this user (admin charges only).
+     *
+     * Query params:
+     *   per_page = 1-50 (default 15)
+     *   page     = int
+     */
+    public function walletCharges(int $userId, Request $request): JsonResponse
+    {
+        $user = User::with('wallet')->find($userId);
+        if (!$user || !$user->wallet) {
+            return response()->json(['status' => 'success', 'data' => [], 'meta' => []]);
+        }
+
+        $paginator = \App\Models\WalletTransaction::with([
+            'user:id,first_name,last_name',   // the admin who processed it
+        ])
+            ->where('wallet_id', $user->wallet->id)
+            ->where('type', 'admin_charge')
+            ->orderByDesc('created_at')
+            ->paginate(
+                (int) $request->get('per_page', 15),
+                ['*'],
+                'page',
+                (int) $request->get('page', 1)
+            );
+
+        return response()->json([
+            'status' => 'success',
+            'data'   => $paginator->getCollection()
+                ->map(fn($tx) => $this->formatWalletCharge($tx))
+                ->values(),
+            'meta'   => [
+                'current_page' => $paginator->currentPage(),
+                'last_page'    => $paginator->lastPage(),
+                'per_page'     => $paginator->perPage(),
+                'total'        => $paginator->total(),
+            ],
+        ]);
+    }
+
+    // =========================================================================
+    // ACTIONS
+    // =========================================================================
+
+    /**
+     * POST /api/admin/passengers/{userId}/charge-wallet
+     *
+     * Body:
+     *   amount      numeric  required, min 1
+     *   admin_notes string   optional
+     */
+    public function chargeWallet(int $userId, Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'amount'      => 'required|numeric|min:1|max:10000000',
+            'admin_notes' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $user = User::with('wallet')->findOrFail($userId);
+
+            if (!$user->wallet) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'This user does not have a wallet yet.',
+                ], 422);
+            }
+
+            $amount = (float) $request->input('amount');
+
+            DB::transaction(function () use ($user, $amount, $request) {
+                $wallet = \App\Models\Wallet::lockForUpdate()->findOrFail($user->wallet->id);
+
+                $previousBalance = (float) $wallet->balance;
+                $newBalance      = $previousBalance + $amount;
+                $wallet->balance = $newBalance;
+                $wallet->save();
+
+                \App\Models\WalletTransaction::create([
+                    'wallet_id'        => $wallet->id,
+                    'user_id'          => $request->user()?->id,  // the admin
+                    'type'             => 'admin_charge',
+                    'amount'           => $amount,
+                    'previous_balance' => $previousBalance,
+                    'new_balance'      => $newBalance,
+                    'description'      => $request->input('admin_notes') ?? 'Admin wallet charge',
+                    'transaction_id'   => 'ADM-' . $user->id . '-' . now()->timestamp,
+                    'status'           => 'completed',
+                    'reference'        => 'admin_charge:' . $user->id,
+                ]);
+
+                Log::info('Admin charged passenger wallet', [
+                    'passenger_id'     => $user->id,
+                    'admin_id'         => $request->user()?->id,
+                    'amount'           => $amount,
+                    'previous_balance' => $previousBalance,
+                    'new_balance'      => $newBalance,
+                ]);
+            });
+
+            // Notify the user
+            try {
+                $this->notificationService->createNotification(
+                    $user,
+                    'wallet_charged',
+                    'ØªÙ… Ø´Ø­Ù† Ù…Ø­ÙØ¸ØªÙƒ',
+                    "ØªÙ… Ø¥Ø¶Ø§ÙØ© {$amount} Ø±.Ø³ Ø¥Ù„Ù‰ Ù…Ø­ÙØ¸ØªÙƒ Ø¨ÙˆØ§Ø³Ø·Ø© Ø§Ù„Ø¥Ø¯Ø§Ø±Ø©." .
+                    ($request->input('admin_notes') ? ' Ù…Ù„Ø§Ø­Ø¸Ø©: ' . $request->input('admin_notes') : ''),
+                    ['amount' => $amount],
+                    'normal',
+                    'system'
+                );
+            } catch (\Throwable) {
+                // Never let notification failure block the charge
+            }
+
+            $user->wallet->refresh();
+
+            return response()->json([
+                'status'      => 'success',
+                'message'     => "Wallet charged successfully. New balance: {$user->wallet->balance} SYP.",
+                'new_balance' => (float) $user->wallet->balance,
+            ]);
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
+        } catch (\Exception $e) {
+            Log::error('PassengerProfile: chargeWallet failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return $this->serverError();
+        }
+    }
+
+    // =========================================================================
+    // PRIVATE BUILDERS
+    // =========================================================================
+
+    private function buildStats(User $user): array
+    {
+        $userId = $user->id;
+
+        $totalRides = Booking::where('user_id', $userId)
+            ->whereIn('status', ['completed'])
+            ->count();
+
+        $totalSpending = Booking::join('rides', 'bookings.ride_id', '=', 'rides.id')
+            ->where('bookings.user_id', $userId)
+            ->where('bookings.status', 'completed')
+            ->selectRaw('SUM(bookings.seats * rides.price_per_seat) as total')
+            ->value('total') ?? 0.0;
+
+        $avgRating = UserRating::where('rated_user_id', $userId)->avg('rating') ?? 0.0;
+
+        $walletBalance = $user->wallet?->balance ?? 0.0;
+
+        return [
+            'total_rides'    => $totalRides,
+            'total_spending' => round((float) $totalSpending, 2),
+            'avg_rating'     => round((float) $avgRating, 1),
+            'wallet_balance' => round((float) $walletBalance, 2),
+        ];
+    }
+
+    /**
+     * Monthly trip counts + total cost (seats Ã— price_per_seat) for each month.
+     */
+    private function buildMonthlyTrips(int $userId, int $months = 6): array
+    {
+        $rows = Booking::join('rides', 'bookings.ride_id', '=', 'rides.id')
+            ->where('bookings.user_id', $userId)
+            ->where('bookings.status', 'completed')
+            ->where('rides.departure_time', '>=', now()->subMonths($months)->startOfMonth())
+            ->selectRaw(
+                "DATE_FORMAT(rides.departure_time, '%Y-%m') as month_key,
+                 COUNT(*) as trips,
+                 SUM(bookings.seats * rides.price_per_seat) as total_cost"
+            )
+            ->groupBy('month_key')
+            ->orderBy('month_key')
+            ->get()
+            ->keyBy('month_key');
+
+        $result = [];
+        for ($i = $months - 1; $i >= 0; $i--) {
+            $date     = now()->subMonths($i)->startOfMonth();
+            $key      = $date->format('Y-m');
+            $row      = $rows->get($key);
+            $result[] = [
+                'month'      => $date->locale('ar')->isoFormat('MMMM'),
+                'month_key'  => $key,
+                'trips'      => $row ? (int) $row->trips : 0,
+                'total_cost' => $row ? round((float) $row->total_cost, 2) : 0.0,
+            ];
+        }
+        return $result;
+    }
+
+    /**
+     * Recent bookings with correct total cost = seats Ã— price_per_seat.
+     */
+    private function buildRecentTrips(int $userId, int $limit = 10): array
+    {
+        return Booking::with([
+            'ride:id,pickup_address,destination_address,departure_time,price_per_seat,driver_id',
+            'ride.driver:id,first_name,last_name',
+        ])
+            ->where('user_id', $userId)
+            ->orderByDesc('created_at')
+            ->limit($limit)
+            ->get()
+            ->map(fn($b) => [
+                'id'             => $b->id,
+                'date'           => $b->created_at->toDateString(),
+                'route_from'     => $b->ride?->pickup_address,
+                'route_to'       => $b->ride?->destination_address,
+                'driver'         => $b->ride?->driver
+                    ? trim("{$b->ride->driver->first_name} {$b->ride->driver->last_name}")
+                    : null,
+                'seats'          => $b->seats,
+                'price_per_seat' => (float) ($b->ride?->price_per_seat ?? 0),
+                // âœ… Total = seats Ã— price_per_seat (not just price_per_seat)
+                'total_cost'     => round($b->seats * (float) ($b->ride?->price_per_seat ?? 0), 2),
+                'status'         => $b->status,
+                'departure_time' => $b->ride?->departure_time?->toIso8601String(),
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Complaints for this user.
+     * No ride_id exposed â€” only complaint ID, type, and status.
+     */
+    private function buildComplaints(int $userId, string $status = 'all', string $type = 'all'): array
+    {
+        $query = Complaint::with(['assignedAgent:id,first_name,last_name'])
+            ->where('user_id', $userId);
+
+        if ($status !== 'all') {
+            $query->where('status', $status);
+        }
+        if ($type !== 'all') {
+            $query->where('type', $type);
+        }
+
+        return $query
+            ->orderByDesc('created_at')
+            ->limit(20)
+            ->get()
+            ->map(fn($c) => $this->formatComplaint($c))
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Wallet top-up transactions (admin_charge type only).
+     * Returns who processed the charge (name + photo).
+     * No payment method â€” it's always an admin action.
+     */
+    private function buildWalletCharges(int $userId): array
+    {
+        $user = User::with('wallet')->find($userId);
+        if (!$user?->wallet) return [];
+
+        return \App\Models\WalletTransaction::with([
+            'user:id,first_name,last_name',  // admin who did the charge
+        ])
+            ->where('wallet_id', $user->wallet->id)
+            ->where('type', 'admin_charge')
+            ->orderByDesc('created_at')
+            ->limit(20)
+            ->get()
+            ->map(fn($tx) => $this->formatWalletCharge($tx))
+            ->values()
+            ->all();
+    }
+
+    // =========================================================================
+    // FORMATTERS
+    // =========================================================================
+
+    private function formatUser(User $user): array
+    {
+        $profile = $user->profile;
+        return [
+            'id'                    => $user->id,
+            'full_name'             => trim("{$user->first_name} {$user->last_name}"),
+            'email'                 => $user->email,
+            'phone'                 => $profile?->phone ?? null,
+            'address'               => $user->address,
+            'gender'                => $user->gender,
+            'joined_at'             => $user->created_at->toIso8601String(),
+            'profile_photo'         => $profile?->profile_photo
+                ? asset("storage/{$profile->profile_photo}") : null,
+            'verification_status'   => $user->verification_status,
+            'is_verified_passenger' => (bool) $user->is_verified_passenger,
+            'account_status'        => $user->account_status,  // uses accessor
+            'ban' => $user->status == -1 ? [
+                'reason'     => $user->ban_reason,
+                'type'       => $user->ban_type,
+                'expires_at' => $user->ban_expires_at?->toIso8601String(),
+                'banned_at'  => $user->banned_at?->toIso8601String(),
+            ] : null,
+        ];
+    }
+
+    private function formatComplaint(\App\Models\Complaint $c): array
+    {
+        // Type label map (mirrors ComplaintType enum labels)
+        $typeLabels = [
+            'trip_safety'        => 'Ø£Ù…Ø§Ù† Ø§Ù„Ø±Ø­Ù„Ø©',
+            'driver_behavior'    => 'Ø³Ù„ÙˆÙƒ Ø§Ù„Ø³Ø§Ø¦Ù‚',
+            'passenger_behavior' => 'Ø³Ù„ÙˆÙƒ Ø§Ù„Ø±Ø§ÙƒØ¨',
+            'ride_cancellation'  => 'Ø¥Ù„ØºØ§Ø¡ Ø§Ù„Ø±Ø­Ù„Ø©',
+            'financial_issue'    => 'Ù…Ø´ÙƒÙ„Ø© Ù…Ø§Ù„ÙŠØ©',
+            'account_issue'      => 'Ù…Ø´ÙƒÙ„Ø© ÙÙŠ Ø§Ù„Ø­Ø³Ø§Ø¨',
+            'technical_issue'    => 'Ø¹Ø·Ù„ ØªÙ‚Ù†ÙŠ',
+            'other'              => 'Ø£Ø®Ø±Ù‰',
+        ];
+
+        $typeValue = $c->type instanceof \App\Enums\ComplaintType
+            ? $c->type->value : (string) $c->type;
+
+        $statusValue = $c->status instanceof \App\Enums\ComplaintStatus
+            ? $c->status->value : (string) $c->status;
+
+        return [
+            'id'         => $c->id,
+            'type'       => $typeValue,
+            'type_label' => $typeLabels[$typeValue] ?? $typeValue,
+            'status'     => $statusValue,
+            'created_at' => $c->created_at->toDateString(),
+            'assigned_to'=> $c->assignedAgent
+                ? trim("{$c->assignedAgent->first_name} {$c->assignedAgent->last_name}")
+                : null,
+        ];
+    }
+
+    private function formatWalletCharge(\App\Models\WalletTransaction $tx): array
+    {
+        $admin = $tx->user;  // the admin user who performed the charge
+        $adminProfile = $admin
+            ? \App\Models\Profile::where('user_id', $admin->id)->first()
+            : null;
+
+        return [
+            'id'                   => $tx->id,
+            'transaction_id'       => $tx->transaction_id,
+            'amount'               => (float) $tx->amount,
+            'previous_balance'     => (float) $tx->previous_balance,
+            'new_balance'          => (float) $tx->new_balance,
+            'status'               => $tx->status,
+            'notes'                => $tx->description,
+            'date'                 => $tx->created_at->toDateString(),
+            'created_at'           => $tx->created_at->toIso8601String(),
+            // Who processed the charge (admin info)
+            'processed_by_id'      => $admin?->id,
+            'processed_by_name'    => $admin
+                ? trim("{$admin->first_name} {$admin->last_name}") : null,
+            'processed_by_photo'   => $adminProfile?->profile_photo
+                ? asset("storage/{$adminProfile->profile_photo}") : null,
+        ];
+    }
+
+    private function complaintCounts(int $userId): array
+    {
+        $rows = Complaint::where('user_id', $userId)
+            ->selectRaw('status, COUNT(*) as total')
+            ->groupBy('status')
+            ->pluck('total', 'status')
+            ->toArray();
+
+        return [
+            'all'       => array_sum($rows),
+            'pending'   => $rows['pending']   ?? 0,
+            'in_review' => $rows['in_review'] ?? 0,
+            'escalated' => $rows['escalated'] ?? 0,
+            'resolved'  => $rows['resolved']  ?? 0,
+            'closed'    => $rows['closed']    ?? 0,
+        ];
+    }
+
+    // =========================================================================
+    // SHARED
+    // =========================================================================
+
+    private function serverError(): JsonResponse
+    {
+        return response()->json([
+            'status'  => 'error',
+            'message' => 'An unexpected error occurred. Please try again.',
+        ], 500);
+    }}
 
 
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\ProfileController.php =====
@@ -8938,6 +10149,197 @@ class WalletController extends Controller
 }
 
 
+===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\API\WalletRequestController.php =====
+
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use App\Models\WalletRequest;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
+
+/**
+ * WalletRequestController
+ *
+ * User-facing endpoints for submitting and viewing wallet requests.
+ *
+ * Routes (all behind `jwt` middleware):
+ *   POST /api/wallet/request-charge    â†’ requestCharge()
+ *   POST /api/wallet/request-withdraw  â†’ requestWithdraw()
+ *   GET  /api/wallet/requests          â†’ myRequests()
+ */
+class WalletRequestController extends Controller
+{
+    // â”€â”€ POST /api/wallet/request-charge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * User asks admin to top up their wallet.
+     *
+     * The user specifies the amount they want added; the admin reviews
+     * and, when approved, manually adds the balance (offline transfer).
+     */
+    public function requestCharge(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if (!$user->wallet) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You do not have a wallet yet. Please create one first.',
+            ], 422);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'amount' => 'required|numeric|min:1|max:10000000',
+            'notes'  => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        // Prevent multiple pending charge requests from the same user
+        $alreadyPending = WalletRequest::where('user_id', $user->id)
+            ->where('type', 'charge')
+            ->where('status', 'pending')
+            ->exists();
+
+        if ($alreadyPending) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You already have a pending charge request. Please wait for it to be reviewed.',
+            ], 409);
+        }
+
+        $walletRequest = WalletRequest::create([
+            'user_id'    => $user->id,
+            'wallet_id'  => $user->wallet->id,
+            'type'       => 'charge',
+            'amount'     => $request->input('amount'),
+            'status'     => 'pending',
+            'user_notes' => $request->input('notes'),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Charge request submitted. The admin will review it shortly.',
+            'data'    => $this->formatRequest($walletRequest),
+        ], 201);
+    }
+
+    // â”€â”€ POST /api/wallet/request-withdraw â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * User asks admin to withdraw funds from their wallet.
+     *
+     * Validated immediately against current balance so the user
+     * gets instant feedback; balance is only deducted on approval.
+     */
+    public function requestWithdraw(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if (!$user->wallet) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You do not have a wallet yet.',
+            ], 422);
+        }
+
+        $wallet = $user->wallet;
+
+        $validator = Validator::make($request->all(), [
+            'amount' => 'required|numeric|min:1',
+            'notes'  => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        $amount = (float) $request->input('amount');
+
+        // Check current balance
+        if ($amount > (float) $wallet->balance) {
+            return response()->json([
+                'success' => false,
+                'message' => "Insufficient balance. Your current balance is {$wallet->balance} SYP.",
+            ], 422);
+        }
+
+        // Prevent multiple pending withdraw requests
+        $pendingTotal = WalletRequest::where('user_id', $user->id)
+            ->where('type', 'withdraw')
+            ->where('status', 'pending')
+            ->sum('amount');
+
+        if (($pendingTotal + $amount) > (float) $wallet->balance) {
+            return response()->json([
+                'success' => false,
+                'message' => "You already have pending withdraw requests totalling {$pendingTotal} SYP. This request would exceed your balance.",
+            ], 422);
+        }
+
+        $walletRequest = WalletRequest::create([
+            'user_id'    => $user->id,
+            'wallet_id'  => $wallet->id,
+            'type'       => 'withdraw',
+            'amount'     => $amount,
+            'status'     => 'pending',
+            'user_notes' => $request->input('notes'),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Withdraw request submitted. The admin will process it shortly.',
+            'data'    => $this->formatRequest($walletRequest),
+        ], 201);
+    }
+
+    // â”€â”€ GET /api/wallet/requests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /**
+     * Returns the authenticated user's own wallet requests (newest first).
+     */
+    public function myRequests(Request $request): JsonResponse
+    {
+        $requests = WalletRequest::where('user_id', $request->user()->id)
+            ->orderByDesc('created_at')
+            ->get();
+
+        return response()->json([
+            'success' => true,
+            'data'    => $requests->map(fn($r) => $this->formatRequest($r))->values(),
+        ]);
+    }
+
+    // â”€â”€ Private â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private function formatRequest(WalletRequest $r): array
+    {
+        return [
+            'id'           => $r->id,
+            'type'         => $r->type,
+            'amount'       => (float) $r->amount,
+            'status'       => $r->status,
+            'user_notes'   => $r->user_notes,
+            'admin_notes'  => $r->admin_notes,
+            'processed_at' => $r->processed_at?->toIso8601String(),
+            'created_at'   => $r->created_at->toIso8601String(),
+        ];
+    }
+}
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\app\Http\Controllers\Controller.php =====
 
 <?php
@@ -9158,6 +10560,12 @@ use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
+/**
+ * Status codes:
+ *   -1 = banned
+ *    0 = logged out
+ *    1 = active
+ */
 class JwtAuthMiddleware
 {
     public function __construct(protected JwtService $jwtService) {}
@@ -9187,14 +10595,51 @@ class JwtAuthMiddleware
             return $this->fail('USER_NOT_FOUND', 'User not found');
         }
 
-        // 5. Account must be active
+        // 5. Ban check â€” status -1 = banned
+        if ($user->status == -1) {
+            // Auto-lift expired temporary bans
+            if (
+                $user->ban_type === 'temporary'
+                && $user->ban_expires_at !== null
+                && now()->gt($user->ban_expires_at)
+            ) {
+                // Ban expired â€” restore to logged-out, user must log in again
+                $user->update([
+                    'status'         => 0,
+                    'ban_reason'     => null,
+                    'ban_type'       => null,
+                    'banned_at'      => null,
+                    'ban_expires_at' => null,
+                    'banned_by'      => null,
+                ]);
+                // Fall through to the inactive check below
+            } else {
+                // Still banned â€” only /api/contact is allowed
+                if (!$request->is('api/contact')) {
+                    return response()->json([
+                        'status'  => 'error',
+                        'code'    => 'USER_BANNED',
+                        'message' => 'Your account has been banned. You may only use the contact form.',
+                        'ban'     => [
+                            'reason'     => $user->ban_reason,
+                            'type'       => $user->ban_type,
+                            'expires_at' => $user->ban_expires_at?->toIso8601String(),
+                        ],
+                    ], 403);
+                }
+
+                $request->setUserResolver(fn () => $user);
+                return $next($request);
+            }
+        }
+
+        // 6. Logged-out check â€” status 0
         if ($user->status == 0) {
             return $this->fail('USER_INACTIVE', 'User account is inactive');
         }
 
-        // 6. Layer 3 â€” token_version check
-        //    Rejects tokens issued before the last password change or logout-all.
-        //    No extra DB query â€” user is already loaded above.
+        // 7. Token version check â€” rejects tokens issued before last
+        //    password change or logout-all
         if (!$this->jwtService->validateTokenVersion($payload, $user)) {
             return $this->fail(
                 'TOKEN_INVALIDATED',
@@ -9203,7 +10648,6 @@ class JwtAuthMiddleware
         }
 
         $request->setUserResolver(fn () => $user);
-
         return $next($request);
     }
 
@@ -9215,7 +10659,11 @@ class JwtAuthMiddleware
 
     private function fail(string $code, string $message): Response
     {
-        return response()->json(['status' => 'error', 'code' => $code, 'message' => $message], 401);
+        return response()->json([
+            'status'  => 'error',
+            'code'    => $code,
+            'message' => $message,
+        ], 401);
     }
 }
 
@@ -11800,12 +13248,8 @@ class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable;
 
-    /**
-     * The attributes that are mass assignable.
-     *
-     * @var array<int, string>
-     */
-    // app/Models/User.php
+    // status: -1 = banned | 0 = logged out | 1 = active
+
     protected $fillable = [
         'first_name',
         'last_name',
@@ -11816,56 +13260,63 @@ class User extends Authenticatable
         'google_id',
         'avatar',
         'status',
-        'token_version',          // ADD THIS
+        'token_version',
         'is_verified_passenger',
         'is_verified_driver',
         'verification_status',
         'wallet_id',
         'email_verified_at',
+        // â”€â”€ Ban fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        'ban_reason',
+        'ban_type',          // 'permanent' | 'temporary'
+        'banned_at',
+        'ban_expires_at',
+        'banned_by',
     ];
+
     protected $casts = [
         'email_verified_at' => 'datetime',
         'password'          => 'hashed',
-        'token_version'     => 'integer',  // ADD THIS
+        'token_version'     => 'integer',
+        'banned_at'         => 'datetime',
+        'ban_expires_at'    => 'datetime',
     ];
 
     protected $hidden = [
         'password',
         'remember_token',
-        'google_id'     // Added to hidden
+        'google_id',
     ];
-    /**
-     * The attributes that should be hidden for serialization.
-     *
-     * @var array<int, string>
-     */
 
-    /**
-     * The attributes that should be cast.
-     *
-     * @var array<string, string>
-     */
+    // â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    // app/Models/User.php
     public function sendPasswordResetNotification($token)
     {
         $this->notify(new CustomResetPassword($token));
     }
+
+    // â”€â”€ Relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
     public function profile()
     {
         return $this->hasOne(Profile::class);
     }
-    public function rides() {
+
+    public function rides()
+    {
         return $this->hasMany(Ride::class, 'driver_id');
     }
+
     public function photos()
     {
         return $this->hasMany(Photo::class);
     }
-    public function bookings() {
+
+    public function bookings()
+    {
         return $this->hasMany(Booking::class);
     }
-    // Add these relationships to your User model
+
     public function conversations(): BelongsToMany
     {
         return $this->belongsToMany(Conversation::class, 'conversation_participants')
@@ -11877,16 +13328,6 @@ class User extends Authenticatable
     {
         return $this->hasMany(Message::class, 'sender_id');
     }
-    /*protected static function booted()
-    {
-        static::created(function (User $user) {
-            $user->profile()->create([
-                'full_name' => $user->first_name . ' ' . $user->last_name,
-                'address' => $user->address,
-                'gender' => $user->gender
-            ]);
-        });
-    }*/
 
     public function notifications()
     {
@@ -11910,6 +13351,23 @@ class User extends Authenticatable
         return $this->userNotifications()->unread()->with('notification');
     }
 
+    public function givenRatings()
+    {
+        return $this->hasMany(UserRating::class, 'rater_id');
+    }
+
+    public function receivedRatings()
+    {
+        return $this->hasMany(UserRating::class, 'rated_user_id');
+    }
+
+    public function wallet()
+    {
+        return $this->hasOne(Wallet::class);
+    }
+
+    // â”€â”€ Accessors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
     public function getUnreadNotificationCountAttribute()
     {
         return $this->userNotifications()->unread()->count();
@@ -11919,41 +13377,31 @@ class User extends Authenticatable
     {
         return $this->notifications()->whereNull('read_at')->count();
     }
-    public function givenRatings()
-    {
-        return $this->hasMany(UserRating::class, 'rater_id');
-    }
 
-    /**
-     * Ratings received by this user
-     */
-    public function receivedRatings()
-    {
-        return $this->hasMany(UserRating::class, 'rated_user_id');
-    }
-
-    /**
-     * Get average rating for this user
-     */
     public function getAverageRatingAttribute()
     {
         return $this->receivedRatings()->avg('rating') ?? 0;
     }
 
-    /**
-     * Get total ratings count for this user
-     */
     public function getTotalRatingsAttribute()
     {
         return $this->receivedRatings()->count();
     }
-    // app/Models/User.php
-    public function wallet()
+
+    public function getIsBannedAttribute(): bool
     {
-        return $this->hasOne(Wallet::class);
+        return $this->status == -1;
     }
 
-
+    public function getAccountStatusAttribute(): string
+    {
+        return match ((int) $this->status) {
+            -1 => 'banned',
+            0 => 'logged_out',
+            1 => 'active',
+            default => 'unknown',
+        };
+    }
 }
 
 
@@ -12225,6 +13673,75 @@ class Wallet extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\app\Models\WalletRequest.php =====
+
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class WalletRequest extends Model
+{
+    protected $fillable = [
+        'user_id',
+        'wallet_id',
+        'type',        // 'charge' | 'withdraw'
+        'amount',
+        'status',      // 'pending' | 'approved' | 'rejected'
+        'user_notes',
+        'admin_notes',
+        'processed_by',
+        'processed_at',
+    ];
+
+    protected $casts = [
+        'amount'       => 'decimal:2',
+        'processed_at' => 'datetime',
+    ];
+
+    // â”€â”€ Relationships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function wallet(): BelongsTo
+    {
+        return $this->belongsTo(Wallet::class);
+    }
+
+    public function processedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'processed_by');
+    }
+
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    public function isPending(): bool
+    {
+        return $this->status === 'pending';
+    }
+
+    public function isApproved(): bool
+    {
+        return $this->status === 'approved';
+    }
+
+    public function isCharge(): bool
+    {
+        return $this->type === 'charge';
+    }
+
+    public function isWithdraw(): bool
+    {
+        return $this->type === 'withdraw';
     }
 }
 
@@ -26864,6 +28381,75 @@ return new class extends Migration
 };
 
 
+===== FILE: C:\wamp64\www\4th_year_project\database\migrations\2026_05_17_012515_create_wallet_requests_table.php =====
+
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('wallet_requests', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('wallet_id')->constrained()->cascadeOnDelete();
+            $table->enum('type', ['charge', 'withdraw']);
+            $table->decimal('amount', 12, 2);
+            $table->enum('status', ['pending', 'approved', 'rejected'])->default('pending');
+            $table->text('user_notes')->nullable();
+            $table->text('admin_notes')->nullable();
+            $table->foreignId('processed_by')->nullable()->constrained('users')->nullOnDelete();
+            $table->timestamp('processed_at')->nullable();
+            $table->timestamps();
+
+            $table->index(['status', 'type']);
+            $table->index(['user_id', 'status']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('wallet_requests');
+    }
+};
+
+
+===== FILE: C:\wamp64\www\4th_year_project\database\migrations\2026_05_17_165655_add_ban_fields_to_users_table.php =====
+
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            // status: -1 = banned | 0 = logged out | 1 = active
+            // The status column already exists â€” just add the ban metadata.
+            $table->text('ban_reason')->nullable()->after('status');
+            $table->enum('ban_type', ['temporary', 'permanent'])->nullable()->after('ban_reason');
+            $table->timestamp('banned_at')->nullable()->after('ban_type');
+            $table->timestamp('ban_expires_at')->nullable()->after('banned_at');
+            $table->unsignedBigInteger('banned_by')->nullable()->after('ban_expires_at');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            $table->dropColumn(['ban_reason', 'ban_type', 'banned_at', 'ban_expires_at', 'banned_by']);
+        });
+    }
+};
+
+
 ===== FILE: C:\wamp64\www\4th_year_project\database\seeders\AdminUserSeeder.php =====
 
 <?php
@@ -29943,12 +31529,15 @@ export const messaging = getMessaging(app);
 ===== FILE: C:\wamp64\www\4th_year_project\routes\api.php =====
 
 <?php
+
 use App\Http\Controllers\API\Staff\StaffAdminController;
 use App\Http\Controllers\API\Staff\StaffComplaintController;
 use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\AdminDriverController;
 use App\Http\Controllers\API\AdminTripController;
 use App\Http\Controllers\API\AdminUserController;
+use App\Http\Controllers\API\AdminBanController;
+use App\Http\Controllers\API\AdminWalletRequestController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\ComplaintController;
@@ -29960,6 +31549,7 @@ use App\Http\Controllers\API\LoginController;
 use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\OtpController;
+use App\Http\Controllers\API\PassengerProfileController;
 use App\Http\Controllers\API\ProfileController;
 use App\Http\Controllers\API\PushNotificationController;
 use App\Http\Controllers\API\RefreshTokenController;
@@ -29975,6 +31565,7 @@ use App\Http\Controllers\API\TextMeOtpController;
 use App\Http\Controllers\API\VerificationController;
 use App\Http\Controllers\API\VerifyPasswordOtpController;
 use App\Http\Controllers\API\WalletController;
+use App\Http\Controllers\API\WalletRequestController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
@@ -30039,7 +31630,7 @@ Route::prefix('auth')->group(function () {
     Route::post('/login',   LoginController::class);
     Route::post('/refresh', RefreshTokenController::class);
 
-    // â”€â”€ Password reset (3-step OTP flow) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Password reset (3-step OTP flow)
     Route::post('/password/forgot',     ForgotPasswordController::class);
     Route::post('/password/verify-otp', VerifyPasswordOtpController::class);
     Route::post('/password/reset',      ResetPasswordController::class);
@@ -30061,23 +31652,23 @@ Route::prefix('email-verification')->group(function () {
 
 Route::middleware('jwt')->group(function () {
 
-    // â”€â”€ Session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Session
     Route::get('/user', fn (Request $r) => response()->json([
         'status' => 'success',
         'user'   => $r->user(),
     ]));
     Route::post('/logout', LogoutController::class);
 
-    // â”€â”€ Score â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Score
     Route::prefix('score')->group(function () {
         Route::get('/',        [ScoreController::class, 'show']);
         Route::get('/history', [ScoreController::class, 'history']);
     });
 
-    // â”€â”€ Autocomplete â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Autocomplete
     Route::get('/autocomplete', [RideController::class, 'autocomplete']);
 
-    // â”€â”€ Profile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Profile
     Route::prefix('profile')->group(function () {
         Route::post('/',          [ProfileController::class, 'update']);
         Route::post('/documents', [DocumentController::class, 'store']);
@@ -30093,9 +31684,8 @@ Route::middleware('jwt')->group(function () {
         Route::post('/{userId}/rate',     [ProfileController::class, 'rateUser']);
     });
 
-    // â”€â”€ Rides â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Rides
     Route::prefix('rides')->group(function () {
-
         Route::get('/search',             [RideController::class, 'searchRides']);
         Route::post('/search',            [RideController::class, 'searchRides']);
         Route::post('/route-options',     [RideController::class, 'getRouteOptions']);
@@ -30112,7 +31702,7 @@ Route::middleware('jwt')->group(function () {
         Route::post('/{rideId}/driver-no-show', [RideController::class, 'reportDriverNoShow']);
     });
 
-    // â”€â”€ Bookings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Bookings
     Route::prefix('bookings')->group(function () {
         Route::get('/',                               [RideController::class, 'getMyBookings']);
         Route::post('/{bookingId}/accept',            [RideController::class, 'acceptBooking']);
@@ -30123,7 +31713,7 @@ Route::middleware('jwt')->group(function () {
         Route::post('/{bookingId}/passenger-no-show', [RideController::class, 'reportPassengerNoShow']);
     });
 
-    // â”€â”€ Chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Chat
     Route::prefix('chat')->group(function () {
         Route::get('/conversations',                            [ChatController::class, 'getConversations']);
         Route::post('/conversations',                           [ChatController::class, 'startConversation']);
@@ -30132,7 +31722,7 @@ Route::middleware('jwt')->group(function () {
         Route::delete('/messages/{messageId}',                  [ChatController::class, 'deleteMessage']);
     });
 
-    // â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Notifications
     Route::prefix('notifications')->group(function () {
         Route::get('/',             [NotificationController::class, 'index']);
         Route::get('/unread-count', [NotificationController::class, 'getUnreadCount']);
@@ -30144,21 +31734,25 @@ Route::middleware('jwt')->group(function () {
         Route::delete('/{id}',      [NotificationController::class, 'destroy']);
     });
 
-    // â”€â”€ Wallet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Wallet
     Route::prefix('wallet')->group(function () {
         Route::get('/balance',            [WalletController::class, 'getBalance']);
         Route::post('/initiate',          [WalletController::class, 'initiateWalletCreation']);
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
+
+        Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
+        Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
+        Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
     });
 
-    // â”€â”€ Complaints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Complaints
     Route::prefix('complaints')->group(function () {
         Route::get('/',     [ComplaintController::class, 'index']);
         Route::post('/',    [ComplaintController::class, 'store']);
         Route::get('/{id}', [ComplaintController::class, 'show']);
     });
 
-    // â”€â”€ Contact â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Contact
     Route::post('/contact', ContactController::class);
 });
 
@@ -30204,8 +31798,36 @@ Route::prefix('admin')->group(function () {
         Route::prefix('wallet')->group(function () {
             Route::get('/',                        [AdminDashboardController::class, 'getAdminWallet']);
             Route::get('/{walletId}/transactions', [AdminDashboardController::class, 'showWalletTransactions']);
+
+            Route::get('/requests',                [AdminWalletRequestController::class, 'index']);
+            Route::post('/requests/{id}/approve',  [AdminWalletRequestController::class, 'approve']);
+            Route::post('/requests/{id}/reject',   [AdminWalletRequestController::class, 'reject']);
         });
         Route::get('/wallets', [AdminDashboardController::class, 'getAdminWallets']);
+
+        // UC-ADM-12: Ban / Unban
+        Route::prefix('users')->group(function () {
+            Route::get('/{userId}/status',  [AdminBanController::class, 'userStatus']);
+            Route::post('/{userId}/ban',    [AdminBanController::class, 'ban']);
+            Route::post('/{userId}/unban',  [AdminBanController::class, 'unban']);
+        });
+
+        // â”€â”€ Passenger Profile Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        Route::prefix('passengers')->group(function () {
+
+            // BFF: returns full page in one call
+            Route::get('/{userId}/full-profile',   [PassengerProfileController::class, 'fullProfile']);
+
+            // Individual section refresh
+            Route::get('/{userId}/stats',          [PassengerProfileController::class, 'stats']);
+            Route::get('/{userId}/monthly-trips',  [PassengerProfileController::class, 'monthlyTrips']);
+            Route::get('/{userId}/recent-trips',   [PassengerProfileController::class, 'recentTrips']);
+            Route::get('/{userId}/complaints',     [PassengerProfileController::class, 'complaints']);
+            Route::get('/{userId}/wallet-charges', [PassengerProfileController::class, 'walletCharges']);
+
+            // Action
+            Route::post('/{userId}/charge-wallet', [PassengerProfileController::class, 'chargeWallet']);
+        });
 
         Route::middleware('auth.admin:system_admin')->group(function () {
 
@@ -30228,23 +31850,19 @@ Route::prefix('admin')->group(function () {
 
 Route::prefix('staff')->name('staff.')->group(function () {
 
-    // â”€â”€ Public â€” auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Route::post('login',   [StaffAuthController::class, 'login'])->name('login');
     Route::post('refresh', [StaffAuthController::class, 'refresh'])->name('refresh');
 
-    // â”€â”€ Protected â€” any staff role â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Route::middleware('staff')->group(function () {
 
         Route::post('logout', [StaffAuthController::class, 'logout'])->name('logout');
         Route::get('me',      [StaffAuthController::class, 'me'])->name('me');
 
-        // UC-ADM-03 â€” Review Moderation
         Route::prefix('reviews')->name('reviews.')->group(function () {
             Route::get('/',               [StaffReviewController::class, 'index'])->name('index');
             Route::delete('/{commentId}', [StaffReviewController::class, 'destroy'])->name('destroy');
         });
 
-        // UC-ADM-05 â€” Browse operational data (read-only)
         Route::prefix('users')->name('users.')->group(function () {
             Route::get('/',         [StaffOperationsController::class, 'users'])->name('index');
             Route::get('/{userId}', [StaffOperationsController::class, 'userProfile'])->name('show');
@@ -30253,36 +31871,26 @@ Route::prefix('staff')->name('staff.')->group(function () {
         Route::get('trips',    [StaffOperationsController::class, 'trips'])->name('trips.index');
         Route::get('bookings', [StaffOperationsController::class, 'bookings'])->name('bookings.index');
 
-        // UC-ADM-06 â€” Complaint Management (read + status updates)
         Route::prefix('complaints')->name('complaints.')->group(function () {
             Route::get('/',                [StaffComplaintController::class, 'index'])->name('index');
             Route::get('/{id}',            [StaffComplaintController::class, 'show'])->name('show');
-            Route::patch('/{id}/open',     [StaffComplaintController::class, 'open'])->name('open');
-            Route::patch('/{id}/resolve',  [StaffComplaintController::class, 'resolve'])->name('resolve');
-            Route::patch('/{id}/close',    [StaffComplaintController::class, 'close'])->name('close');
-            Route::post('/{id}/notes',     [StaffComplaintController::class, 'addNote'])->name('notes');
-            // UC-ADM-08 â€” Escalate Complaint to Admin
+            Route::patch('/{id}/respond',  [StaffComplaintController::class, 'respond'])->name('respond');
             Route::patch('/{id}/escalate', [StaffComplaintController::class, 'escalate'])->name('escalate');
         });
 
-        // UC-ADM-07 â€” Cancel Trip / Cancel Booking
         Route::post('trips/{rideId}/cancel',      [StaffOperationsController::class, 'cancelTrip'])->name('trips.cancel');
         Route::post('bookings/{bookingId}/cancel', [StaffOperationsController::class, 'cancelBooking'])->name('bookings.cancel');
 
-        // â”€â”€ Admin + System Admin only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Route::middleware('staff:admin,system_admin')->group(function () {
 
-            // UC-ADM-10 â€” Review Verification Requests
-            // UC-ADM-11 â€” Approve / Reject Verification
             Route::prefix('verifications')->name('verifications.')->group(function () {
-                Route::get('/pending',              [StaffAdminController::class, 'pendingVerifications'])->name('pending');
-                Route::post('/{userId}/approve',    [StaffAdminController::class, 'approveVerification'])->name('approve');
-                Route::post('/{userId}/reject',     [StaffAdminController::class, 'rejectVerification'])->name('reject');
+                Route::get('/pending',           [StaffAdminController::class, 'pendingVerifications'])->name('pending');
+                Route::post('/{userId}/approve', [StaffAdminController::class, 'approveVerification'])->name('approve');
+                Route::post('/{userId}/reject',  [StaffAdminController::class, 'rejectVerification'])->name('reject');
             });
 
-            // Escalated Complaints â€” admin queue
             Route::prefix('escalated-complaints')->name('escalated-complaints.')->group(function () {
-                Route::get('/',              [StaffAdminController::class, 'escalatedComplaints'])->name('index');
+                Route::get('/',               [StaffAdminController::class, 'escalatedComplaints'])->name('index');
                 Route::patch('/{id}/resolve', [StaffAdminController::class, 'resolveEscalated'])->name('resolve');
             });
         });
@@ -39770,6 +41378,197 @@ use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 abstract class TestCase extends BaseTestCase
 {
     use CreatesApplication;
+}
+
+
+===== FILE: C:\wamp64\www\4th_year_project\load_test.js =====
+
+import http from 'k6/http';
+import { sleep, check, group } from 'k6';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// CONFIG
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const BASE_URL = 'http://localhost/4th_year_project/public/api';
+
+// Credentials of a real user in your DB
+// This user must have email_verified_at set (not null)
+const TEST_EMAIL    = 'alzebiabdalrahman@gmail.com';
+const TEST_PASSWORD = 'arayaz8152002';
+
+// A refresh token you got from a manual login in Postman
+// Used for testing the refresh endpoint under load
+// Get it from: POST /api/auth/login â†’ tokens.refresh_token
+const REFRESH_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwOlwvXC9sb2NhbGhvc3Q6ODAwMCIsInN1YiI6MzcsImlhdCI6MTc3OTExMzY4OSwiZXhwIjoxNzc5MTQ5Njg5LCJqdGkiOiI4YTAxY2QyYy0yNWEyLTQzNGYtYjQ0My05ZWFmM2Q5MDBiNmIiLCJ0eXBlIjoiYWNjZXNzIiwidmVyIjoxfQ.FLhilBy9OiNUh1_TttYq4BOlNtFaA_RDVN7f0cnOt2k';
+
+// A reset token from a manual forgot-password flow in Postman
+// Get it from: POST /api/auth/password/forgot â†’ then POST /api/auth/password/verify-otp â†’ reset_token
+const RESET_TOKEN = 'PASTE_RESET_TOKEN_HERE';
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// LOAD PROFILE
+// Start small â€” auth routes are expensive (bcrypt password hashing)
+// bcrypt by design is slow (~100-200ms per hash) so don't expect sub-50ms
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export const options = {
+    stages: [
+        { duration: '30s', target: 5  },  // warm up â€” auth is CPU heavy
+        { duration: '1m',  target: 20 },  // normal load
+        { duration: '30s', target: 50 },  // moderate stress
+        { duration: '1m',  target: 50 },  // hold
+        { duration: '30s', target: 0  },  // cool down
+    ],
+    thresholds: {
+        // Auth routes are slower than data routes because of bcrypt
+        // 3s is a realistic target for login under load
+        'http_req_duration{group:::Login}':          ['p(95)<3000'],
+        'http_req_duration{group:::Refresh Token}':  ['p(95)<500'],
+        'http_req_duration{group:::Forgot Password}':['p(95)<1000'],
+        http_req_failed: ['rate<0.05'],
+    },
+};
+
+function publicHeaders() {
+    return {
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept':       'application/json',
+        },
+    };
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// MAIN
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export default function () {
+
+    // â”€â”€ LOGIN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Tests: credential lookup + bcrypt verify + JWT generation
+    // Expected: 200 with tokens, or 401 if credentials wrong
+    // Why slow: bcrypt is intentionally slow (cost factor ~10 = ~100-200ms per hash)
+    group('Login', function () {
+        const res = http.post(
+            `${BASE_URL}/auth/login`,
+            JSON.stringify({
+                email:    TEST_EMAIL,
+                password: TEST_PASSWORD,
+            }),
+            publicHeaders()
+        );
+
+        const success = check(res, {
+            'login: status 200':        r => r.status === 200,
+            'login: has access_token':  r => {
+                try {
+                    return JSON.parse(r.body).tokens?.access_token !== undefined;
+                } catch { return false; }
+            },
+            'login: response under 3s': r => r.timings.duration < 3000,
+        });
+
+        if (!success) {
+            console.log(`login failed: ${res.status} â€” ${res.body.substring(0, 150)}`);
+        }
+
+        sleep(1);
+    });
+
+    // â”€â”€ REFRESH TOKEN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Tests: refresh token lookup + new JWT generation
+    // Much faster than login â€” no bcrypt involved
+    // Note: using a static refresh token here â€” in reality each user has their own
+    // For a real test you would login first and use that refresh token
+    group('Refresh Token', function () {
+        const res = http.post(
+            `${BASE_URL}/auth/refresh`,
+            JSON.stringify({
+                refresh_token: REFRESH_TOKEN,
+            }),
+            publicHeaders()
+        );
+
+        check(res, {
+            'refresh: status 200 or 401': r => [200, 401].includes(r.status),
+            'refresh: response under 500ms': r => r.timings.duration < 500,
+        });
+
+        // 401 here is expected after first use since refresh tokens are single-use
+        // This test mainly measures the endpoint's response time
+
+        sleep(0.5);
+    });
+
+    // â”€â”€ FORGOT PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Tests: user lookup by email + OTP generation + email queue
+    // The email is queued, not sent synchronously, so this should be fast
+    // We use a non-existent email so no real email is sent
+    group('Forgot Password', function () {
+        const res = http.post(
+            `${BASE_URL}/auth/password/forgot`,
+            JSON.stringify({
+                email: 'nonexistent_load_test@example.com',
+            }),
+            publicHeaders()
+        );
+
+        check(res, {
+            // 404 = user not found, which is fine â€” we just want to measure response time
+            'forgot password: status 200 or 404': r => [200, 404].includes(r.status),
+            'forgot password: response under 1s':  r => r.timings.duration < 1000,
+        });
+
+        sleep(0.5);
+    });
+
+    // â”€â”€ VERIFY PASSWORD OTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Tests: OTP lookup + validation logic
+    // Using a fake OTP â€” will return 400 "invalid code" but measures route speed
+    group('Verify Password OTP', function () {
+        const res = http.post(
+            `${BASE_URL}/auth/password/verify-otp`,
+            JSON.stringify({
+                email:    TEST_EMAIL,
+                otp_code: '000000',  // deliberately wrong â€” measures speed not correctness
+            }),
+            publicHeaders()
+        );
+
+        check(res, {
+            // 400 = invalid OTP, expected â€” we just want the response time
+            'verify otp: status 400 or 200': r => [200, 400, 422].includes(r.status),
+            'verify otp: response under 1s':  r => r.timings.duration < 1000,
+        });
+
+        sleep(0.5);
+    });
+
+    // â”€â”€ RESET PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Tests: reset token cache lookup + password hash + token revocation
+    // Using expired/fake token â€” will return 400 but measures route speed
+    group('Reset Password', function () {
+        const res = http.post(
+            `${BASE_URL}/auth/password/reset`,
+            JSON.stringify({
+                reset_token:           '00000000-0000-0000-0000-000000000000',
+                password:              'NewPassword123',
+                password_confirmation: 'NewPassword123',
+            }),
+            publicHeaders()
+        );
+
+        check(res, {
+            // 400 = expired/invalid token, expected
+            'reset password: status 400 or 200': r => [200, 400, 422].includes(r.status),
+            'reset password: response under 2s':  r => r.timings.duration < 2000,
+        });
+
+        sleep(0.5);
+    });
+
+    sleep(1);
 }
 
 
