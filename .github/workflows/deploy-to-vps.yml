@@ -19,13 +19,14 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           DEPLOY_PATH: ${{ secrets.REMOTE_PATH }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.REMOTE_HOST }}
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
           script_stop: true
-          envs: DEPLOY_PATH
+          envs: DEPLOY_PATH,GITHUB_TOKEN
           command_timeout: 30m
           script: |
             set -eu
@@ -37,6 +38,10 @@ jobs:
 
             cd "$DEPLOY_PATH"
             git config --global --add safe.directory "$DEPLOY_PATH"
+
+            # Authenticate Git using the GITHUB_TOKEN
+            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+
             git fetch origin samer
             git reset --hard origin/samer
             git clean -fd
