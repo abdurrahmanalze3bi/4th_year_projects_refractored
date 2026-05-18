@@ -1,0 +1,66 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - samer
+
+concurrency:
+  group: deploy-samer
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy latest code
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_PATH: ${{ secrets.REMOTE_PATH }}
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          envs: DEPLOY_PATH
+          command_timeout: 30m
+          script: |
+            set -eu
+
+            if [ -z "${DEPLOY_PATH:-}" ]; then
+              echo "REMOTE_PATH secret is required." >&2
+              exit 1
+            fi
+
+            cd "$DEPLOY_PATH"
+            git config --global --add safe.directory "$DEPLOY_PATH"
+            git fetch origin samer
+            git reset --hard origin/samer
+            git clean -fd
+
+            if command -v composer >/dev/null 2>&1; then
+              composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
+            else
+              echo "Composer is not installed on the VPS." >&2
+              exit 1
+            fi
+
+            if command -v npm >/dev/null 2>&1; then
+              npm ci
+              npm run build
+            else
+              echo "Node.js/npm are not installed on the VPS." >&2
+              exit 1
+            fi
+
+            php artisan optimize:clear
+            php artisan migrate --force
+            php artisan storage:link || true
+            php artisan config:cache
+            php artisan view:cache
+            php artisan queue:restart || true
+
+
