@@ -18,8 +18,8 @@ FROM composer:2.7 AS composer-builder
 
 WORKDIR /app
 
-COPY composer.json composer.lock ./
-RUN composer install \
+COPY composer.json ./
+RUN composer update \
     --optimize-autoloader \
     --no-scripts \
     --no-interaction
