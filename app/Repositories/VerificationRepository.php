@@ -63,7 +63,7 @@ class VerificationRepository implements VerificationRepositoryInterface
         // ── Seed initial 3-star rating for new drivers ─────────────────
         // Uses the primary admin account as the rater so foreign key is valid.
         // firstOrCreate ensures re-approving the same driver never duplicates it.
-        $adminUser = \App\Models\User::where('email', config('admin.primary.email'))->first();
+        $adminUser = \App\Models\User::where('email', config('system_admin.email'))->first();
 
         if ($adminUser) {
             \App\Models\UserRating::firstOrCreate(

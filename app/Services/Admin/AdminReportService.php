@@ -75,7 +75,7 @@ final class AdminReportService
      */
     public function getStats(): array
     {
-        $primaryWallet = Wallet::where('phone_number', config('admin.primary.phone'))->first();
+        $primaryWallet = Wallet::where('phone_number', config('system_admin.phone'))->first();
         $primaryBalance = $primaryWallet ? (float) $primaryWallet->balance : 0.0;
 
         return [
@@ -295,7 +295,7 @@ final class AdminReportService
     {
         $adminConfigs  = config('admin');
         $syCashWallet  = Wallet::where('phone_number', $adminConfigs['sycash']['phone'])->first();
-        $primaryWallet = Wallet::where('phone_number', $adminConfigs['primary']['phone'])->first();
+        $primaryWallet = Wallet::where('phone_number', $adminConfigs['system_admin']['phone'])->first();
 
         if (!$syCashWallet || !$primaryWallet) {
             return ['error' => 'Admin wallets not yet initialised'];

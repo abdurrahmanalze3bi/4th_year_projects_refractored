@@ -60,7 +60,6 @@ class UserRealFlowSeeder extends Seeder
     private AdminWalletService $walletService;
 
     public function run(): void
-
     {
         $this->rideRepo       = app(RideRepository::class);
         $this->rideService    = app(RideService::class);
@@ -289,7 +288,7 @@ class UserRealFlowSeeder extends Seeder
         $user->save();
 
         // Top up via the real AdminWalletService (transaction recorded in DB)
-        $adminConfig = array_merge(config('admin.primary'), ['type' => 'primary']);
+        $adminConfig = array_merge(config('admin.system_admin'), ['type' => 'system_admin']);
         $this->walletService->chargeWallet(
             $phone,
             Money::from(self::WALLET_TOP_UP),

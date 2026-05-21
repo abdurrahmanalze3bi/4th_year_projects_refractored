@@ -23,7 +23,7 @@ class SystemWalletSeeder extends Seeder
     {
         // Primary Escrow wallet — receives 5% platform fee on every completed ride
         Wallet::firstOrCreate(
-            ['phone_number' => config('admin.primary.phone')],
+            ['phone_number' => config('admin.system_admin.phone')],
             [
                 'name'    => 'Primary Escrow',
                 'user_id' => null,   // system wallet — no owner

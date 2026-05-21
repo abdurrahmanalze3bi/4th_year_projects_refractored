@@ -1,11 +1,17 @@
 <?php
 
+use App\Http\Controllers\API\Staff\StaffAdminController;
+use App\Http\Controllers\API\Staff\StaffComplaintController;
 use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\AdminDriverController;
 use App\Http\Controllers\API\AdminTripController;
 use App\Http\Controllers\API\AdminUserController;
+use App\Http\Controllers\API\AdminBanController;
+use App\Http\Controllers\API\AdminWalletRequestController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
+use App\Http\Controllers\API\ComplaintController;
+use App\Http\Controllers\API\ContactController;
 use App\Http\Controllers\API\DocumentController;
 use App\Http\Controllers\API\EmailVerificationController;
 use App\Http\Controllers\API\ForgotPasswordController;
@@ -13,6 +19,7 @@ use App\Http\Controllers\API\LoginController;
 use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\OtpController;
+use App\Http\Controllers\API\PassengerProfileController;
 use App\Http\Controllers\API\ProfileController;
 use App\Http\Controllers\API\PushNotificationController;
 use App\Http\Controllers\API\RefreshTokenController;
@@ -20,10 +27,15 @@ use App\Http\Controllers\API\ResetPasswordController;
 use App\Http\Controllers\API\RideController;
 use App\Http\Controllers\API\ScoreController;
 use App\Http\Controllers\API\SignupController;
+use App\Http\Controllers\API\Staff\EmployeeManagementController;
+use App\Http\Controllers\API\Staff\StaffAuthController;
+use App\Http\Controllers\API\Staff\StaffOperationsController;
+use App\Http\Controllers\API\Staff\StaffReviewController;
 use App\Http\Controllers\API\TextMeOtpController;
 use App\Http\Controllers\API\VerificationController;
 use App\Http\Controllers\API\VerifyPasswordOtpController;
 use App\Http\Controllers\API\WalletController;
+use App\Http\Controllers\API\WalletRequestController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
@@ -88,15 +100,10 @@ Route::prefix('auth')->group(function () {
     Route::post('/login',   LoginController::class);
     Route::post('/refresh', RefreshTokenController::class);
 
-    // ── Password reset (3-step OTP flow) ──────────────────────────────────
-    // Step 1: send OTP to email
-    Route::post('/password/forgot',      ForgotPasswordController::class);
-
-    // Step 2: verify OTP → receive reset_token (valid 15 min, single-use)
-    Route::post('/password/verify-otp',  VerifyPasswordOtpController::class);
-
-    // Step 3: submit new password using reset_token
-    Route::post('/password/reset',       ResetPasswordController::class);
+    // Password reset (3-step OTP flow)
+    Route::post('/password/forgot',     ForgotPasswordController::class);
+    Route::post('/password/verify-otp', VerifyPasswordOtpController::class);
+    Route::post('/password/reset',      ResetPasswordController::class);
 });
 
 // ========================================
@@ -115,104 +122,108 @@ Route::prefix('email-verification')->group(function () {
 
 Route::middleware('jwt')->group(function () {
 
-    // ── Session ───────────────────────────────────────────────────────────
+    // Session
     Route::get('/user', fn (Request $r) => response()->json([
         'status' => 'success',
         'user'   => $r->user(),
     ]));
     Route::post('/logout', LogoutController::class);
 
-    // ── Score ─────────────────────────────────────────────────────────────
+    // Score
     Route::prefix('score')->group(function () {
         Route::get('/',        [ScoreController::class, 'show']);
         Route::get('/history', [ScoreController::class, 'history']);
     });
 
-    // ── Autocomplete ──────────────────────────────────────────────────────
+    // Autocomplete
     Route::get('/autocomplete', [RideController::class, 'autocomplete']);
 
-    // ── Profile ───────────────────────────────────────────────────────────
+    // Profile
     Route::prefix('profile')->group(function () {
-        Route::post('/',      [ProfileController::class, 'update']);
+        Route::post('/',          [ProfileController::class, 'update']);
         Route::post('/documents', [DocumentController::class, 'store']);
 
-        // Verification requests
         Route::prefix('verify')->group(function () {
             Route::post('/passenger',      [VerificationController::class, 'verifyPassenger']);
             Route::post('/driver',         [VerificationController::class, 'verifyDriver']);
             Route::get('/status/{userId}', [VerificationController::class, 'status']);
         });
 
-        // Dynamic userId last — avoids clashing with static segments above
-        Route::get('/{userId}',          [ProfileController::class, 'show']);
+        Route::get('/{userId}',           [ProfileController::class, 'show']);
         Route::post('/{userId}/comments', [ProfileController::class, 'comment']);
         Route::post('/{userId}/rate',     [ProfileController::class, 'rateUser']);
     });
 
-    // ── Rides ─────────────────────────────────────────────────────────────
-    // IMPORTANT: static segments (/search, /route-options, /create-with-route)
-    // must be declared BEFORE dynamic segments (/{rideId}) to prevent Laravel
-    // from routing "search" as a rideId.
+    // Rides
     Route::prefix('rides')->group(function () {
-
-        // -- Static routes first --
         Route::get('/search',             [RideController::class, 'searchRides']);
         Route::post('/search',            [RideController::class, 'searchRides']);
         Route::post('/route-options',     [RideController::class, 'getRouteOptions']);
         Route::post('/create-with-route', [RideController::class, 'createRideWithRoute']);
 
-        // -- Collection --
         Route::get('/',  [RideController::class, 'getRides']);
         Route::post('/', [RideController::class, 'createRide']);
 
-        // -- Dynamic routes last --
-        Route::get('/{rideId}',                    [RideController::class, 'getRideDetails']);
-        Route::patch('/{rideId}/cancel',           [RideController::class, 'cancelRide']);
-        Route::post('/{rideId}/book',              [RideController::class, 'bookRide']);
-        Route::post('/{rideId}/finish',            [RideController::class, 'finishRide']);
-        Route::post('/{rideId}/driver-confirm',    [RideController::class, 'driverConfirmCompletion']);
-        Route::post('/{rideId}/driver-no-show',    [RideController::class, 'reportDriverNoShow']);
+        Route::get('/{rideId}',                 [RideController::class, 'getRideDetails']);
+        Route::patch('/{rideId}/cancel',        [RideController::class, 'cancelRide']);
+        Route::post('/{rideId}/book',           [RideController::class, 'bookRide']);
+        Route::post('/{rideId}/finish',         [RideController::class, 'finishRide']);
+        Route::post('/{rideId}/driver-confirm', [RideController::class, 'driverConfirmCompletion']);
+        Route::post('/{rideId}/driver-no-show', [RideController::class, 'reportDriverNoShow']);
     });
 
-    // ── Bookings ──────────────────────────────────────────────────────────
+    // Bookings
     Route::prefix('bookings')->group(function () {
-        Route::get('/',                                  [RideController::class, 'getMyBookings']);
-        Route::post('/{bookingId}/accept',               [RideController::class, 'acceptBooking']);
-        Route::post('/{bookingId}/reject',               [RideController::class, 'rejectBooking']);
-        Route::post('/{bookingId}/cancel',               [RideController::class, 'cancelBooking']);
-        Route::post('/{bookingId}/cancel-seats',         [RideController::class, 'cancelPartialSeats']);
-        Route::post('/{bookingId}/passenger-confirm',    [RideController::class, 'passengerConfirmCompletion']);
-        Route::post('/{bookingId}/passenger-no-show',    [RideController::class, 'reportPassengerNoShow']);
+        Route::get('/',                               [RideController::class, 'getMyBookings']);
+        Route::post('/{bookingId}/accept',            [RideController::class, 'acceptBooking']);
+        Route::post('/{bookingId}/reject',            [RideController::class, 'rejectBooking']);
+        Route::post('/{bookingId}/cancel',            [RideController::class, 'cancelBooking']);
+        Route::post('/{bookingId}/cancel-seats',      [RideController::class, 'cancelPartialSeats']);
+        Route::post('/{bookingId}/passenger-confirm', [RideController::class, 'passengerConfirmCompletion']);
+        Route::post('/{bookingId}/passenger-no-show', [RideController::class, 'reportPassengerNoShow']);
     });
 
-    // ── Chat ──────────────────────────────────────────────────────────────
+    // Chat
     Route::prefix('chat')->group(function () {
-        Route::get('/conversations',                              [ChatController::class, 'getConversations']);
-        Route::post('/conversations',                             [ChatController::class, 'startConversation']);
-        Route::get('/conversations/{conversationId}/messages',    [ChatController::class, 'getMessages']);
-        Route::post('/conversations/{conversationId}/messages',   [ChatController::class, 'sendMessage']);
-        Route::delete('/messages/{messageId}',                    [ChatController::class, 'deleteMessage']);
+        Route::get('/conversations',                            [ChatController::class, 'getConversations']);
+        Route::post('/conversations',                           [ChatController::class, 'startConversation']);
+        Route::get('/conversations/{conversationId}/messages',  [ChatController::class, 'getMessages']);
+        Route::post('/conversations/{conversationId}/messages', [ChatController::class, 'sendMessage']);
+        Route::delete('/messages/{messageId}',                  [ChatController::class, 'deleteMessage']);
     });
 
-    // ── Notifications ─────────────────────────────────────────────────────
+    // Notifications
     Route::prefix('notifications')->group(function () {
-        Route::get('/',                  [NotificationController::class, 'index']);
-        Route::get('/unread-count',      [NotificationController::class, 'getUnreadCount']);
-        Route::get('/categories',        [NotificationController::class, 'getCategories']);
-        Route::post('/read-all',         [NotificationController::class, 'markAllAsRead']);
-        Route::post('/bulk-action',      [NotificationController::class, 'bulkAction']);
-        Route::post('/{id}/read',        [NotificationController::class, 'markAsRead']);
-        Route::post('/{id}/unread',      [NotificationController::class, 'markAsUnread']);
-        Route::delete('/{id}',           [NotificationController::class, 'destroy']);
+        Route::get('/',             [NotificationController::class, 'index']);
+        Route::get('/unread-count', [NotificationController::class, 'getUnreadCount']);
+        Route::get('/categories',   [NotificationController::class, 'getCategories']);
+        Route::post('/read-all',    [NotificationController::class, 'markAllAsRead']);
+        Route::post('/bulk-action', [NotificationController::class, 'bulkAction']);
+        Route::post('/{id}/read',   [NotificationController::class, 'markAsRead']);
+        Route::post('/{id}/unread', [NotificationController::class, 'markAsUnread']);
+        Route::delete('/{id}',      [NotificationController::class, 'destroy']);
     });
 
-    // ── Wallet ────────────────────────────────────────────────────────────
+    // Wallet
     Route::prefix('wallet')->group(function () {
-        Route::get('/balance',           [WalletController::class, 'getBalance']);
-        Route::post('/initiate',         [WalletController::class, 'initiateWalletCreation']);
-        Route::post('/verify-and-create',[WalletController::class, 'verifyAndCreateWallet']);
+        Route::get('/balance',            [WalletController::class, 'getBalance']);
+        Route::post('/initiate',          [WalletController::class, 'initiateWalletCreation']);
+        Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
+
+        Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
+        Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
+        Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
     });
 
+    // Complaints
+    Route::prefix('complaints')->group(function () {
+        Route::get('/',     [ComplaintController::class, 'index']);
+        Route::post('/',    [ComplaintController::class, 'store']);
+        Route::get('/{id}', [ComplaintController::class, 'show']);
+    });
+
+    // Contact
+    Route::post('/contact', ContactController::class);
 });
 
 // ========================================
@@ -220,37 +231,25 @@ Route::middleware('jwt')->group(function () {
 // ========================================
 
 Route::prefix('admin')->group(function () {
+
     Route::get('users', [AdminUserController::class, 'index']);
-   /* GET /api/admin/users
-GET /api/admin/users?type=driver
-    GET /api/admin/users?type=passenger&status=pending
-        GET /api/admin/users?status=verified&date=last_30_days
-            GET /api/admin/users?type=driver&status=all&date=last_6_months&search=ahmed*/
+
     Route::get('drivers/verification-efficiency', [AdminDriverController::class, 'verificationEfficiency']);
-    Route::get('drivers/dashboard',  [AdminDriverController::class, 'dashboard']);
+    Route::get('drivers/dashboard',               [AdminDriverController::class, 'dashboard']);
+    Route::get('drivers/stats',                   [AdminDriverController::class, 'stats']);
+    Route::get('drivers/activity',                [AdminDriverController::class, 'activity']);
+    Route::get('drivers',                         [AdminDriverController::class, 'index']);
+    Route::get('drivers/{driverId}/profile',      [AdminDriverController::class, 'driverProfile']);
+    Route::get('drivers/{driverId}/dashboard',    [AdminDriverController::class, 'driverDashboard']);
 
-//  Individual component refresh endpoints
-    Route::get('drivers/stats',      [AdminDriverController::class, 'stats']);
-    Route::get('drivers/activity',   [AdminDriverController::class, 'activity']);
-
-//  Driver table (paginated, filterable)
-    Route::get('drivers',            [AdminDriverController::class, 'index']);
-
-//  Single driver profile / detail view
-    //  Single driver profile / detail view
-    Route::get('drivers/{driverId}/profile',   [AdminDriverController::class, 'driverProfile']);
-    Route::get('drivers/{driverId}/dashboard', [AdminDriverController::class, 'driverDashboard']);
-    // ── Public admin auth ─────────────────────────────────────────────────
     Route::post('/login',   [AdminDashboardController::class, 'login']);
     Route::post('/refresh', [AdminDashboardController::class, 'refresh']);
 
-    // ── Protected — any admin ─────────────────────────────────────────────
     Route::middleware('auth.admin')->group(function () {
 
         Route::post('/logout', [AdminDashboardController::class, 'logout']);
         Route::post('/photo',  [AdminDashboardController::class, 'uploadAdminPhoto']);
 
-        // Dashboard widgets
         Route::prefix('dashboard')->group(function () {
             Route::get('/',       [AdminDashboardController::class, 'dashboard']);
             Route::get('/stats',  [AdminDashboardController::class, 'dashboardStats']);
@@ -259,7 +258,6 @@ GET /api/admin/users?type=driver
             Route::get('/recent', [AdminDashboardController::class, 'dashboardRecent']);
         });
 
-        // Trips
         Route::prefix('trips')->group(function () {
             Route::get('/live', [AdminTripController::class, 'live']);
             Route::get('/',     [AdminTripController::class, 'index']);
@@ -267,15 +265,41 @@ GET /api/admin/users?type=driver
         Route::get('/routes/popular', [AdminTripController::class, 'popularRoutes']);
         Route::get('/drivers/top',    [AdminTripController::class, 'topDrivers']);
 
-        // Wallet — read (any admin)
         Route::prefix('wallet')->group(function () {
             Route::get('/',                        [AdminDashboardController::class, 'getAdminWallet']);
             Route::get('/{walletId}/transactions', [AdminDashboardController::class, 'showWalletTransactions']);
+
+            Route::get('/requests',                [AdminWalletRequestController::class, 'index']);
+            Route::post('/requests/{id}/approve',  [AdminWalletRequestController::class, 'approve']);
+            Route::post('/requests/{id}/reject',   [AdminWalletRequestController::class, 'reject']);
         });
         Route::get('/wallets', [AdminDashboardController::class, 'getAdminWallets']);
 
-        // ── Primary admin only ────────────────────────────────────────────
-        Route::middleware('auth.admin:primary')->group(function () {
+        // UC-ADM-12: Ban / Unban
+        Route::prefix('users')->group(function () {
+            Route::get('/{userId}/status',  [AdminBanController::class, 'userStatus']);
+            Route::post('/{userId}/ban',    [AdminBanController::class, 'ban']);
+            Route::post('/{userId}/unban',  [AdminBanController::class, 'unban']);
+        });
+
+        // ── Passenger Profile Dashboard ───────────────────────────────────
+        Route::prefix('passengers')->group(function () {
+
+            // BFF: returns full page in one call
+            Route::get('/{userId}/full-profile',   [PassengerProfileController::class, 'fullProfile']);
+
+            // Individual section refresh
+            Route::get('/{userId}/stats',          [PassengerProfileController::class, 'stats']);
+            Route::get('/{userId}/monthly-trips',  [PassengerProfileController::class, 'monthlyTrips']);
+            Route::get('/{userId}/recent-trips',   [PassengerProfileController::class, 'recentTrips']);
+            Route::get('/{userId}/complaints',     [PassengerProfileController::class, 'complaints']);
+            Route::get('/{userId}/wallet-charges', [PassengerProfileController::class, 'walletCharges']);
+
+            // Action
+            Route::post('/{userId}/charge-wallet', [PassengerProfileController::class, 'chargeWallet']);
+        });
+
+        Route::middleware('auth.admin:system_admin')->group(function () {
 
             Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
             Route::get('/export/pdf',     [AdminDashboardController::class, 'exportPdf']);
@@ -288,4 +312,70 @@ GET /api/admin/users?type=driver
             });
         });
     });
+});
+
+// ========================================
+// STAFF ROUTES
+// ========================================
+
+Route::prefix('staff')->name('staff.')->group(function () {
+
+    Route::post('login',   [StaffAuthController::class, 'login'])->name('login');
+    Route::post('refresh', [StaffAuthController::class, 'refresh'])->name('refresh');
+
+    Route::middleware('staff')->group(function () {
+
+        Route::post('logout', [StaffAuthController::class, 'logout'])->name('logout');
+        Route::get('me',      [StaffAuthController::class, 'me'])->name('me');
+
+        Route::prefix('reviews')->name('reviews.')->group(function () {
+            Route::get('/',               [StaffReviewController::class, 'index'])->name('index');
+            Route::delete('/{commentId}', [StaffReviewController::class, 'destroy'])->name('destroy');
+        });
+
+        Route::prefix('users')->name('users.')->group(function () {
+            Route::get('/',         [StaffOperationsController::class, 'users'])->name('index');
+            Route::get('/{userId}', [StaffOperationsController::class, 'userProfile'])->name('show');
+        });
+
+        Route::get('trips',    [StaffOperationsController::class, 'trips'])->name('trips.index');
+        Route::get('bookings', [StaffOperationsController::class, 'bookings'])->name('bookings.index');
+
+        Route::prefix('complaints')->name('complaints.')->group(function () {
+            Route::get('/',                [StaffComplaintController::class, 'index'])->name('index');
+            Route::get('/{id}',            [StaffComplaintController::class, 'show'])->name('show');
+            Route::patch('/{id}/respond',  [StaffComplaintController::class, 'respond'])->name('respond');
+            Route::patch('/{id}/escalate', [StaffComplaintController::class, 'escalate'])->name('escalate');
+        });
+
+        Route::post('trips/{rideId}/cancel',      [StaffOperationsController::class, 'cancelTrip'])->name('trips.cancel');
+        Route::post('bookings/{bookingId}/cancel', [StaffOperationsController::class, 'cancelBooking'])->name('bookings.cancel');
+
+        Route::middleware('staff:admin,system_admin')->group(function () {
+
+            Route::prefix('verifications')->name('verifications.')->group(function () {
+                Route::get('/pending',           [StaffAdminController::class, 'pendingVerifications'])->name('pending');
+                Route::post('/{userId}/approve', [StaffAdminController::class, 'approveVerification'])->name('approve');
+                Route::post('/{userId}/reject',  [StaffAdminController::class, 'rejectVerification'])->name('reject');
+            });
+
+            Route::prefix('escalated-complaints')->name('escalated-complaints.')->group(function () {
+                Route::get('/',               [StaffAdminController::class, 'escalatedComplaints'])->name('index');
+                Route::patch('/{id}/resolve', [StaffAdminController::class, 'resolveEscalated'])->name('resolve');
+            });
+        });
+    });
+});
+
+// ========================================
+// EMPLOYEE MANAGEMENT
+// ========================================
+
+Route::prefix('employees')->middleware('staff:system_admin,admin')->group(function () {
+    Route::get('/',                      [EmployeeManagementController::class, 'index']);
+    Route::post('/',                     [EmployeeManagementController::class, 'store']);
+    Route::get('/{id}',                  [EmployeeManagementController::class, 'show']);
+    Route::put('/{id}',                  [EmployeeManagementController::class, 'update']);
+    Route::patch('/{id}/toggle-active',  [EmployeeManagementController::class, 'toggleActive']);
+    Route::patch('/{id}/reset-password', [EmployeeManagementController::class, 'resetPassword']);
 });

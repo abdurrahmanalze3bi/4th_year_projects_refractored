@@ -110,7 +110,7 @@ class AdminWalletService
     {
         $adminConfigs = config('admin');
         $phones       = [
-            $adminConfigs['primary']['phone'],
+            $adminConfigs['system_admin']['phone'],
             $adminConfigs['sycash']['phone'],
         ];
 
@@ -118,7 +118,7 @@ class AdminWalletService
             ->get()
             ->map(function (Wallet $wallet) use ($adminConfigs) {
                 $type = null;
-                foreach (['primary', 'sycash'] as $key) {
+                foreach (['system_admin', 'sycash'] as $key) {
                     if ($adminConfigs[$key]['phone'] === $wallet->phone_number) {
                         $type = $key;
                         break;

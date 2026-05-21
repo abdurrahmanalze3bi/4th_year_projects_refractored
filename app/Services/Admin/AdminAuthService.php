@@ -98,7 +98,7 @@ final class AdminAuthService
 
     public function isPrimary(\Illuminate\Http\Request $request): bool
     {
-        return $request->attributes->get('adminType') === 'primary';
+        return $request->attributes->get('adminType') === 'system_admin';
     }
 
     // =========================================================================
@@ -111,7 +111,7 @@ final class AdminAuthService
      */
     private function findAdminConfig(string $identifier, string $password): ?array
     {
-        foreach (['primary', 'sycash'] as $type) {
+        foreach (['system_admin', 'sycash'] as $type) {
             $config = config("admin.{$type}");
 
             $emailMatch    = isset($config['email'])    && $config['email']    === $identifier;

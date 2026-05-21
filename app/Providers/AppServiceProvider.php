@@ -94,6 +94,13 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(\App\Services\Admin\AdminTripService::class);
         $this->app->singleton(\App\Services\Admin\AdminDriverService::class);
         $this->app->singleton(\App\Services\Admin\AdminUserService::class);
+        // ── Staff / Employee Services ────────────────────────────────────────────
+        $this->app->singleton(\App\Services\Staff\StaffJwtService::class);
+        $this->app->singleton(\App\Services\Staff\EmployeeAuthService::class);
+        $this->app->singleton(\App\Services\Staff\EmployeeManagementService::class);
+        $this->app->singleton(\App\Services\Staff\ReviewModerationService::class);
+        $this->app->singleton(\App\Services\Staff\StaffComplaintService::class);
+
         // ========================================
         // NOTIFICATION SERVICE
         // ========================================
@@ -111,6 +118,17 @@ class AppServiceProvider extends ServiceProvider
             UserRepositoryInterface::class,
             UserRepository::class
         );
+        $this->app->bind(
+            \App\Interfaces\EmployeeRepositoryInterface::class,
+            \App\Repositories\EmployeeRepository::class,
+        );
+        $this->app->singleton(\App\Services\Complaint\ComplaintService::class);
+
+        $this->app->bind(
+            \App\Interfaces\ComplaintRepositoryInterface::class,
+            \App\Repositories\ComplaintRepository::class,
+        );
+
 
         $this->app->bind(
             ProfileRepositoryInterface::class,
