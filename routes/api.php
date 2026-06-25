@@ -232,24 +232,28 @@ Route::middleware('jwt')->group(function () {
 
 Route::prefix('admin')->group(function () {
 
-    Route::get('users', [AdminUserController::class, 'index']);
-
-    Route::get('drivers/verification-efficiency', [AdminDriverController::class, 'verificationEfficiency']);
-    Route::get('drivers/dashboard',               [AdminDriverController::class, 'dashboard']);
-    Route::get('drivers/stats',                   [AdminDriverController::class, 'stats']);
-    Route::get('drivers/activity',                [AdminDriverController::class, 'activity']);
-    Route::get('drivers',                         [AdminDriverController::class, 'index']);
-    Route::get('drivers/{driverId}/profile',      [AdminDriverController::class, 'driverProfile']);
-    Route::get('drivers/{driverId}/dashboard',    [AdminDriverController::class, 'driverDashboard']);
-
+    // Public: login + refresh only
     Route::post('/login',   [AdminDashboardController::class, 'login']);
     Route::post('/refresh', [AdminDashboardController::class, 'refresh']);
 
-    Route::middleware('auth.admin')->group(function () {
+    // Everything else: admin + system_admin roles only
+    Route::middleware('staff:admin,system_admin')->group(function () {
 
+        // ── Driver routes (moved inside — were previously unprotected) ──
+        Route::get('users',                                    [AdminUserController::class,   'index']);
+        Route::get('drivers/verification-efficiency',          [AdminDriverController::class, 'verificationEfficiency']);
+        Route::get('drivers/dashboard',                        [AdminDriverController::class, 'dashboard']);
+        Route::get('drivers/stats',                            [AdminDriverController::class, 'stats']);
+        Route::get('drivers/activity',                         [AdminDriverController::class, 'activity']);
+        Route::get('drivers',                                  [AdminDriverController::class, 'index']);
+        Route::get('drivers/{driverId}/profile',               [AdminDriverController::class, 'driverProfile']);
+        Route::get('drivers/{driverId}/dashboard',             [AdminDriverController::class, 'driverDashboard']);
+
+        // ── Session ───────────────────────────────────────────────────────
         Route::post('/logout', [AdminDashboardController::class, 'logout']);
         Route::post('/photo',  [AdminDashboardController::class, 'uploadAdminPhoto']);
 
+        // ── Dashboard ─────────────────────────────────────────────────────
         Route::prefix('dashboard')->group(function () {
             Route::get('/',       [AdminDashboardController::class, 'dashboard']);
             Route::get('/stats',  [AdminDashboardController::class, 'dashboardStats']);
@@ -258,6 +262,7 @@ Route::prefix('admin')->group(function () {
             Route::get('/recent', [AdminDashboardController::class, 'dashboardRecent']);
         });
 
+        // ── Trips ─────────────────────────────────────────────────────────
         Route::prefix('trips')->group(function () {
             Route::get('/live', [AdminTripController::class, 'live']);
             Route::get('/',     [AdminTripController::class, 'index']);
@@ -265,9 +270,10 @@ Route::prefix('admin')->group(function () {
         Route::get('/routes/popular', [AdminTripController::class, 'popularRoutes']);
         Route::get('/drivers/top',    [AdminTripController::class, 'topDrivers']);
 
+        // ── Wallet ────────────────────────────────────────────────────────
         Route::prefix('wallet')->group(function () {
-            Route::get('/',                        [AdminDashboardController::class, 'getAdminWallet']);
-            Route::get('/{walletId}/transactions', [AdminDashboardController::class, 'showWalletTransactions']);
+            Route::get('/',                        [AdminDashboardController::class,    'getAdminWallet']);
+            Route::get('/{walletId}/transactions', [AdminDashboardController::class,    'showWalletTransactions']);
 
             Route::get('/requests',                [AdminWalletRequestController::class, 'index']);
             Route::post('/requests/{id}/approve',  [AdminWalletRequestController::class, 'approve']);
@@ -275,7 +281,7 @@ Route::prefix('admin')->group(function () {
         });
         Route::get('/wallets', [AdminDashboardController::class, 'getAdminWallets']);
 
-        // UC-ADM-12: Ban / Unban
+        // ── UC-ADM-12: Ban / Unban ────────────────────────────────────────
         Route::prefix('users')->group(function () {
             Route::get('/{userId}/status',  [AdminBanController::class, 'userStatus']);
             Route::post('/{userId}/ban',    [AdminBanController::class, 'ban']);
@@ -299,7 +305,8 @@ Route::prefix('admin')->group(function () {
             Route::post('/{userId}/charge-wallet', [PassengerProfileController::class, 'chargeWallet']);
         });
 
-        Route::middleware('auth.admin:system_admin')->group(function () {
+        // ── System Admin only ─────────────────────────────────────────────
+        Route::middleware('staff:system_admin')->group(function () {
 
             Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
             Route::get('/export/pdf',     [AdminDashboardController::class, 'exportPdf']);
@@ -351,6 +358,7 @@ Route::prefix('staff')->name('staff.')->group(function () {
         Route::post('trips/{rideId}/cancel',      [StaffOperationsController::class, 'cancelTrip'])->name('trips.cancel');
         Route::post('bookings/{bookingId}/cancel', [StaffOperationsController::class, 'cancelBooking'])->name('bookings.cancel');
 
+        // Admin + System Admin only
         Route::middleware('staff:admin,system_admin')->group(function () {
 
             Route::prefix('verifications')->name('verifications.')->group(function () {
@@ -368,10 +376,10 @@ Route::prefix('staff')->name('staff.')->group(function () {
 });
 
 // ========================================
-// EMPLOYEE MANAGEMENT
+// EMPLOYEE MANAGEMENT — system_admin only
 // ========================================
 
-Route::prefix('employees')->middleware('staff:system_admin,admin')->group(function () {
+Route::prefix('employees')->middleware('staff:system_admin')->group(function () {
     Route::get('/',                      [EmployeeManagementController::class, 'index']);
     Route::post('/',                     [EmployeeManagementController::class, 'store']);
     Route::get('/{id}',                  [EmployeeManagementController::class, 'show']);

@@ -165,6 +165,11 @@ class ChatController extends Controller
                 'success' => true,
                 'data' => $this->messageHandler->formatMessage($message)
             ], 201);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], $e->getStatusCode());
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,

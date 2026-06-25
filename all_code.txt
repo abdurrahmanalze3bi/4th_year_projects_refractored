@@ -10798,6 +10798,8 @@ final class StaffJwtMiddleware
 
     // â”€â”€ Admin JWT path (system admin token = system_admin access) â”€â”€â”€â”€â”€â”€â”€â”€
 
+    // app/Http/Middleware/StaffJwtMiddleware.php
+
     private function handleAdminToken(Request $request, Closure $next, array $payload, ?string $roles): Response
     {
         if (($payload['type'] ?? null) !== 'access') {
@@ -10809,13 +10811,11 @@ final class StaffJwtMiddleware
             return $this->fail('USER_NOT_FOUND', 'User not found.');
         }
 
-        // Confirm this user is actually the system admin
         $systemAdminEmail = config('admin.system_admin.email');
         if ($user->email !== $systemAdminEmail) {
             return $this->fail('FORBIDDEN', 'Admin access only for the system admin.');
         }
 
-        // Synthesize an Employee-like object so controllers work identically
         $employee = Employee::firstOrCreate(
             ['username' => config('admin.system_admin.username')],
             [
@@ -10832,6 +10832,10 @@ final class StaffJwtMiddleware
         if (!$this->checkRoles(StaffRole::SYSTEM_ADMIN->value, $roles)) {
             return $this->forbidden($roles);
         }
+
+        // âœ… FIX: set user resolver so $request->user() works in admin controllers
+        // (AdminDashboardController::logout() calls $request->user()->id)
+        $request->setUserResolver(fn () => $user);
 
         $request->attributes->set('staffEmployee', $employee);
         return $next($request);
@@ -14330,6 +14334,7 @@ class AuthServiceProvider extends ServiceProvider
 ===== FILE: C:\wamp64\www\4th_year_project\app\Providers\BroadcastServiceProvider.php =====
 
 <?php
+
 namespace App\Providers;
 
 use Illuminate\Support\Facades\Broadcast;
@@ -14339,7 +14344,7 @@ class BroadcastServiceProvider extends ServiceProvider
 {
     public function boot(): void
     {
-        Broadcast::routes();
+        Broadcast::routes(['middleware' => ['jwt']]); // â† use your JWT middleware
         require base_path('routes/channels.php');
     }
 }
@@ -24722,6 +24727,7 @@ class WhatsAppOtpService
     34 => 'App\\Providers\\AuthServiceProvider',
     35 => 'App\\Providers\\EventServiceProvider',
     36 => 'App\\Providers\\RouteServiceProvider',
+    37 => 'App\\Providers\\BroadcastServiceProvider',
   ),
   'eager' => 
   array (
@@ -24747,6 +24753,7 @@ class WhatsAppOtpService
     19 => 'App\\Providers\\AuthServiceProvider',
     20 => 'App\\Providers\\EventServiceProvider',
     21 => 'App\\Providers\\RouteServiceProvider',
+    22 => 'App\\Providers\\BroadcastServiceProvider',
   ),
   'deferred' => 
   array (
@@ -25125,6 +25132,7 @@ return [
         App\Providers\AuthServiceProvider::class,
         App\Providers\EventServiceProvider::class,
         App\Providers\RouteServiceProvider::class,
+        App\Providers\BroadcastServiceProvider::class, // â† ADD THIS
 
     ])->toArray(),
 
@@ -31762,24 +31770,28 @@ Route::middleware('jwt')->group(function () {
 
 Route::prefix('admin')->group(function () {
 
-    Route::get('users', [AdminUserController::class, 'index']);
-
-    Route::get('drivers/verification-efficiency', [AdminDriverController::class, 'verificationEfficiency']);
-    Route::get('drivers/dashboard',               [AdminDriverController::class, 'dashboard']);
-    Route::get('drivers/stats',                   [AdminDriverController::class, 'stats']);
-    Route::get('drivers/activity',                [AdminDriverController::class, 'activity']);
-    Route::get('drivers',                         [AdminDriverController::class, 'index']);
-    Route::get('drivers/{driverId}/profile',      [AdminDriverController::class, 'driverProfile']);
-    Route::get('drivers/{driverId}/dashboard',    [AdminDriverController::class, 'driverDashboard']);
-
+    // Public: login + refresh only
     Route::post('/login',   [AdminDashboardController::class, 'login']);
     Route::post('/refresh', [AdminDashboardController::class, 'refresh']);
 
-    Route::middleware('auth.admin')->group(function () {
+    // Everything else: admin + system_admin roles only
+    Route::middleware('staff:admin,system_admin')->group(function () {
 
+        // â”€â”€ Driver routes (moved inside â€” were previously unprotected) â”€â”€
+        Route::get('users',                                    [AdminUserController::class,   'index']);
+        Route::get('drivers/verification-efficiency',          [AdminDriverController::class, 'verificationEfficiency']);
+        Route::get('drivers/dashboard',                        [AdminDriverController::class, 'dashboard']);
+        Route::get('drivers/stats',                            [AdminDriverController::class, 'stats']);
+        Route::get('drivers/activity',                         [AdminDriverController::class, 'activity']);
+        Route::get('drivers',                                  [AdminDriverController::class, 'index']);
+        Route::get('drivers/{driverId}/profile',               [AdminDriverController::class, 'driverProfile']);
+        Route::get('drivers/{driverId}/dashboard',             [AdminDriverController::class, 'driverDashboard']);
+
+        // â”€â”€ Session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Route::post('/logout', [AdminDashboardController::class, 'logout']);
         Route::post('/photo',  [AdminDashboardController::class, 'uploadAdminPhoto']);
 
+        // â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Route::prefix('dashboard')->group(function () {
             Route::get('/',       [AdminDashboardController::class, 'dashboard']);
             Route::get('/stats',  [AdminDashboardController::class, 'dashboardStats']);
@@ -31788,6 +31800,7 @@ Route::prefix('admin')->group(function () {
             Route::get('/recent', [AdminDashboardController::class, 'dashboardRecent']);
         });
 
+        // â”€â”€ Trips â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Route::prefix('trips')->group(function () {
             Route::get('/live', [AdminTripController::class, 'live']);
             Route::get('/',     [AdminTripController::class, 'index']);
@@ -31795,9 +31808,10 @@ Route::prefix('admin')->group(function () {
         Route::get('/routes/popular', [AdminTripController::class, 'popularRoutes']);
         Route::get('/drivers/top',    [AdminTripController::class, 'topDrivers']);
 
+        // â”€â”€ Wallet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Route::prefix('wallet')->group(function () {
-            Route::get('/',                        [AdminDashboardController::class, 'getAdminWallet']);
-            Route::get('/{walletId}/transactions', [AdminDashboardController::class, 'showWalletTransactions']);
+            Route::get('/',                        [AdminDashboardController::class,    'getAdminWallet']);
+            Route::get('/{walletId}/transactions', [AdminDashboardController::class,    'showWalletTransactions']);
 
             Route::get('/requests',                [AdminWalletRequestController::class, 'index']);
             Route::post('/requests/{id}/approve',  [AdminWalletRequestController::class, 'approve']);
@@ -31805,7 +31819,7 @@ Route::prefix('admin')->group(function () {
         });
         Route::get('/wallets', [AdminDashboardController::class, 'getAdminWallets']);
 
-        // UC-ADM-12: Ban / Unban
+        // â”€â”€ UC-ADM-12: Ban / Unban â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Route::prefix('users')->group(function () {
             Route::get('/{userId}/status',  [AdminBanController::class, 'userStatus']);
             Route::post('/{userId}/ban',    [AdminBanController::class, 'ban']);
@@ -31829,7 +31843,8 @@ Route::prefix('admin')->group(function () {
             Route::post('/{userId}/charge-wallet', [PassengerProfileController::class, 'chargeWallet']);
         });
 
-        Route::middleware('auth.admin:system_admin')->group(function () {
+        // â”€â”€ System Admin only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        Route::middleware('staff:system_admin')->group(function () {
 
             Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
             Route::get('/export/pdf',     [AdminDashboardController::class, 'exportPdf']);
@@ -31881,6 +31896,7 @@ Route::prefix('staff')->name('staff.')->group(function () {
         Route::post('trips/{rideId}/cancel',      [StaffOperationsController::class, 'cancelTrip'])->name('trips.cancel');
         Route::post('bookings/{bookingId}/cancel', [StaffOperationsController::class, 'cancelBooking'])->name('bookings.cancel');
 
+        // Admin + System Admin only
         Route::middleware('staff:admin,system_admin')->group(function () {
 
             Route::prefix('verifications')->name('verifications.')->group(function () {
@@ -31898,10 +31914,10 @@ Route::prefix('staff')->name('staff.')->group(function () {
 });
 
 // ========================================
-// EMPLOYEE MANAGEMENT
+// EMPLOYEE MANAGEMENT â€” system_admin only
 // ========================================
 
-Route::prefix('employees')->middleware('staff:system_admin,admin')->group(function () {
+Route::prefix('employees')->middleware('staff:system_admin')->group(function () {
     Route::get('/',                      [EmployeeManagementController::class, 'index']);
     Route::post('/',                     [EmployeeManagementController::class, 'store']);
     Route::get('/{id}',                  [EmployeeManagementController::class, 'show']);
@@ -31915,21 +31931,28 @@ Route::prefix('employees')->middleware('staff:system_admin,admin')->group(functi
 
 <?php
 
+use App\Models\Conversation;
 use Illuminate\Support\Facades\Broadcast;
 
-/*
-|--------------------------------------------------------------------------
-| Broadcast Channels
-|--------------------------------------------------------------------------
-|
-| Here you may register all of the event broadcasting channels that your
-| application supports. The given channel authorization callbacks are
-| used to check if an authenticated user can listen to the channel.
-|
-*/
-
+// Default Laravel channel
 Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
     return (int) $user->id === (int) $id;
+});
+
+// Private chat conversation channel
+Broadcast::channel('conversation.{conversationId}', function ($user, $conversationId) {
+    $conversation = Conversation::find($conversationId);
+    return $conversation && $conversation->isParticipant($user);
+});
+
+// Private user channel (notifications)
+Broadcast::channel('user.{id}', function ($user, $id) {
+    return (int) $user->id === (int) $id;
+});
+
+// Public rides channel (no auth needed)
+Broadcast::channel('rides', function () {
+    return true;
 });
 
 

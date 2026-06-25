@@ -71,6 +71,8 @@ final class StaffJwtMiddleware
 
     // ── Admin JWT path (system admin token = system_admin access) ────────
 
+    // app/Http/Middleware/StaffJwtMiddleware.php
+
     private function handleAdminToken(Request $request, Closure $next, array $payload, ?string $roles): Response
     {
         if (($payload['type'] ?? null) !== 'access') {
@@ -82,13 +84,11 @@ final class StaffJwtMiddleware
             return $this->fail('USER_NOT_FOUND', 'User not found.');
         }
 
-        // Confirm this user is actually the system admin
         $systemAdminEmail = config('admin.system_admin.email');
         if ($user->email !== $systemAdminEmail) {
             return $this->fail('FORBIDDEN', 'Admin access only for the system admin.');
         }
 
-        // Synthesize an Employee-like object so controllers work identically
         $employee = Employee::firstOrCreate(
             ['username' => config('admin.system_admin.username')],
             [
@@ -105,6 +105,10 @@ final class StaffJwtMiddleware
         if (!$this->checkRoles(StaffRole::SYSTEM_ADMIN->value, $roles)) {
             return $this->forbidden($roles);
         }
+
+        // ✅ FIX: set user resolver so $request->user() works in admin controllers
+        // (AdminDashboardController::logout() calls $request->user()->id)
+        $request->setUserResolver(fn () => $user);
 
         $request->attributes->set('staffEmployee', $employee);
         return $next($request);

@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Events;
 
 use App\Models\Message;
@@ -10,6 +11,7 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+
 class MessageSent implements ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
@@ -32,15 +34,17 @@ class MessageSent implements ShouldBroadcastNow
     {
         return [
             'message' => [
-                'id' => $this->message->id,
+                'id'              => $this->message->id,
                 'conversation_id' => $this->message->conversation_id,
-                'sender' => [
-                    'id' => $this->message->sender->id,
+                'sender'          => [
+                    'id'   => $this->message->sender->id,
                     'name' => $this->message->sender->first_name . ' ' . $this->message->sender->last_name,
                 ],
-                'type' => $this->message->type,
-                'content' => $this->message->content,
-                'metadata' => $this->message->metadata,
+                'type'       => $this->message->type,
+                'content'    => $this->message->type === 'image'
+                    ? asset('storage/' . $this->message->content)
+                    : $this->message->content,
+                'metadata'   => $this->message->metadata,
                 'created_at' => $this->message->created_at->toIso8601String(),
             ]
         ];
