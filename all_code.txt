@@ -2502,6 +2502,7 @@ class MessageReceived
 ===== FILE: C:\wamp64\www\4th_year_project\app\Events\MessageSent.php =====
 
 <?php
+
 namespace App\Events;
 
 use App\Models\Message;
@@ -2513,6 +2514,7 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+
 class MessageSent implements ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
@@ -2535,15 +2537,17 @@ class MessageSent implements ShouldBroadcastNow
     {
         return [
             'message' => [
-                'id' => $this->message->id,
+                'id'              => $this->message->id,
                 'conversation_id' => $this->message->conversation_id,
-                'sender' => [
-                    'id' => $this->message->sender->id,
+                'sender'          => [
+                    'id'   => $this->message->sender->id,
                     'name' => $this->message->sender->first_name . ' ' . $this->message->sender->last_name,
                 ],
-                'type' => $this->message->type,
-                'content' => $this->message->content,
-                'metadata' => $this->message->metadata,
+                'type'       => $this->message->type,
+                'content'    => $this->message->type === 'image'
+                    ? asset('storage/' . $this->message->content)
+                    : $this->message->content,
+                'metadata'   => $this->message->metadata,
                 'created_at' => $this->message->created_at->toIso8601String(),
             ]
         ];
@@ -6562,6 +6566,11 @@ class ChatController extends Controller
                 'success' => true,
                 'data' => $this->messageHandler->formatMessage($message)
             ], 201);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], $e->getStatusCode());
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
