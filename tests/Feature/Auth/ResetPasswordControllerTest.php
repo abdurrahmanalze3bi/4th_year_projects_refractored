@@ -4,67 +4,90 @@ namespace Tests\Feature\Auth;
 
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
-/**
- * ResetPasswordControllerTest — Feature tests for POST /api/auth/reset-password.
- *
- * LOCATION: tests/Feature/Auth/ResetPasswordControllerTest.php
- *
- * HOW PASSWORD RESET WORKS IN THIS APP:
- * 1. POST /api/auth/forgot-password   → generates a token in password_reset_tokens table
- * 2. POST /api/auth/reset-password    → validates token + email + password, resets it
- *
- * The controller uses PasswordResetRepository → Password::reset()
- *
- * POSTMAN EQUIVALENT:
- * POST http://localhost/api/auth/reset-password
- * Body: { "token": "<token>", "email": "<email>", "password": "newpass123", "password_confirmation": "newpass123" }
- * Expected: { "success": true, "message": "..." }  HTTP 200
- */
 class ResetPasswordControllerTest extends TestCase
 {
     use RefreshDatabase;
 
-    private User   $user;
-    private string $rawToken;
+    private User $user;
 
     protected function setUp(): void
     {
         parent::setUp();
-
         $this->user = User::factory()->create([
             'email'    => 'reset@test.com',
             'password' => bcrypt('old_password'),
         ]);
-
-        // Generate a real reset token the same way the forgot-password flow does
-        $this->rawToken = Password::createToken($this->user);
     }
 
-    // ─── Successful reset ──────────────────────────────────────────────────────
-
-    public function test_user_can_reset_password_with_valid_token(): void
+    // ─── Step 1: forgot ─────────────────────────────────────────────────
+    public function test_forgot_password_sends_otp_for_existing_email(): void
     {
-        $response = $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
-        ]);
-
-        $response->assertStatus(200)
+        $this->postJson('/api/password/forgot', ['email' => 'reset@test.com'])
+            ->assertStatus(200)
             ->assertJsonPath('success', true);
     }
 
-    public function test_password_is_actually_changed_after_successful_reset(): void
+    public function test_forgot_password_fails_for_nonexistent_email(): void
     {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
+        $this->postJson('/api/password/forgot', ['email' => 'nobody@test.com'])
+            ->assertStatus(404);
+    }
+
+    public function test_forgot_password_requires_valid_email_format(): void
+    {
+        $this->postJson('/api/password/forgot', ['email' => 'not-an-email'])
+            ->assertStatus(422);
+    }
+
+    // ─── Step 2: verify-otp ─────────────────────────────────────────────
+    public function test_verify_otp_returns_reset_token_for_correct_code(): void
+    {
+        $otp = $this->postJson('/api/password/forgot', ['email' => 'reset@test.com'])->json('otp_code');
+        $this->assertNotNull($otp, 'Testing env should expose otp_code — check EmailOtpService.');
+
+        $this->postJson('/api/password/verify-otp', ['email' => 'reset@test.com', 'otp_code' => $otp])
+            ->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonStructure(['reset_token', 'expires_in']);
+    }
+
+    public function test_verify_otp_fails_with_wrong_code(): void
+    {
+        $this->postJson('/api/password/forgot', ['email' => 'reset@test.com']);
+
+        $this->postJson('/api/password/verify-otp', ['email' => 'reset@test.com', 'otp_code' => '000000'])
+            ->assertStatus(400);
+    }
+
+    public function test_verify_otp_fails_with_missing_fields(): void
+    {
+        $this->postJson('/api/password/verify-otp', [])->assertStatus(422);
+    }
+
+    public function test_verify_otp_fails_for_unknown_email(): void
+    {
+        $this->postJson('/api/password/verify-otp', ['email' => 'nobody@test.com', 'otp_code' => '123456'])
+            ->assertStatus(422);
+    }
+
+    // ─── Step 3: reset ──────────────────────────────────────────────────
+    public function test_user_can_reset_password_with_valid_reset_token(): void
+    {
+        $this->postJson('/api/password/reset', [
+            'reset_token'           => $this->getValidResetToken(),
+            'password'              => 'new_password123',
+            'password_confirmation' => 'new_password123',
+        ])->assertStatus(200)->assertJsonPath('success', true);
+    }
+
+    public function test_password_is_actually_changed_after_reset(): void
+    {
+        $this->postJson('/api/password/reset', [
+            'reset_token'           => $this->getValidResetToken(),
             'password'              => 'brand_new_pass123',
             'password_confirmation' => 'brand_new_pass123',
         ]);
@@ -75,9 +98,8 @@ class ResetPasswordControllerTest extends TestCase
 
     public function test_old_password_no_longer_works_after_reset(): void
     {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
+        $this->postJson('/api/password/reset', [
+            'reset_token'           => $this->getValidResetToken(),
             'password'              => 'new_password123',
             'password_confirmation' => 'new_password123',
         ]);
@@ -86,135 +108,65 @@ class ResetPasswordControllerTest extends TestCase
         $this->assertFalse(Hash::check('old_password', $this->user->password));
     }
 
-    // ─── Validation failures ───────────────────────────────────────────────────
-
-    public function test_reset_fails_with_missing_token(): void
+    public function test_reset_fails_with_missing_reset_token(): void
     {
-        $this->postJson('/api/auth/reset-password', [
-            'email'                 => 'reset@test.com',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
+        $this->postJson('/api/password/reset', [
+            'password' => 'new_password123', 'password_confirmation' => 'new_password123',
         ])->assertStatus(422);
     }
 
-    public function test_reset_fails_with_missing_email(): void
+    public function test_reset_fails_when_reset_token_is_not_a_uuid(): void
     {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
-        ])->assertStatus(422);
-    }
-
-    public function test_reset_fails_with_missing_password(): void
-    {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
-            'password_confirmation' => 'new_password123',
+        $this->postJson('/api/password/reset', [
+            'reset_token' => 'not-a-uuid',
+            'password' => 'new_password123', 'password_confirmation' => 'new_password123',
         ])->assertStatus(422);
     }
 
     public function test_reset_fails_with_password_mismatch(): void
     {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'different_password',
+        $this->postJson('/api/password/reset', [
+            'reset_token' => $this->getValidResetToken(),
+            'password' => 'new_password123', 'password_confirmation' => 'different_password',
         ])->assertStatus(422);
     }
 
     public function test_reset_fails_with_password_too_short(): void
     {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
-            'password'              => 'short',
-            'password_confirmation' => 'short',
+        $this->postJson('/api/password/reset', [
+            'reset_token' => $this->getValidResetToken(),
+            'password' => 'short', 'password_confirmation' => 'short',
         ])->assertStatus(422);
     }
 
-    public function test_reset_fails_with_non_existent_email(): void
+    public function test_reset_fails_with_expired_or_unknown_reset_token(): void
     {
-        $response = $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'nobody@test.com',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
-        ]);
-
-        // Validation rule `exists:users,email` rejects this
-        $response->assertStatus(422);
-    }
-
-    public function test_reset_fails_with_invalid_email_format(): void
-    {
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'not-an-email',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
-        ])->assertStatus(422);
-    }
-
-    // ─── Invalid / expired token ───────────────────────────────────────────────
-
-    public function test_reset_fails_with_wrong_token(): void
-    {
-        $response = $this->postJson('/api/auth/reset-password', [
-            'token'                 => 'invalid_token_string_here',
-            'email'                 => 'reset@test.com',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
-        ]);
-
-        // Returns 400 (invalid token) or 422 (validation fail) — not 200
-        $this->assertNotEquals(200, $response->status());
+        $this->postJson('/api/password/reset', [
+            'reset_token' => (string) Str::uuid(),
+            'password' => 'new_password123', 'password_confirmation' => 'new_password123',
+        ])->assertStatus(400);
     }
 
     public function test_reset_token_can_only_be_used_once(): void
     {
-        // First use — should succeed
-        $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
-            'password'              => 'new_password123',
-            'password_confirmation' => 'new_password123',
+        $token = $this->getValidResetToken();
+
+        $this->postJson('/api/password/reset', [
+            'reset_token' => $token, 'password' => 'new_password123', 'password_confirmation' => 'new_password123',
         ])->assertStatus(200);
 
-        // Second use of the same token — should fail
-        $response = $this->postJson('/api/auth/reset-password', [
-            'token'                 => $this->rawToken,
-            'email'                 => 'reset@test.com',
-            'password'              => 'another_password123',
-            'password_confirmation' => 'another_password123',
-        ]);
-
-        $this->assertNotEquals(200, $response->status());
+        $this->postJson('/api/password/reset', [
+            'reset_token' => $token, 'password' => 'another_password123', 'password_confirmation' => 'another_password123',
+        ])->assertStatus(400);
     }
 
-    // ─── Forgot-password integration ──────────────────────────────────────────
-
-    public function test_forgot_password_endpoint_exists_and_accepts_email(): void
+    // ─── Helper ─────────────────────────────────────────────────────────
+    private function getValidResetToken(): string
     {
-        $response = $this->postJson('/api/auth/forgot-password', [
-            'email' => 'reset@test.com',
-        ]);
+        $otp = $this->postJson('/api/password/forgot', ['email' => 'reset@test.com'])->json('otp_code');
 
-        // Laravel password broker returns 200 or 400 depending on config
-        // The endpoint must exist (not 404/405)
-        $this->assertNotEquals(404, $response->status());
-        $this->assertNotEquals(405, $response->status());
-    }
-
-    public function test_forgot_password_fails_with_non_existent_email(): void
-    {
-        $response = $this->postJson('/api/auth/forgot-password', [
-            'email' => 'nobody@test.com',
-        ]);
-
-        // Laravel Password broker sends 400 for unknown email
-        $this->assertContains($response->status(), [400, 422]);
+        return $this->postJson('/api/password/verify-otp', [
+            'email' => 'reset@test.com', 'otp_code' => $otp,
+        ])->json('reset_token');
     }
 }

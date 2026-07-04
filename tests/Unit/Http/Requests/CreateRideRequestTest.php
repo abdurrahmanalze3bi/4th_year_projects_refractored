@@ -3,137 +3,279 @@
 namespace Tests\Unit\Http\Requests;
 
 use App\Http\Requests\CreateRideRequest;
-use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Validator;
 use Tests\TestCase;
 
+/**
+ * Unit tests for CreateRideRequest.
+ *
+ * These tests validate the ->rules() array directly against sample
+ * payloads via Validator::make(), rather than dispatching a full HTTP
+ * request. This keeps the tests fast and isolated from routing/auth.
+ */
 class CreateRideRequestTest extends TestCase
 {
-    use RefreshDatabase;
-
-    // ── authorize() ───────────────────────────────────────────────────────────
-
-    public function test_authorize_returns_true(): void
+    private function rules(): array
     {
-        $this->assertTrue((new CreateRideRequest())->authorize());
+        return (new CreateRideRequest())->rules();
     }
 
-    // ── rules() ───────────────────────────────────────────────────────────────
-
-    public function test_rules_contains_departure_time(): void
+    private function validPayload(array $overrides = []): array
     {
-        $this->assertArrayHasKey('departure_time', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_available_seats(): void
-    {
-        $this->assertArrayHasKey('available_seats', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_price_per_seat(): void
-    {
-        $this->assertArrayHasKey('price_per_seat', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_payment_method(): void
-    {
-        $this->assertArrayHasKey('payment_method', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_booking_type(): void
-    {
-        $this->assertArrayHasKey('booking_type', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_communication_number(): void
-    {
-        $this->assertArrayHasKey('communication_number', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_vehicle_type(): void
-    {
-        $this->assertArrayHasKey('vehicle_type', (new CreateRideRequest())->rules());
-    }
-
-    public function test_rules_contains_notes(): void
-    {
-        $this->assertArrayHasKey('notes', (new CreateRideRequest())->rules());
-    }
-
-    // ── messages() ────────────────────────────────────────────────────────────
-
-    public function test_messages_returns_non_empty_array(): void
-    {
-        $messages = (new CreateRideRequest())->messages();
-        $this->assertIsArray($messages);
-        $this->assertNotEmpty($messages);
-    }
-
-    public function test_messages_contains_departure_time_after_message(): void
-    {
-        $this->assertArrayHasKey('departure_time.after', (new CreateRideRequest())->messages());
-    }
-
-    public function test_messages_contains_communication_number_regex_message(): void
-    {
-        $this->assertArrayHasKey('communication_number.regex', (new CreateRideRequest())->messages());
-    }
-
-    public function test_messages_contains_price_per_seat_min_message(): void
-    {
-        $this->assertArrayHasKey('price_per_seat.min', (new CreateRideRequest())->messages());
-    }
-
-    // ── HTTP validation via API ───────────────────────────────────────────────
-
-    public function test_api_create_ride_requires_authentication(): void
-    {
-        $this->postJson('/api/rides', [])->assertStatus(401);
-    }
-
-    public function test_api_create_ride_fails_with_invalid_payment_method(): void
-    {
-        $user  = User::factory()->create(['is_verified_driver' => true, 'password' => bcrypt('pass123')]);
-        $token = $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'pass123'])
-            ->json('tokens.access_token');
-
-        $this->withToken($token)->postJson('/api/rides', [
-            'payment_method'  => 'crypto',
-            'available_seats' => 3,
-            'departure_time'  => now()->addHours(2)->toDateTimeString(),
-        ])->assertStatus(422);
-    }
-
-    public function test_api_create_ride_fails_with_past_departure_time(): void
-    {
-        $user  = User::factory()->create(['is_verified_driver' => true, 'password' => bcrypt('pass123')]);
-        $token = $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'pass123'])
-            ->json('tokens.access_token');
-
-        $this->withToken($token)->postJson('/api/rides', [
-            'departure_time'  => now()->subHour()->toDateTimeString(),
-            'available_seats' => 3,
-            'payment_method'  => 'cash',
-            'booking_type'    => 'direct',
-        ])->assertStatus(422);
-    }
-
-    public function test_api_create_ride_fails_with_too_many_seats(): void
-    {
-        $user  = User::factory()->create(['is_verified_driver' => true, 'password' => bcrypt('pass123')]);
-        $token = $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'pass123'])
-            ->json('tokens.access_token');
-
-        $this->withToken($token)->postJson('/api/rides', [
-            'departure_time'       => now()->addHours(2)->toDateTimeString(),
-            'available_seats'      => 20,   // max is 8
+        return array_merge([
+            'pickup_address'       => 'Damascus, Old City',
+            'destination_address'  => 'Homs, City Center',
+            'departure_time'       => now()->addHour()->toDateTimeString(),
+            'available_seats'      => 3,
             'price_per_seat'       => 5000,
             'payment_method'       => 'cash',
             'booking_type'         => 'direct',
             'communication_number' => '0912345678',
-            'vehicle_type'         => 'Toyota',
-            'pickup_address'       => 'Damascus',
-            'destination_address'  => 'Aleppo',
-        ])->assertStatus(422);
+            'vehicle_type'         => 'sedan',
+        ], $overrides);
+    }
+
+    public function test_authorize_always_returns_true(): void
+    {
+        $this->assertTrue((new CreateRideRequest())->authorize());
+    }
+
+    public function test_passes_with_valid_addresses_and_no_coordinates(): void
+    {
+        $validator = Validator::make($this->validPayload(), $this->rules());
+
+        $this->assertTrue($validator->passes(), $validator->errors()->__toString());
+    }
+
+    public function test_passes_with_coordinates_instead_of_addresses(): void
+    {
+        $payload = $this->validPayload();
+        // FIX: omit address keys entirely rather than setting them to null —
+        // 'required_without_all' still runs the 'string' rule against an
+        // explicit null value and fails
+        unset($payload['pickup_address'], $payload['destination_address']);
+
+        $payload = array_merge($payload, [
+            'pickup_lat'          => 33.5138,
+            'pickup_lng'          => 36.2765,
+            'destination_lat'     => 34.7324,
+            'destination_lng'     => 36.7137,
+        ]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->passes(), $validator->errors()->__toString());
+    }
+
+    public function test_fails_when_pickup_has_neither_address_nor_coordinates(): void
+    {
+        $payload = $this->validPayload(['pickup_address' => null]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('pickup_address', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_destination_has_neither_address_nor_coordinates(): void
+    {
+        $payload = $this->validPayload(['destination_address' => null]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('destination_address', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_pickup_lat_given_without_pickup_lng(): void
+    {
+        $payload = $this->validPayload(['pickup_lat' => 33.5138]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        // FIX: the rule 'pickup_lng' => 'required_with:pickup_lat' means the
+        // validation error is attached to pickup_lng, not pickup_lat
+        $this->assertArrayHasKey('pickup_lng', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_pickup_lat_out_of_range(): void
+    {
+        $payload = $this->validPayload([
+            'pickup_lat' => 95, // invalid: > 90
+            'pickup_lng' => 36.2765,
+        ]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('pickup_lat', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_departure_time_is_too_soon(): void
+    {
+        // Rule requires strictly after now()+5min, so "now" should fail.
+        $payload = $this->validPayload(['departure_time' => now()->toDateTimeString()]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('departure_time', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_departure_time_is_not_a_valid_date(): void
+    {
+        $payload = $this->validPayload(['departure_time' => 'not-a-date']);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('departure_time', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_available_seats_exceeds_max(): void
+    {
+        $payload = $this->validPayload(['available_seats' => 9]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('available_seats', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_available_seats_is_zero(): void
+    {
+        $payload = $this->validPayload(['available_seats' => 0]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('available_seats', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_price_per_seat_below_minimum(): void
+    {
+        $payload = $this->validPayload(['price_per_seat' => 50]); // min is 100
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('price_per_seat', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_price_per_seat_above_maximum(): void
+    {
+        $payload = $this->validPayload(['price_per_seat' => 200000]); // max is 100000
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('price_per_seat', $validator->errors()->toArray());
+    }
+
+    /**
+     * @dataProvider invalidCommunicationNumberProvider
+     */
+    public function test_fails_on_invalid_syrian_communication_number(string $number): void
+    {
+        $payload = $this->validPayload(['communication_number' => $number]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('communication_number', $validator->errors()->toArray());
+    }
+
+    public static function invalidCommunicationNumberProvider(): array
+    {
+        return [
+            'missing leading 09'   => ['912345678'],
+            'wrong prefix'         => ['0812345678'],
+            'too short'            => ['091234567'],
+            'too long'             => ['09123456789'],
+            'contains letters'     => ['09abcd5678'],
+            'international format' => ['+963912345678'],
+        ];
+    }
+
+    public function test_passes_on_valid_syrian_communication_number(): void
+    {
+        $payload = $this->validPayload(['communication_number' => '0987654321']);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->passes(), $validator->errors()->__toString());
+    }
+
+    public function test_fails_when_payment_method_is_invalid(): void
+    {
+        $payload = $this->validPayload(['payment_method' => 'credit_card']);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('payment_method', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_booking_type_is_invalid(): void
+    {
+        $payload = $this->validPayload(['booking_type' => 'instant']);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('booking_type', $validator->errors()->toArray());
+    }
+
+    public function test_fails_when_required_fields_are_missing(): void
+    {
+        $validator = Validator::make([], $this->rules());
+
+        $this->assertTrue($validator->fails());
+
+        foreach ([
+                     'pickup_address',
+                     'destination_address',
+                     'departure_time',
+                     'available_seats',
+                     'price_per_seat',
+                     'payment_method',
+                     'booking_type',
+                     'communication_number',
+                     'vehicle_type',
+                 ] as $field) {
+            $this->assertArrayHasKey($field, $validator->errors()->toArray(), "Expected error for [{$field}]");
+        }
+    }
+
+    public function test_optional_route_fields_are_nullable(): void
+    {
+        $validator = Validator::make($this->validPayload(), $this->rules());
+
+        $this->assertTrue($validator->passes(), $validator->errors()->__toString());
+    }
+
+    public function test_passes_with_optional_route_fields_present(): void
+    {
+        $payload = $this->validPayload([
+            'route_index'    => 0,
+            'route_geometry' => ['type' => 'LineString', 'coordinates' => [[36.2765, 33.5138], [36.7137, 34.7324]]],
+            'distance'       => 12345.6,
+            'duration'       => 900.0,
+        ]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->passes(), $validator->errors()->__toString());
+    }
+
+    public function test_fails_when_notes_exceeds_max_length(): void
+    {
+        $payload = $this->validPayload(['notes' => str_repeat('a', 501)]);
+
+        $validator = Validator::make($payload, $this->rules());
+
+        $this->assertTrue($validator->fails());
+        $this->assertArrayHasKey('notes', $validator->errors()->toArray());
     }
 }

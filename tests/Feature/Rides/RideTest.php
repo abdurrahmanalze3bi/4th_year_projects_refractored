@@ -189,26 +189,20 @@ class RideTest extends TestCase
 
     private function seedAdminWallets(): void
     {
-        foreach (['primary', 'sycash'] as $type) {
+        foreach (['system_admin', 'sycash'] as $type) {
             $cfg  = config("admin.{$type}");
             $user = User::firstOrCreate(
                 ['email' => $cfg['email']],
-                [
-                    'first_name' => $type,
-                    'last_name'  => 'Admin',
-                    'password'   => bcrypt($cfg['password']),
-                    'gender'     => 'M',
-                    'address'    => 'دمشق',
-                    'status'     => true,
-                ]
+                ['first_name' => $type, 'last_name' => 'Admin', 'password' => bcrypt($cfg['password']), 'gender' => 'M', 'address' => 'دمشق', 'status' => true]
             );
 
             if (!Wallet::where('phone_number', $cfg['phone'])->exists()) {
                 $w = Wallet::create([
-                    'user_id'       => $user->id,
-                    'phone_number'  => $cfg['phone'],
-                    'wallet_number' => 'WLT-' . strtoupper($type) . '-' . Str::random(4),
-                    'balance'       => 10_000_000,
+                    'user_id'      => $user->id,
+                    'phone_number' => $cfg['phone'],
+                    'balance'      => 10_000_000,
+                    // wallet_number omitted — 'WLT-' . strtoupper($type) . '-' . Str::random(4)
+                    // is 20+ chars once $type is 'system_admin'; let the model auto-generate instead
                 ]);
                 $user->update(['wallet_id' => $w->id]);
             } else {

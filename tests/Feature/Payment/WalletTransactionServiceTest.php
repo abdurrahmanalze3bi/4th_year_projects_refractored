@@ -43,20 +43,18 @@ class WalletTransactionServiceTest extends TestCase
         $this->passengerPhone = '092' . rand(1000000, 9999999);
 
         // ── Admin wallets ─────────────────────────────────────────────────────
-        foreach (['primary', 'sycash'] as $type) {
+        foreach (['system_admin', 'sycash'] as $type) {
             $cfg  = config("admin.{$type}");
             $user = User::firstOrCreate(
                 ['email' => $cfg['email']],
-                ['first_name' => $type, 'last_name' => 'Admin',
-                    'password' => bcrypt($cfg['password']),
-                    'gender' => 'M', 'address' => 'دمشق', 'status' => true]
+                ['first_name' => $type, 'last_name' => 'Admin', 'password' => bcrypt($cfg['password']), 'gender' => 'M', 'address' => 'دمشق', 'status' => true]
             );
             if (!$user->wallet_id) {
                 $w = Wallet::create([
-                    'user_id'       => $user->id,
-                    'phone_number'  => $cfg['phone'],
-                    'wallet_number' => 'WLT-' . strtoupper($type) . '-001',
-                    'balance'       => 10_000_000,
+                    'user_id'      => $user->id,
+                    'phone_number' => $cfg['phone'],
+                    'balance'      => 10_000_000,
+                    // wallet_number omitted — 'WLT-SYSTEM_ADMIN-001' is 20 chars, over the 16-char column
                 ]);
                 $user->update(['wallet_id' => $w->id]);
             }

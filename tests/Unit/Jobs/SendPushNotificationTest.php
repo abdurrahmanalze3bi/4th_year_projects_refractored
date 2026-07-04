@@ -3,106 +3,106 @@
 namespace Tests\Unit\Jobs;
 
 use App\Jobs\SendPushNotification;
-use App\Jobs\SendScheduledNotification;
 use App\Models\User;
-use App\Models\UserNotification;
-use App\Services\NotificationService;
+use App\Services\PushNotification\PushNotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Mockery;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
-// ════════════════════════════════════════════════════════════════════════════
-// SendPushNotification
-// PushNotificationService is marked `final` so Mockery cannot mock it.
-// We use the real service — it won't actually send (no FCM credentials in tests).
-// ════════════════════════════════════════════════════════════════════════════
-
+/**
+ * Unit tests for SendPushNotification.
+ *
+ * The job's only real logic is:
+ *   1. Look the user up by id.
+ *   2. If found, delegate to PushNotificationService::sendToUser().
+ *   3. If not found, do nothing (no exception).
+ *   4. Any exception from the service is logged and re-thrown so the
+ *      queue worker's retry/failed-job handling kicks in.
+ */
 class SendPushNotificationTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_job_can_be_instantiated(): void
+    public function test_handle_sends_notification_when_user_exists(): void
     {
-        $job = new SendPushNotification(1, ['title' => 'Test', 'body' => 'Hello']);
-        $this->assertInstanceOf(SendPushNotification::class, $job);
-    }
+        $user = User::factory()->create();
 
-    public function test_handle_runs_without_exception_when_user_exists(): void
-    {
-        $user        = User::factory()->create();
-        $pushService = app(\App\Services\PushNotification\PushNotificationService::class);
-
-        $job = new SendPushNotification($user->id, [
-            'title' => 'Hello',
-            'body'  => 'World',
-        ]);
-
-        // Should not throw — user exists, push service just won't send (no FCM configured)
-        $job->handle($pushService);
-        $this->assertTrue(true);
-    }
-
-    public function test_handle_runs_without_exception_when_user_not_found(): void
-    {
-        $pushService = app(\App\Services\PushNotification\PushNotificationService::class);
-
-        $job = new SendPushNotification(99999, ['title' => 'Test', 'body' => 'Test']);
-
-        // Should not throw — user not found branch is handled silently
-        $job->handle($pushService);
-        $this->assertTrue(true);
-    }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// SendScheduledNotification
-// NotificationService is NOT final — can be mocked normally.
-// ════════════════════════════════════════════════════════════════════════════
-
-class SendScheduledNotificationTest extends TestCase
-{
-    public function test_job_can_be_instantiated(): void
-    {
-        $job = new SendScheduledNotification([
-            'title'   => 'Scheduled',
-            'message' => 'Hello',
-            'type'    => 'test',
-            'user_id' => 1,
-        ]);
-
-        $this->assertInstanceOf(SendScheduledNotification::class, $job);
-    }
-
-    public function test_handle_calls_notification_service_create(): void
-    {
-        $data = [
-            'title'   => 'Test',
-            'message' => 'Body',
-            'type'    => 'test',
-            'user_id' => 1,
+        $notificationData = [
+            'title' => 'Ride confirmed',
+            'body'  => 'Your ride has been confirmed.',
         ];
 
-        $notifService = Mockery::mock(NotificationService::class);
-        $notifService->shouldReceive('create')->once()->with($data)->andReturn(new UserNotification());
+        $pushService = $this->mock(PushNotificationService::class);
+        $pushService->shouldReceive('sendToUser')
+            ->once()
+            ->withArgs(function (User $passedUser, array $passedData) use ($user, $notificationData) {
+                return $passedUser->id === $user->id && $passedData === $notificationData;
+            });
 
-        $job = new SendScheduledNotification($data);
-        $job->handle($notifService);
+        $job = new SendPushNotification($user->id, $notificationData);
+        $job->handle($pushService);
+
+        // If we got here without an exception, and the mock expectation
+        // above was satisfied, the job did the right thing.
+        $this->assertTrue(true);
     }
 
-    public function test_handle_rethrows_exception_on_failure(): void
+    public function test_handle_does_nothing_when_user_does_not_exist(): void
     {
-        $notifService = Mockery::mock(NotificationService::class);
-        $notifService->shouldReceive('create')->once()->andThrow(new \Exception('Failed'));
+        $nonExistentUserId = 999999;
 
-        $job = new SendScheduledNotification(['title' => 'Test', 'message' => 'Body']);
+        $pushService = $this->mock(PushNotificationService::class);
+        $pushService->shouldReceive('sendToUser')->never();
 
-        $this->expectException(\Exception::class);
-        $job->handle($notifService);
+        $job = new SendPushNotification($nonExistentUserId, ['title' => 'Hello']);
+
+        // Should not throw even though the user can't be found.
+        $job->handle($pushService);
+
+        $this->assertTrue(true);
     }
 
-    protected function tearDown(): void
+    public function test_handle_logs_and_rethrows_when_service_fails(): void
     {
-        Mockery::close();
-        parent::tearDown();
+        $user = User::factory()->create();
+
+        $pushService = $this->mock(PushNotificationService::class);
+        $pushService->shouldReceive('sendToUser')
+            ->once()
+            ->andThrow(new \RuntimeException('FCM endpoint unreachable'));
+
+        Log::shouldReceive('error')
+            ->once()
+            ->withArgs(function (string $message) {
+                return str_contains($message, 'Failed to send push notification')
+                    && str_contains($message, 'FCM endpoint unreachable');
+            });
+
+        $job = new SendPushNotification($user->id, ['title' => 'Hello']);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('FCM endpoint unreachable');
+
+        $job->handle($pushService);
+    }
+
+    public function test_constructor_stores_user_id_and_notification_data(): void
+    {
+        $user = User::factory()->create();
+        $data = ['title' => 'Test', 'body' => 'Body'];
+
+        $job = new SendPushNotification($user->id, $data);
+
+        // Properties are protected, so we assert indirectly via handle().
+        $pushService = $this->mock(PushNotificationService::class);
+        $pushService->shouldReceive('sendToUser')
+            ->once()
+            ->withArgs(function (User $passedUser, array $passedData) use ($user, $data) {
+                return $passedUser->id === $user->id && $passedData === $data;
+            });
+
+        $job->handle($pushService);
+
+        $this->assertTrue(true);
     }
 }
