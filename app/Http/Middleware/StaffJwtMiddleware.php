@@ -18,20 +18,31 @@ final class StaffJwtMiddleware
         private readonly JwtService      $jwtService,
     ) {}
 
-    public function handle(Request $request, Closure $next, ?string $roles = null): Response
+    /**
+     * FIX: Laravel invokes middleware parameters as separate positional
+     * arguments, not as one comma-joined string — `staff:admin,system_admin`
+     * calls handle($request, $next, 'admin', 'system_admin'). The previous
+     * `?string $roles = null` signature only ever received 'admin'; PHP
+     * silently drops extra arguments a function doesn't declare, so any
+     * route requiring more than one role effectively enforced only the
+     * first role listed. That locked out every other listed role (e.g.
+     * system_admin on `staff:admin,system_admin` routes), which is why the
+     * primary admin got 403'd on logout/wallet/dashboard/reports/etc.
+     */
+    public function handle(Request $request, Closure $next, string ...$roles): Response
     {
         $token = $this->extractToken($request);
         if (!$token) {
             return $this->fail('TOKEN_MISSING', 'Staff access token is required.');
         }
 
-        // ── Try staff token first ────────────────────────────────────────
+        // ─── Try staff token first ───────────────────────────────────────
         $staffPayload = $this->staffJwtService->decodeToken($token);
         if ($staffPayload) {
             return $this->handleStaffToken($request, $next, $staffPayload, $roles);
         }
 
-        // ── Fall back to admin token (system admin = system_admin) ───────
+        // ─── Fall back to admin token (system admin = system_admin) ───
         $adminPayload = $this->jwtService->decodeToken($token);
         if ($adminPayload) {
             return $this->handleAdminToken($request, $next, $adminPayload, $roles);
@@ -40,9 +51,9 @@ final class StaffJwtMiddleware
         return $this->fail('TOKEN_INVALID', 'Invalid or expired token.');
     }
 
-    // ── Staff JWT path ────────────────────────────────────────────────────
+    // ─── Staff JWT path ────────────────────────────────────────────────
 
-    private function handleStaffToken(Request $request, Closure $next, array $payload, ?string $roles): Response
+    private function handleStaffToken(Request $request, Closure $next, array $payload, array $roles): Response
     {
         if (($payload['type'] ?? null) !== 'access') {
             return $this->fail('TOKEN_TYPE_INVALID', 'Provide the access token, not the refresh token.');
@@ -69,11 +80,9 @@ final class StaffJwtMiddleware
         return $next($request);
     }
 
-    // ── Admin JWT path (system admin token = system_admin access) ────────
+    // ─── Admin JWT path (system admin token = system_admin access) ──────
 
-    // app/Http/Middleware/StaffJwtMiddleware.php
-
-    private function handleAdminToken(Request $request, Closure $next, array $payload, ?string $roles): Response
+    private function handleAdminToken(Request $request, Closure $next, array $payload, array $roles): Response
     {
         if (($payload['type'] ?? null) !== 'access') {
             return $this->fail('TOKEN_TYPE_INVALID', 'Provide the access token, not the refresh token.');
@@ -106,7 +115,7 @@ final class StaffJwtMiddleware
             return $this->forbidden($roles);
         }
 
-        // ✅ FIX: set user resolver so $request->user() works in admin controllers
+        // set user resolver so $request->user() works in admin controllers
         // (AdminDashboardController::logout() calls $request->user()->id)
         $request->setUserResolver(fn () => $user);
 
@@ -114,12 +123,16 @@ final class StaffJwtMiddleware
         return $next($request);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // ─── Helpers ──────────────────────────────────────────────────────
 
-    private function checkRoles(string $actualRole, ?string $allowedRoles): bool
+    private function checkRoles(string $actualRole, array $allowedRoles): bool
     {
-        if ($allowedRoles === null) return true;
-        $allowed = array_map('trim', explode(',', $allowedRoles));
+        if (empty($allowedRoles)) {
+            return true;
+        }
+
+        $allowed = array_map('trim', $allowedRoles);
+
         return in_array($actualRole, $allowed, strict: true);
     }
 
@@ -134,12 +147,12 @@ final class StaffJwtMiddleware
         return response()->json(['status' => 'error', 'code' => $code, 'message' => $message], 401);
     }
 
-    private function forbidden(?string $roles): Response
+    private function forbidden(array $roles): Response
     {
         return response()->json([
             'status'  => 'error',
             'code'    => 'FORBIDDEN',
-            'message' => 'This action requires one of: ' . $roles,
+            'message' => 'This action requires one of: ' . implode(', ', $roles),
         ], 403);
     }
 }

@@ -12,12 +12,11 @@ use Tests\TestCase;
 /**
  * Unit tests for SendPushNotification.
  *
- * The job's only real logic is:
- *   1. Look the user up by id.
- *   2. If found, delegate to PushNotificationService::sendToUser().
- *   3. If not found, do nothing (no exception).
- *   4. Any exception from the service is logged and re-thrown so the
- *      queue worker's retry/failed-job handling kicks in.
+ * PushNotificationService (and its collaborators) are all `final`, so they
+ * cannot be Mockery-doubled and still satisfy handle()'s type-hinted
+ * parameter. These tests use the real service instead — it degrades safely
+ * when FCM isn't configured (see FcmSenderServiceTest) — and use Log
+ * expectations / Reflection where verification is needed.
  */
 class SendPushNotificationTest extends TestCase
 {
@@ -27,23 +26,13 @@ class SendPushNotificationTest extends TestCase
     {
         $user = User::factory()->create();
 
-        $notificationData = [
-            'title' => 'Ride confirmed',
-            'body'  => 'Your ride has been confirmed.',
-        ];
-
-        $pushService = $this->mock(PushNotificationService::class);
-        $pushService->shouldReceive('sendToUser')
+        Log::shouldReceive('info')
             ->once()
-            ->withArgs(function (User $passedUser, array $passedData) use ($user, $notificationData) {
-                return $passedUser->id === $user->id && $passedData === $notificationData;
-            });
+            ->withArgs(fn (string $message) => str_contains($message, "Push notification sent to user {$user->id}"));
 
-        $job = new SendPushNotification($user->id, $notificationData);
-        $job->handle($pushService);
+        $job = new SendPushNotification($user->id, ['title' => 'Ride confirmed', 'body' => 'Your ride has been confirmed.']);
+        $job->handle(app(PushNotificationService::class));
 
-        // If we got here without an exception, and the mock expectation
-        // above was satisfied, the job did the right thing.
         $this->assertTrue(true);
     }
 
@@ -51,13 +40,13 @@ class SendPushNotificationTest extends TestCase
     {
         $nonExistentUserId = 999999;
 
-        $pushService = $this->mock(PushNotificationService::class);
-        $pushService->shouldReceive('sendToUser')->never();
+        Log::shouldReceive('info')->never();
+        Log::shouldReceive('error')->never();
 
         $job = new SendPushNotification($nonExistentUserId, ['title' => 'Hello']);
 
         // Should not throw even though the user can't be found.
-        $job->handle($pushService);
+        $job->handle(app(PushNotificationService::class));
 
         $this->assertTrue(true);
     }
@@ -66,24 +55,26 @@ class SendPushNotificationTest extends TestCase
     {
         $user = User::factory()->create();
 
-        $pushService = $this->mock(PushNotificationService::class);
-        $pushService->shouldReceive('sendToUser')
+        // sendToUser() on the real service completes fine (no tokens → returns
+        // false, no exception). We force the failure at the very next line in
+        // the job instead — Log::info() — which sits inside the same try block
+        // and lets us exercise the catch/rethrow path without touching the
+        // final PushNotificationService class at all.
+        Log::shouldReceive('info')
             ->once()
             ->andThrow(new \RuntimeException('FCM endpoint unreachable'));
 
         Log::shouldReceive('error')
             ->once()
-            ->withArgs(function (string $message) {
-                return str_contains($message, 'Failed to send push notification')
-                    && str_contains($message, 'FCM endpoint unreachable');
-            });
+            ->withArgs(fn (string $message) => str_contains($message, 'Failed to send push notification')
+                && str_contains($message, 'FCM endpoint unreachable'));
 
         $job = new SendPushNotification($user->id, ['title' => 'Hello']);
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('FCM endpoint unreachable');
 
-        $job->handle($pushService);
+        $job->handle(app(PushNotificationService::class));
     }
 
     public function test_constructor_stores_user_id_and_notification_data(): void
@@ -93,16 +84,16 @@ class SendPushNotificationTest extends TestCase
 
         $job = new SendPushNotification($user->id, $data);
 
-        // Properties are protected, so we assert indirectly via handle().
-        $pushService = $this->mock(PushNotificationService::class);
-        $pushService->shouldReceive('sendToUser')
-            ->once()
-            ->withArgs(function (User $passedUser, array $passedData) use ($user, $data) {
-                return $passedUser->id === $user->id && $passedData === $data;
-            });
+        // Properties are protected — inspect directly instead of inferring
+        // via a mocked collaborator (which isn't possible for this final class).
+        $reflection = new \ReflectionClass($job);
 
-        $job->handle($pushService);
+        $userIdProperty = $reflection->getProperty('userId');
+        $userIdProperty->setAccessible(true);
+        $this->assertEquals($user->id, $userIdProperty->getValue($job));
 
-        $this->assertTrue(true);
+        $dataProperty = $reflection->getProperty('notificationData');
+        $dataProperty->setAccessible(true);
+        $this->assertEquals($data, $dataProperty->getValue($job));
     }
 }

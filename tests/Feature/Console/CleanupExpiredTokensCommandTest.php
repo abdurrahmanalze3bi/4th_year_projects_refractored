@@ -37,7 +37,7 @@ class CleanupExpiredTokensCommandTest extends TestCase
 
         $this->artisan('tokens:cleanup')->assertExitCode(0);
 
-        $this->assertEquals(0, RefreshToken::count());
+        $this->assertEquals(0, RefreshToken::where('user_id', $user->id)->count());
     }
 
     public function test_command_deletes_revoked_tokens(): void

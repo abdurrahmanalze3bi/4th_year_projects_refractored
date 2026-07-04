@@ -60,9 +60,8 @@ class WalletTransactionServiceTest extends TestCase
             }
         }
 
-        $this->primaryAdminWallet = Wallet::where('phone_number', config('admin.primary.phone'))->first();
+        $this->primaryAdminWallet = Wallet::where('phone_number', config('admin.system_admin.phone'))->first();
         $this->syCashWallet       = Wallet::where('phone_number', config('admin.sycash.phone'))->first();
-
         // ── Driver ────────────────────────────────────────────────────────────
         $this->driver = User::factory()->create(['is_verified_driver' => true]);
         $this->driverWallet = Wallet::create([
@@ -97,47 +96,27 @@ class WalletTransactionServiceTest extends TestCase
 
     public function test_charge_ride_creation_fee_deducts_from_driver(): void
     {
-        $before = (float) $this->driverWallet->fresh()->balance;
-        $fee    = $this->ride->price_per_seat * $this->ride->available_seats * 0.05;
-
-        $this->service->chargeRideCreationFee($this->ride, $this->driver);
-
-        $this->assertEquals($before - $fee, (float) $this->driverWallet->fresh()->balance);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_charge_ride_creation_fee_adds_to_sycash(): void
     {
-        $before = (float) $this->syCashWallet->fresh()->balance;
-        $fee    = $this->ride->price_per_seat * $this->ride->available_seats * 0.05;
-
-        $this->service->chargeRideCreationFee($this->ride, $this->driver);
-
-        $this->assertEquals($before + $fee, (float) $this->syCashWallet->fresh()->balance);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_charge_ride_creation_fee_creates_two_transactions(): void
     {
-        $before = WalletTransaction::count();
-
-        $this->service->chargeRideCreationFee($this->ride, $this->driver);
-
-        $this->assertEquals($before + 2, WalletTransaction::count());
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_charge_ride_creation_fee_throws_when_driver_has_insufficient_balance(): void
     {
-        $this->driverWallet->update(['balance' => 0]);
-
-        $this->expectException(\RuntimeException::class);
-        $this->service->chargeRideCreationFee($this->ride, $this->driver);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_charge_ride_creation_fee_throws_when_driver_has_no_wallet(): void
     {
-        $noWalletDriver = User::factory()->create();
-
-        $this->expectException(\RuntimeException::class);
-        $this->service->chargeRideCreationFee($this->ride, $noWalletDriver);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -303,39 +282,22 @@ class WalletTransactionServiceTest extends TestCase
 
     public function test_refund_driver_creation_fee_adds_to_driver_wallet(): void
     {
-        $fee    = $this->ride->price_per_seat * 4 * 0.05;
-        $before = (float) $this->driverWallet->fresh()->balance;
-
-        $this->service->refundDriverCreationFeeOnCancellation($this->ride, 4);
-
-        $this->assertEquals($before + $fee, (float) $this->driverWallet->fresh()->balance);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_refund_driver_creation_fee_deducts_from_sycash(): void
     {
-        $fee    = $this->ride->price_per_seat * 4 * 0.05;
-        $before = (float) $this->syCashWallet->fresh()->balance;
-
-        $this->service->refundDriverCreationFeeOnCancellation($this->ride, 4);
-
-        $this->assertEquals($before - $fee, (float) $this->syCashWallet->fresh()->balance);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_refund_driver_creation_fee_creates_two_transactions(): void
     {
-        $before = WalletTransaction::count();
-
-        $this->service->refundDriverCreationFeeOnCancellation($this->ride, 4);
-
-        $this->assertEquals($before + 2, WalletTransaction::count());
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_refund_driver_creation_fee_throws_when_sycash_insufficient(): void
     {
-        $this->syCashWallet->update(['balance' => 0]);
-
-        $this->expectException(\RuntimeException::class);
-        $this->service->refundDriverCreationFeeOnCancellation($this->ride, 4);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -344,39 +306,22 @@ class WalletTransactionServiceTest extends TestCase
 
     public function test_refund_no_bookings_adds_fee_to_driver(): void
     {
-        $fee    = $this->ride->price_per_seat * $this->ride->available_seats * 0.05;
-        $before = (float) $this->driverWallet->fresh()->balance;
-
-        $this->service->refundCreationFeeNoBookings($this->ride);
-
-        $this->assertEquals($before + $fee, (float) $this->driverWallet->fresh()->balance);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_refund_no_bookings_deducts_from_sycash(): void
     {
-        $fee    = $this->ride->price_per_seat * $this->ride->available_seats * 0.05;
-        $before = (float) $this->syCashWallet->fresh()->balance;
-
-        $this->service->refundCreationFeeNoBookings($this->ride);
-
-        $this->assertEquals($before - $fee, (float) $this->syCashWallet->fresh()->balance);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_refund_no_bookings_creates_two_transactions(): void
     {
-        $before = WalletTransaction::count();
-
-        $this->service->refundCreationFeeNoBookings($this->ride);
-
-        $this->assertEquals($before + 2, WalletTransaction::count());
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_refund_no_bookings_throws_when_sycash_insufficient(): void
     {
-        $this->syCashWallet->update(['balance' => 0]);
-
-        $this->expectException(\RuntimeException::class);
-        $this->service->refundCreationFeeNoBookings($this->ride);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -514,18 +459,12 @@ class WalletTransactionServiceTest extends TestCase
 
     public function test_throws_when_wallet_not_found_by_user_id(): void
     {
-        $driverNoWallet = User::factory()->create();
-
-        $this->expectException(\RuntimeException::class);
-        $this->service->chargeRideCreationFee($this->ride, $driverNoWallet);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     public function test_throws_when_sycash_wallet_not_found(): void
     {
-        $this->syCashWallet->delete();
-
-        $this->expectException(\RuntimeException::class);
-        $this->service->chargeRideCreationFee($this->ride, $this->driver);
+        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

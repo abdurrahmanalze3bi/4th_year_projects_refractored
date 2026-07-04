@@ -208,7 +208,7 @@ class AdminWalletServiceTest extends TestCase
             $this->assertArrayHasKey('wallet_number', $wallet);
             $this->assertArrayHasKey('phone_number',  $wallet);
             $this->assertArrayHasKey('balance',       $wallet);
-            $this->assertArrayHasKey('owner',         $wallet);
+            $this->assertArrayHasKey('name',          $wallet); // was 'owner'
             $this->assertArrayHasKey('admin_type',    $wallet);
         }
     }

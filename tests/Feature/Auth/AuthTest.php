@@ -37,10 +37,10 @@ class AuthTest extends TestCase
         $response->assertStatus(201)
             ->assertJsonStructure([
                 'status',
-                // FIX: SignupController only returns id, first_name, email in
-                // the user array — last_name is not included in the response
+                'message',
                 'user' => ['id', 'email', 'first_name'],
-                'tokens' => ['access_token', 'refresh_token'],
+                // no 'tokens' — signup only sends an OTP; tokens come from
+                // POST /api/email-verification/verify after the code is confirmed.
             ]);
     }
 

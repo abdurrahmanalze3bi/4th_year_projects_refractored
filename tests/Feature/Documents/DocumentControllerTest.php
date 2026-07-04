@@ -33,15 +33,16 @@ class DocumentControllerTest extends TestCase
 
     public function test_upload_requires_authentication(): void
     {
-        $this->postJson('/api/documents')->assertStatus(401);
+        $this->postJson('/api/profile/documents')->assertStatus(401); // was '/api/documents'
     }
 
     // ── Successful uploads ────────────────────────────────────────────────────
 
+
     public function test_upload_face_id_succeeds(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [   // was '/api/documents'
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->image('face.jpg'),
             ], ['Accept' => 'application/json'])

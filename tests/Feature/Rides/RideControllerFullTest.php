@@ -294,7 +294,7 @@ class RideControllerFullTest extends TestCase
         $booking = $this->makeBooking('pending', $ride);
 
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/accept")
+            ->postJson("/api/bookings/{$booking->id}/accept")
             ->assertStatus(200);
 
         $this->assertEquals('confirmed', $booking->fresh()->status);
@@ -304,7 +304,7 @@ class RideControllerFullTest extends TestCase
     {
         $booking = $this->makeBooking('confirmed');
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/accept")
+            ->postJson("/api/bookings/{$booking->id}/accept")
             ->assertStatus(422);
     }
 
@@ -316,7 +316,7 @@ class RideControllerFullTest extends TestCase
         $booking = $this->makeBooking('pending', $ride);
 
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/reject")
+            ->postJson("/api/bookings/{$booking->id}/reject")
             ->assertStatus(200);
 
         $this->assertEquals('cancelled', $booking->fresh()->status);
@@ -358,7 +358,7 @@ class RideControllerFullTest extends TestCase
         $booking = $this->makeBooking('confirmed', $ride);
 
         $this->withToken($this->passengerToken)
-            ->postJson("/api/rides/{$booking->id}/passenger-confirm")
+            ->postJson("/api/bookings/{$booking->id}/passenger-confirm")
             ->assertStatus(200)
             ->assertJsonPath('status', 'success');
     }
@@ -389,20 +389,22 @@ class RideControllerFullTest extends TestCase
     {
         $this->makeBooking();
         $this->withToken($this->passengerToken)
-            ->getJson('/api/my-bookings')
+            ->getJson('/api/bookings')
             ->assertStatus(200)
             ->assertJsonPath('success', true);
     }
 
     public function test_get_my_bookings_requires_auth(): void
     {
-        $this->getJson('/api/my-bookings')->assertStatus(401);
+        $this->getJson('/api/bookings')
+            ->assertStatus(401);
     }
 
     public function test_my_bookings_alias_returns_passenger_bookings(): void
     {
         $this->makeBooking();
-        $this->withToken($this->passengerToken)->getJson('/api/my-bookings')->assertStatus(200);
+        $this->withToken($this->passengerToken)->getJson('/api/bookings')
+            ->assertStatus(200);
     }
 
     // ── getRouteOptions ───────────────────────────────────────────────────────────

@@ -83,16 +83,20 @@ class OtpTest extends TestCase
 
     public function test_otp_is_marked_verified_after_successful_verify(): void
     {
-        Otp::create([
-            'phone_number' => '+963983337214', 'otp_code' => '654321',
-            'type' => 'E-PAYMENT', 'expires_at' => now()->addMinutes(10),
-            'is_verified' => false, 'attempts' => 0,
+        $otp = Otp::create([
+            'phone_number' => '+963983337214',
+            'otp_code'     => '654321',
+            'type'         => 'E-PAYMENT',
+            'expires_at'   => now()->addMinutes(10),
+            'is_verified'  => false,
+            'attempts'     => 0,
         ]);
 
-        $this->postJson('/api/otp/verify', ['phone_number' => '0983337214', 'otp_code' => '654321']);
+        $this->postJson('/api/otp/verify', ['phone_number' => '0983337214', 'otp_code' => '654321'])
+            ->assertStatus(200)
+            ->assertJsonPath('success', true);
 
-        $otp = Otp::where('phone_number', '+963983337214')->latest()->first();
-        $this->assertTrue((bool) $otp->is_verified);
+        $this->assertTrue((bool) $otp->fresh()->is_verified);
     }
 
     public function test_otp_code_must_be_6_digits(): void

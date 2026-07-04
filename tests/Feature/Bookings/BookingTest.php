@@ -150,7 +150,7 @@ class BookingTest extends TestCase
         ]);
 
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/accept")
+            ->postJson("/api/bookings/{$booking->id}/accept")
             ->assertStatus(200);
 
         $this->assertDatabaseHas('bookings', ['id' => $booking->id, 'status' => 'confirmed']);
@@ -166,7 +166,7 @@ class BookingTest extends TestCase
         ]);
 
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/reject")
+            ->postJson("/api/bookings/{$booking->id}/reject")
             ->assertStatus(200);
 
         $this->assertDatabaseHas('bookings', ['id' => $booking->id, 'status' => 'cancelled']);
@@ -179,7 +179,7 @@ class BookingTest extends TestCase
             'seats' => 1, 'status' => 'confirmed', 'communication_number' => '0912345678',
         ]);
 
-        $this->withToken($this->passengerToken)->getJson('/api/my-bookings')->assertStatus(200);
+        $this->withToken($this->passengerToken)->getJson('/api/bookings')->assertStatus(200);
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────

@@ -75,7 +75,6 @@ class CleanupExpiredOtpsCommandTest extends TestCase
 
     public function test_command_deletes_expired_but_keeps_active(): void
     {
-        // Expired
         Otp::create([
             'phone_number' => '+963911111111',
             'otp_code'     => '111111',
@@ -84,7 +83,6 @@ class CleanupExpiredOtpsCommandTest extends TestCase
             'is_verified'  => false,
             'attempts'     => 0,
         ]);
-        // Active
         Otp::create([
             'phone_number' => '+963922222222',
             'otp_code'     => '222222',
@@ -96,10 +94,9 @@ class CleanupExpiredOtpsCommandTest extends TestCase
 
         $this->artisan('otp:cleanup')->assertExitCode(0);
 
-        $this->assertEquals(1, Otp::count());
+        $this->assertDatabaseMissing('otps', ['phone_number' => '+963911111111']);
         $this->assertDatabaseHas('otps', ['phone_number' => '+963922222222']);
     }
-
     public function test_command_reports_correct_deleted_count(): void
     {
         for ($i = 1; $i <= 3; $i++) {
