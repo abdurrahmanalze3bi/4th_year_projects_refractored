@@ -463,7 +463,7 @@ class WalletTransactionService
 
         $syCashWallet  = $this->lockWalletByPhone(config('admin.sycash.phone'));
         $driverWallet  = $this->lockWalletByUserId($ride->driver_id);
-        $primaryWallet = $this->lockWalletByPhone(config('admin.primary.phone'));
+        $primaryWallet = $this->lockWalletByPhone(config('admin.system_admin.phone'));
 
         $this->assertSufficientBalance(
             $syCashWallet,

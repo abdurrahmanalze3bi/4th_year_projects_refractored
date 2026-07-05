@@ -12,8 +12,8 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        $schedule->command('tokens:cleanup')->daily();
-        $schedule->command('staff-tokens:cleanup')->daily();
+        $schedule->command('tokens:cleanup')->daily()->onOneServer();
+        $schedule->command('staff-tokens:cleanup')->daily()->onOneServer();
     }
     /**
      * Register the commands for the application.

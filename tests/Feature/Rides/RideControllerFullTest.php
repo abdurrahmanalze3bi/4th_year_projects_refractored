@@ -369,7 +369,7 @@ class RideControllerFullTest extends TestCase
         $booking = $this->makeBooking('confirmed', $ride);
 
         $this->withToken($this->passengerToken)
-            ->postJson("/api/rides/{$booking->id}/passenger-confirm")
+            ->postJson("/api/bookings/{$booking->id}/passenger-confirm") // was /api/rides/...
             ->assertStatus(400);
     }
 
@@ -379,7 +379,7 @@ class RideControllerFullTest extends TestCase
         $booking = $this->makeBooking('confirmed', $ride);
 
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/passenger-confirm")
+            ->postJson("/api/bookings/{$booking->id}/passenger-confirm") // was /api/rides/...
             ->assertStatus(400);
     }
 

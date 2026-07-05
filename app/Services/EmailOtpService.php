@@ -116,7 +116,13 @@ final class EmailOtpService implements EmailOtpServiceInterface
             ) >= self::MAX_ATTEMPTS;
     }
 
-    private function isTestingMode(): bool {
-        return env('EMAIL_OTP_MODE', 'production') === 'testing';
+    private function isTestingMode(): bool
+    {
+        // env() resolves via $_ENV/$_SERVER first, which are populated once at
+        // boot from .env and are NOT updated by a later putenv() call (e.g. in
+        // a test's setUp()). getenv() reads the live process env table directly,
+        // which putenv() does update immediately — check it first.
+        return getenv('EMAIL_OTP_MODE') === 'testing'
+            || env('EMAIL_OTP_MODE', 'production') === 'testing';
     }
 }

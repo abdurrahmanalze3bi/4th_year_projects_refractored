@@ -33627,16 +33627,15 @@ class DocumentControllerTest extends TestCase
 
     public function test_upload_requires_authentication(): void
     {
-        $this->postJson('/api/profile/documents')->assertStatus(401); // was '/api/documents'
+        $this->postJson('/api/profile/documents')->assertStatus(401);
     }
 
     // â”€â”€ Successful uploads â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-
     public function test_upload_face_id_succeeds(): void
     {
         $this->withToken($this->token)
-            ->post('/api/profile/documents', [   // was '/api/documents'
+            ->post('/api/profile/documents', [
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->image('face.jpg'),
             ], ['Accept' => 'application/json'])
@@ -33647,7 +33646,7 @@ class DocumentControllerTest extends TestCase
     public function test_upload_back_id_succeeds(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'back_id',
                 'file' => UploadedFile::fake()->image('back.jpg'),
             ], ['Accept' => 'application/json'])
@@ -33657,7 +33656,7 @@ class DocumentControllerTest extends TestCase
     public function test_upload_license_succeeds(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'license',
                 'file' => UploadedFile::fake()->image('license.jpg'),
             ], ['Accept' => 'application/json'])
@@ -33667,19 +33666,19 @@ class DocumentControllerTest extends TestCase
     public function test_upload_mechanic_card_succeeds(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'mechanic_card',
                 'file' => UploadedFile::fake()->image('card.jpg'),
             ], ['Accept' => 'application/json'])
             ->assertStatus(200);
     }
 
-    // â”€â”€ Validation failures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Validation failures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public function test_upload_with_invalid_type_fails_with_422(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'passport',
                 'file' => UploadedFile::fake()->image('doc.jpg'),
             ], ['Accept' => 'application/json'])
@@ -33689,14 +33688,14 @@ class DocumentControllerTest extends TestCase
     public function test_upload_without_file_fails_with_422(): void
     {
         $this->withToken($this->token)
-            ->postJson('/api/documents', ['type' => 'face_id'])
+            ->postJson('/api/profile/documents', ['type' => 'face_id'])
             ->assertStatus(422);
     }
 
     public function test_upload_without_type_fails_with_422(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'file' => UploadedFile::fake()->image('doc.jpg'),
             ], ['Accept' => 'application/json'])
             ->assertStatus(422);
@@ -33705,7 +33704,7 @@ class DocumentControllerTest extends TestCase
     public function test_upload_pdf_file_is_rejected(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf'),
             ], ['Accept' => 'application/json'])
@@ -33717,7 +33716,7 @@ class DocumentControllerTest extends TestCase
     public function test_upload_persists_photo_to_database(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->image('face.jpg'),
             ], ['Accept' => 'application/json']);
@@ -33730,12 +33729,12 @@ class DocumentControllerTest extends TestCase
 
     public function test_uploading_same_type_twice_replaces_previous(): void
     {
-        $this->withToken($this->token)->post('/api/documents', [
+        $this->withToken($this->token)->post('/api/profile/documents', [
             'type' => 'face_id',
             'file' => UploadedFile::fake()->image('face1.jpg'),
         ], ['Accept' => 'application/json']);
 
-        $this->withToken($this->token)->post('/api/documents', [
+        $this->withToken($this->token)->post('/api/profile/documents', [
             'type' => 'face_id',
             'file' => UploadedFile::fake()->image('face2.jpg'),
         ], ['Accept' => 'application/json']);
@@ -33754,7 +33753,7 @@ class DocumentControllerTest extends TestCase
             'is_verified_passenger' => true,
         ]);
 
-        $this->withToken($this->token)->post('/api/documents', [
+        $this->withToken($this->token)->post('/api/profile/documents', [
             'type' => 'face_id',
             'file' => UploadedFile::fake()->image('face.jpg'),
         ], ['Accept' => 'application/json']);
@@ -33770,19 +33769,19 @@ class DocumentControllerTest extends TestCase
         $this->user->update(['verification_status' => 'pending']);
 
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->image('face.jpg'),
             ], ['Accept' => 'application/json'])
             ->assertStatus(403);
     }
 
-    // â”€â”€ Response shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Response shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public function test_response_contains_data_with_id_url_type(): void
     {
         $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->image('face.jpg'),
             ], ['Accept' => 'application/json'])
@@ -33795,7 +33794,7 @@ class DocumentControllerTest extends TestCase
     public function test_response_type_matches_requested_type(): void
     {
         $response = $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'back_id',
                 'file' => UploadedFile::fake()->image('back.jpg'),
             ], ['Accept' => 'application/json']);
@@ -33806,7 +33805,7 @@ class DocumentControllerTest extends TestCase
     public function test_response_url_is_a_string(): void
     {
         $response = $this->withToken($this->token)
-            ->post('/api/documents', [
+            ->post('/api/profile/documents', [
                 'type' => 'face_id',
                 'file' => UploadedFile::fake()->image('face.jpg'),
             ], ['Accept' => 'application/json']);
@@ -35169,7 +35168,7 @@ class RideControllerFullTest extends TestCase
     {
         $booking = $this->makeBooking('confirmed');
         $this->withToken($this->driverToken)
-            ->postJson("/api/rides/{$booking->id}/accept")
+            ->postJson("/api/bookings/{$booking->id}/accept")
             ->assertStatus(422);
     }
 
@@ -35223,7 +35222,7 @@ class RideControllerFullTest extends TestCase
         $booking = $this->makeBooking('confirmed', $ride);
 
         $this->withToken($this->passengerToken)
-            ->postJson("/api/rides/{$booking->id}/passenger-confirm")
+            ->postJson("/api/bookings/{$booking->id}/passenger-confirm")
             ->assertStatus(200)
             ->assertJsonPath('status', 'success');
     }
@@ -35261,13 +35260,15 @@ class RideControllerFullTest extends TestCase
 
     public function test_get_my_bookings_requires_auth(): void
     {
-        $this->getJson('/api/my-bookings')->assertStatus(401);
+        $this->getJson('/api/bookings')
+            ->assertStatus(401);
     }
 
     public function test_my_bookings_alias_returns_passenger_bookings(): void
     {
         $this->makeBooking();
-        $this->withToken($this->passengerToken)->getJson('/api/my-bookings')->assertStatus(200);
+        $this->withToken($this->passengerToken)->getJson('/api/bookings')
+            ->assertStatus(200);
     }
 
     // â”€â”€ getRouteOptions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -41296,10 +41297,18 @@ trait CreatesApplication
 namespace Tests;
 
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 
 abstract class TestCase extends BaseTestCase
 {
     use CreatesApplication;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->withoutMiddleware(ThrottleRequests::class);
+    }
 }
 
 

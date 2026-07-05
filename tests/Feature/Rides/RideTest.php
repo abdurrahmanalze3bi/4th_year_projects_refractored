@@ -76,8 +76,11 @@ class RideTest extends TestCase
             ->assertStatus(422);
     }
 
-    public function test_ride_creation_charges_5_percent_fee(): void
+    public function test_ride_creation_does_not_charge_any_fee(): void
     {
+        // FIX: ride creation fees were removed from RideService (see the
+        // skipped chargeRideCreationFee() tests in WalletTransactionServiceTest).
+        // Creating a ride should leave the driver's wallet balance untouched.
         $walletBefore = (float) Wallet::where('user_id', $this->driver->id)->value('balance');
 
         $this->withToken($this->token)
@@ -87,7 +90,7 @@ class RideTest extends TestCase
             ]))->assertStatus(201);
 
         $walletAfter = (float) Wallet::where('user_id', $this->driver->id)->value('balance');
-        $this->assertEquals($walletBefore - (10_000 * 4 * 0.05), $walletAfter);
+        $this->assertEquals($walletBefore, $walletAfter);
     }
 
     public function test_ride_creation_fails_with_past_departure_time(): void

@@ -91,35 +91,6 @@ class WalletTransactionServiceTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // chargeRideCreationFee
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    public function test_charge_ride_creation_fee_deducts_from_driver(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_charge_ride_creation_fee_adds_to_sycash(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_charge_ride_creation_fee_creates_two_transactions(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_charge_ride_creation_fee_throws_when_driver_has_insufficient_balance(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_charge_ride_creation_fee_throws_when_driver_has_no_wallet(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
     // chargePassengerForBooking
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -134,15 +105,17 @@ class WalletTransactionServiceTest extends TestCase
         $this->assertEquals($before - $amount, (float) $this->passengerWallet->fresh()->balance);
     }
 
-    public function test_charge_passenger_adds_to_admin_wallet(): void
+    public function test_charge_passenger_adds_to_sycash_wallet(): void
     {
+        // Booking payment goes into escrow (SyCash) — the primary admin wallet
+        // isn't touched until ride completion releases the 5% platform fee.
         $booking = $this->makeBooking(2);
         $amount  = $booking->seats * $this->ride->price_per_seat;
-        $before  = (float) $this->primaryAdminWallet->fresh()->balance;
+        $before  = (float) $this->syCashWallet->fresh()->balance;
 
         $this->service->chargePassengerForBooking($booking, $this->ride, $this->passenger);
 
-        $this->assertEquals($before + $amount, (float) $this->primaryAdminWallet->fresh()->balance);
+        $this->assertEquals($before + $amount, (float) $this->syCashWallet->fresh()->balance);
     }
 
     public function test_charge_passenger_creates_two_transactions(): void
@@ -179,24 +152,42 @@ class WalletTransactionServiceTest extends TestCase
 
     public function test_release_earnings_adds_to_driver_wallet(): void
     {
-        $booking  = $this->makeBooking(2, 'confirmed');
-        $expected = $booking->seats * $this->ride->price_per_seat;
-        $before   = (float) $this->driverWallet->fresh()->balance;
+        // Driver gets 95%, not the full amount — the remaining 5% is the
+        // platform fee that goes to the primary admin wallet instead.
+        $booking       = $this->makeBooking(2, 'confirmed');
+        $total         = $booking->seats * $this->ride->price_per_seat;
+        $expectedShare = round($total * 0.95, 2);
+        $before        = (float) $this->driverWallet->fresh()->balance;
 
         $this->service->releaseEarningsToDriver($this->ride, new Collection([$booking]));
 
-        $this->assertEquals($before + $expected, (float) $this->driverWallet->fresh()->balance);
+        $this->assertEquals($before + $expectedShare, (float) $this->driverWallet->fresh()->balance);
     }
 
-    public function test_release_earnings_deducts_from_admin_wallet(): void
+    public function test_release_earnings_adds_to_primary_wallet(): void
     {
-        $booking  = $this->makeBooking(2, 'confirmed');
-        $expected = $booking->seats * $this->ride->price_per_seat;
-        $before   = (float) $this->primaryAdminWallet->fresh()->balance;
+        // The 5% platform fee counterpart to the driver's 95% share above.
+        $booking       = $this->makeBooking(2, 'confirmed');
+        $total         = $booking->seats * $this->ride->price_per_seat;
+        $expectedShare = round($total * 0.05, 2);
+        $before        = (float) $this->primaryAdminWallet->fresh()->balance;
 
         $this->service->releaseEarningsToDriver($this->ride, new Collection([$booking]));
 
-        $this->assertEquals($before - $expected, (float) $this->primaryAdminWallet->fresh()->balance);
+        $this->assertEquals($before + $expectedShare, (float) $this->primaryAdminWallet->fresh()->balance);
+    }
+
+    public function test_release_earnings_deducts_from_sycash_wallet(): void
+    {
+        // SyCash releases the FULL amount — it's the source that gets split
+        // 95/5 between driver and primary, not the primary wallet itself.
+        $booking = $this->makeBooking(2, 'confirmed');
+        $total   = $booking->seats * $this->ride->price_per_seat;
+        $before  = (float) $this->syCashWallet->fresh()->balance;
+
+        $this->service->releaseEarningsToDriver($this->ride, new Collection([$booking]));
+
+        $this->assertEquals($before - $total, (float) $this->syCashWallet->fresh()->balance);
     }
 
     public function test_release_earnings_does_nothing_for_empty_collection(): void
@@ -208,14 +199,15 @@ class WalletTransactionServiceTest extends TestCase
         $this->assertEquals($before, WalletTransaction::count());
     }
 
-    public function test_release_earnings_creates_two_transactions(): void
+    public function test_release_earnings_creates_three_transactions(): void
     {
+        // sycash debit + driver credit (95%) + primary credit (5%) = 3
         $booking = $this->makeBooking(1, 'confirmed');
         $before  = WalletTransaction::count();
 
         $this->service->releaseEarningsToDriver($this->ride, new Collection([$booking]));
 
-        $this->assertEquals($before + 2, WalletTransaction::count());
+        $this->assertEquals($before + 3, WalletTransaction::count());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -242,15 +234,18 @@ class WalletTransactionServiceTest extends TestCase
         $this->assertEquals($before + $refund, (float) $this->passengerWallet->fresh()->balance);
     }
 
-    public function test_refund_passengers_deducts_from_admin_wallet(): void
+    public function test_refund_passengers_deducts_from_sycash_wallet(): void
     {
+        // Driver-cancellation refunds are paid out of escrow (SyCash), not
+        // the primary admin wallet, since the primary only ever moves at
+        // ride completion or no-show settlement.
         $booking = $this->makeBooking(1, 'confirmed');
         $refund  = $booking->seats * $this->ride->price_per_seat;
-        $before  = (float) $this->primaryAdminWallet->fresh()->balance;
+        $before  = (float) $this->syCashWallet->fresh()->balance;
 
         $this->service->refundPassengersForDriverCancellation($this->ride, new Collection([$booking]));
 
-        $this->assertEquals($before - $refund, (float) $this->primaryAdminWallet->fresh()->balance);
+        $this->assertEquals($before - $refund, (float) $this->syCashWallet->fresh()->balance);
     }
 
     public function test_refund_passengers_creates_correct_number_of_transactions(): void
@@ -263,65 +258,17 @@ class WalletTransactionServiceTest extends TestCase
             $this->ride, new Collection([$b1, $b2])
         );
 
-        // 1 admin debit + 2 passenger credits = 3
+        // 1 sycash debit + 2 passenger credits = 3
         $this->assertEquals($before + 3, WalletTransaction::count());
     }
 
-    public function test_refund_passengers_throws_when_admin_insufficient_balance(): void
+    public function test_refund_passengers_throws_when_sycash_insufficient_balance(): void
     {
-        $this->primaryAdminWallet->update(['balance' => 0]);
+        $this->syCashWallet->update(['balance' => 0]);
         $booking = $this->makeBooking(1, 'confirmed');
 
         $this->expectException(\RuntimeException::class);
         $this->service->refundPassengersForDriverCancellation($this->ride, new Collection([$booking]));
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // refundDriverCreationFeeOnCancellation
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    public function test_refund_driver_creation_fee_adds_to_driver_wallet(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_refund_driver_creation_fee_deducts_from_sycash(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_refund_driver_creation_fee_creates_two_transactions(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_refund_driver_creation_fee_throws_when_sycash_insufficient(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // refundCreationFeeNoBookings
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    public function test_refund_no_bookings_adds_fee_to_driver(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_refund_no_bookings_deducts_from_sycash(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_refund_no_bookings_creates_two_transactions(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
-    public function test_refund_no_bookings_throws_when_sycash_insufficient(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -393,9 +340,9 @@ class WalletTransactionServiceTest extends TestCase
         ]);
     }
 
-    public function test_process_cancellation_throws_when_admin_insufficient(): void
+    public function test_process_cancellation_throws_when_sycash_insufficient(): void
     {
-        $this->primaryAdminWallet->update(['balance' => 0]);
+        $this->syCashWallet->update(['balance' => 0]);
         $booking = $this->makeBooking(1, 'confirmed');
         $policy  = ['refund_percentage' => 100, 'time_elapsed_percentage' => 10, 'policy_tier' => 'Full refund'];
 
@@ -457,14 +404,16 @@ class WalletTransactionServiceTest extends TestCase
     // Error paths
     // ═══════════════════════════════════════════════════════════════════════════
 
-    public function test_throws_when_wallet_not_found_by_user_id(): void
-    {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
-    }
-
     public function test_throws_when_sycash_wallet_not_found(): void
     {
-        $this->markTestSkipped('chargeRideCreationFee() no longer exists — ride creation fees were removed from RideService.');
+        // Every money-movement method resolves SyCash by phone before doing
+        // anything else — if that wallet row is missing entirely, it must
+        // fail loudly instead of silently skipping the escrow leg.
+        $this->syCashWallet->delete();
+        $booking = $this->makeBooking(1);
+
+        $this->expectException(\RuntimeException::class);
+        $this->service->chargePassengerForBooking($booking, $this->ride, $this->passenger);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
