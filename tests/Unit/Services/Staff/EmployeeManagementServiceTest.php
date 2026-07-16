@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Unit\Services\Staff;
+namespace Services\Staff;
 
 use App\Enums\StaffRole;
 use App\Models\Employee;

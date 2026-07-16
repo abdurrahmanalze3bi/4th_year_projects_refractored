@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Unit\Models;
+namespace Models;
 
 use App\Models\Notification;
 use App\Models\User;
