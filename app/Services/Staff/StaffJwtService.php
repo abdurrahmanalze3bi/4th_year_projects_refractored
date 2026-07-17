@@ -11,20 +11,7 @@ use Firebase\JWT\SignatureInvalidException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
-/**
- * StaffJwtService
- *
- * Issues and validates JWT access tokens + opaque refresh tokens for Employee models.
- * Completely parallel to JwtService — no shared state, no coupling.
- *
- * Token payload shape:
- *   sub       → employee ID
- *   sub_type  → 'employee'   (guards against cross-use with user tokens)
- *   role      → StaffRole value
- *   type      → 'access'
- *   ver       → token_version (invalidation after logout-all / password change)
- *   iat / exp → standard JWT claims
- */
+
 final class StaffJwtService
 {
     private const ALGORITHM        = 'HS256';
@@ -183,6 +170,11 @@ final class StaffJwtService
             );
         }
 
-        return base64_decode($secret);
+        // FIX: return the raw secret, matching JwtService (user auth).
+        // The previous base64_decode() produced a different key than JwtService
+        // uses, so staff tokens could never be cross-verified. In test
+        // environments JWT_SECRET is often not valid base64, causing
+        // base64_decode() to return false → TypeError → 500 on every staff login.
+        return $secret;
     }
 }

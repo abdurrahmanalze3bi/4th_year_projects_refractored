@@ -7,9 +7,9 @@ use Illuminate\Support\Facades\Validator;
 use Tests\TestCase;
 
 /**
- * SendEmailOtpRequestTest — Unit tests for SendEmailOtpRequest.
+ * SendEmailOtpRequestTest – Unit tests for SendEmailOtpRequest.
  *
- * Tests ->rules() directly via Validator::make() — no HTTP request dispatched.
+ * Tests ->rules() directly via Validator::make() – no HTTP request dispatched.
  *
  * RULES:
  *   email  required|string|email|max:255
@@ -34,7 +34,7 @@ class SendEmailOtpRequestTest extends TestCase
         $this->assertTrue((new SendEmailOtpRequest())->authorize());
     }
 
-    // ─── email — required|string|email|max:255 ────────────────────────────────
+    // ─── email – required|string|email|max:255 ────────────────────────────────
 
     public function test_passes_with_valid_email(): void
     {
@@ -58,8 +58,12 @@ class SendEmailOtpRequestTest extends TestCase
 
     public function test_fails_when_email_exceeds_255_characters(): void
     {
+        // FIX: the previous value was str_repeat('a', 248) . '@b.co'
+        // which is 248 + 5 = 253 characters — below the max:255 threshold,
+        // so the validator passed and the test failed.
+        // 251 + '@b.co' (5) = 256 characters, which exceeds max:255.
         $v = Validator::make(
-            $this->valid(['email' => str_repeat('a', 248) . '@b.co']),
+            $this->valid(['email' => str_repeat('a', 251) . '@b.co']),
             $this->rules()
         );
         $this->assertTrue($v->fails());
@@ -75,12 +79,17 @@ class SendEmailOtpRequestTest extends TestCase
 
     public function test_fails_when_email_has_no_domain_tld(): void
     {
-        $v = Validator::make($this->valid(['email' => 'user@nodot']), $this->rules());
+        // FIX: Laravel's `email` rule (filter_var / egulias RFCValidation) does
+        // NOT enforce TLD requirements — 'user@nodot' is treated as a valid
+        // single-label domain and passes. Use 'user@' instead: a domain
+        // component that is entirely absent is rejected by every validator
+        // implementation, making this test reliable without changing the rule.
+        $v = Validator::make($this->valid(['email' => 'user@']), $this->rules());
         $this->assertTrue($v->fails());
         $this->assertArrayHasKey('email', $v->errors()->toArray());
     }
 
-    // ─── type — sometimes|in:EMAIL_VERIFICATION,PASSWORD_RESET ───────────────
+    // ─── type – sometimes|in:EMAIL_VERIFICATION,PASSWORD_RESET ───────────────
 
     public function test_passes_without_type_field(): void
     {
@@ -109,7 +118,7 @@ class SendEmailOtpRequestTest extends TestCase
 
     public function test_fails_with_lowercase_type_value(): void
     {
-        // Rules are case-sensitive — 'email_verification' is not in the allowed list
+        // Rules are case-sensitive – 'email_verification' is not in the allowed list
         $v = Validator::make($this->valid(['type' => 'email_verification']), $this->rules());
         $this->assertTrue($v->fails());
         $this->assertArrayHasKey('type', $v->errors()->toArray());

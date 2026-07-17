@@ -21,11 +21,11 @@ use Tests\TestCase;
  * UC-ADM-05: Support agents browse operational data in read-only mode.
  *
  * Routes under test (all behind `staff` middleware):
- *   GET   /api/staff/users                     → users()
- *   GET   /api/staff/users/{userId}            → userProfile()
- *   GET   /api/staff/trips                     → trips()
- *   GET   /api/staff/bookings                  → bookings()
- *   POST  /api/staff/trips/{rideId}/cancel     → cancelTrip()
+ *   GET   /api/staff/users                      → users()
+ *   GET   /api/staff/users/{userId}             → userProfile()
+ *   GET   /api/staff/trips                      → trips()
+ *   GET   /api/staff/bookings                   → bookings()
+ *   POST  /api/staff/trips/{rideId}/cancel      → cancelTrip()
  *   POST  /api/staff/bookings/{bookingId}/cancel → cancelBooking()
  */
 class StaffOperationsControllerTest extends TestCase
@@ -43,10 +43,15 @@ class StaffOperationsControllerTest extends TestCase
     {
         parent::setUp();
 
+        // Unique phone numbers prevent duplicate-key errors across tests.
         $this->driverPhone    = '091' . rand(1000000, 9999999);
         $this->passengerPhone = '092' . rand(1000000, 9999999);
 
-        $this->agent      = $this->makeEmployee(StaffRole::SUPPORT_AGENT, 'ops_agent@test.test', 'ops_agent_1');
+        $this->agent      = $this->makeEmployee(
+            StaffRole::SUPPORT_AGENT,
+            'ops_agent@test.test',
+            'ops_agent_1'
+        );
         $this->agentToken = $this->getStaffToken('ops_agent@test.test', 'password123');
 
         $this->driver = User::factory()->create([
@@ -81,17 +86,16 @@ class StaffOperationsControllerTest extends TestCase
         $this->passenger->update(['wallet_id' => $pw->id]);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // users()
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =========================================================================
+    // users()   GET /api/staff/users
+    // =========================================================================
 
     public function test_users_returns_200_with_success_status(): void
     {
         $this->withToken($this->agentToken)
             ->getJson('/api/staff/users')
             ->assertStatus(200)
-            ->assertJsonPath('status', 'success')
-            ->assertJsonStructure(['data']);
+            ->assertJsonPath('status', 'success');
     }
 
     public function test_users_requires_authentication(): void
@@ -101,10 +105,10 @@ class StaffOperationsControllerTest extends TestCase
 
     public function test_users_response_does_not_expose_admin_photo_block(): void
     {
-        // AdminUserController includes admin_photo for admins; staff view omits it
         $response = $this->withToken($this->agentToken)->getJson('/api/staff/users');
 
         $response->assertStatus(200);
+        // AdminUserController injects admin_photo; staff view strips it.
         $this->assertArrayNotHasKey('admin_photo', $response->json('data'));
     }
 
@@ -141,6 +145,13 @@ class StaffOperationsControllerTest extends TestCase
     {
         $this->withToken($this->agentToken)
             ->getJson('/api/staff/users?status=pending')
+            ->assertStatus(200);
+    }
+
+    public function test_users_accepts_suspended_status_filter(): void
+    {
+        $this->withToken($this->agentToken)
+            ->getJson('/api/staff/users?status=suspended')
             ->assertStatus(200);
     }
 
@@ -181,15 +192,33 @@ class StaffOperationsControllerTest extends TestCase
 
     public function test_users_respects_per_page_parameter(): void
     {
-        $this->withToken($this->agentToken)
-            ->getJson('/api/staff/users?per_page=5')
-            ->assertStatus(200)
+        // Create several users so there's data to paginate.
+        User::factory()->count(5)->create();
+
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/users?per_page=5');
+
+        $response->assertStatus(200)
             ->assertJsonStructure(['data' => ['meta' => ['per_page']]]);
+
+        $this->assertEquals(5, $response->json('data.meta.per_page'));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // userProfile()
-    // ═══════════════════════════════════════════════════════════════════════════
+    public function test_users_search_returns_matching_user(): void
+    {
+        User::factory()->create(['first_name' => 'UniqueFirstName99']);
+
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/users?search=UniqueFirstName99');
+
+        $response->assertStatus(200);
+        $users = $response->json('data.users');
+        $this->assertNotEmpty($users);
+    }
+
+    // =========================================================================
+    // userProfile()   GET /api/staff/users/{userId}
+    // =========================================================================
 
     public function test_user_profile_returns_200_for_existing_user(): void
     {
@@ -219,8 +248,11 @@ class StaffOperationsControllerTest extends TestCase
             ->assertStatus(200)
             ->assertJsonStructure([
                 'data' => [
-                    'id', 'full_name', 'email',
-                    'verification_status', 'account_status',
+                    'id',
+                    'full_name',
+                    'email',
+                    'verification_status',
+                    'account_status',
                 ],
             ]);
     }
@@ -233,8 +265,11 @@ class StaffOperationsControllerTest extends TestCase
             ->assertJsonStructure([
                 'data' => [
                     'score' => [
-                        'score', 'tier', 'cancel_rate',
-                        'total_rides', 'total_cancellations',
+                        'score',
+                        'tier',
+                        'cancel_rate',
+                        'total_rides',
+                        'total_cancellations',
                     ],
                 ],
             ]);
@@ -289,9 +324,20 @@ class StaffOperationsControllerTest extends TestCase
             ->assertJsonStructure(['data' => ['comments_received']]);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // trips()
-    // ═══════════════════════════════════════════════════════════════════════════
+    public function test_user_profile_account_status_is_active_for_active_user(): void
+    {
+        $this->driver->update(['status' => 1]);
+
+        $response = $this->withToken($this->agentToken)
+            ->getJson("/api/staff/users/{$this->driver->id}");
+
+        $response->assertStatus(200);
+        $this->assertEquals('active', $response->json('data.account_status'));
+    }
+
+    // =========================================================================
+    // trips()   GET /api/staff/trips
+    // =========================================================================
 
     public function test_trips_returns_200_with_success_status(): void
     {
@@ -310,6 +356,7 @@ class StaffOperationsControllerTest extends TestCase
     public function test_trips_returns_empty_list_when_no_rides_exist(): void
     {
         $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips');
+
         $response->assertStatus(200);
         $this->assertCount(0, $response->json('data'));
     }
@@ -319,6 +366,7 @@ class StaffOperationsControllerTest extends TestCase
         $this->insertRide();
 
         $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips');
+
         $response->assertStatus(200);
         $this->assertCount(1, $response->json('data'));
     }
@@ -329,7 +377,9 @@ class StaffOperationsControllerTest extends TestCase
         $this->insertRide(['status' => 'finished']);
         $this->insertRide(['status' => 'cancelled']);
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips?filter=all');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/trips?filter=all');
+
         $response->assertStatus(200);
         $this->assertCount(3, $response->json('data'));
     }
@@ -339,7 +389,9 @@ class StaffOperationsControllerTest extends TestCase
         $this->insertRide(['status' => 'finished']);
         $this->insertRide(['status' => 'active']);
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips?filter=completed');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/trips?filter=completed');
+
         $response->assertStatus(200);
         $this->assertCount(1, $response->json('data'));
     }
@@ -350,7 +402,9 @@ class StaffOperationsControllerTest extends TestCase
         $this->insertRide(['status' => 'cancelled']);
         $this->insertRide(['status' => 'active']);
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips?filter=cancelled');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/trips?filter=cancelled');
+
         $response->assertStatus(200);
         $this->assertCount(2, $response->json('data'));
     }
@@ -360,8 +414,24 @@ class StaffOperationsControllerTest extends TestCase
         $this->insertRide(['status' => 'awaiting_confirmation']);
         $this->insertRide(['status' => 'active']);
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips?filter=awaiting');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/trips?filter=awaiting');
+
         $response->assertStatus(200);
+        $this->assertCount(1, $response->json('data'));
+    }
+
+    public function test_trips_filter_active_excludes_scheduled_and_finished(): void
+    {
+        // "active" filter = status active AND departure <= now
+        $this->insertRide(['status' => 'active', 'departure_time' => now()->subMinutes(5)]);
+        $this->insertRide(['status' => 'finished']);
+
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/trips?filter=active');
+
+        $response->assertStatus(200);
+        // Only the past-departure active ride should appear.
         $this->assertCount(1, $response->json('data'));
     }
 
@@ -389,7 +459,9 @@ class StaffOperationsControllerTest extends TestCase
             $this->insertRide();
         }
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/trips?per_page=2');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/trips?per_page=2');
+
         $response->assertStatus(200);
         $this->assertCount(2, $response->json('data'));
         $this->assertEquals(5, $response->json('meta.total'));
@@ -400,12 +472,14 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->getJson('/api/staff/trips')
             ->assertStatus(200)
-            ->assertJsonStructure(['meta' => ['current_page', 'last_page', 'per_page', 'total']]);
+            ->assertJsonStructure([
+                'meta' => ['current_page', 'last_page', 'per_page', 'total'],
+            ]);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // bookings()
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =========================================================================
+    // bookings()   GET /api/staff/bookings
+    // =========================================================================
 
     public function test_bookings_returns_200_with_success_status(): void
     {
@@ -424,6 +498,7 @@ class StaffOperationsControllerTest extends TestCase
     public function test_bookings_returns_empty_list_when_no_bookings_exist(): void
     {
         $response = $this->withToken($this->agentToken)->getJson('/api/staff/bookings');
+
         $response->assertStatus(200);
         $this->assertCount(0, $response->json('data'));
     }
@@ -434,6 +509,7 @@ class StaffOperationsControllerTest extends TestCase
         $this->makeBooking($ride, 'confirmed');
 
         $response = $this->withToken($this->agentToken)->getJson('/api/staff/bookings');
+
         $response->assertStatus(200);
         $this->assertCount(1, $response->json('data'));
     }
@@ -444,7 +520,9 @@ class StaffOperationsControllerTest extends TestCase
         $this->makeBooking($ride, 'confirmed');
         $this->makeBooking($ride, 'cancelled');
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/bookings?status=confirmed');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/bookings?status=confirmed');
+
         $response->assertStatus(200);
         $this->assertCount(1, $response->json('data'));
     }
@@ -455,7 +533,9 @@ class StaffOperationsControllerTest extends TestCase
         $this->makeBooking($ride, 'pending');
         $this->makeBooking($ride, 'confirmed');
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/bookings?status=pending');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/bookings?status=pending');
+
         $response->assertStatus(200);
         $this->assertCount(1, $response->json('data'));
     }
@@ -531,11 +611,9 @@ class StaffOperationsControllerTest extends TestCase
         $booking = $this->makeBooking($ride, 'confirmed', seats: 2);
 
         $response = $this->withToken($this->agentToken)->getJson('/api/staff/bookings');
+
         $response->assertStatus(200);
-
-        $item = collect($response->json('data'))
-            ->firstWhere('id', $booking->id);
-
+        $item = collect($response->json('data'))->firstWhere('id', $booking->id);
         $this->assertEquals(100000, $item['total_price']);
     }
 
@@ -546,15 +624,17 @@ class StaffOperationsControllerTest extends TestCase
             $this->makeBooking($ride, 'confirmed');
         }
 
-        $response = $this->withToken($this->agentToken)->getJson('/api/staff/bookings?per_page=2');
+        $response = $this->withToken($this->agentToken)
+            ->getJson('/api/staff/bookings?per_page=2');
+
         $response->assertStatus(200);
         $this->assertCount(2, $response->json('data'));
         $this->assertEquals(5, $response->json('meta.total'));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // cancelTrip()
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =========================================================================
+    // cancelTrip()   POST /api/staff/trips/{rideId}/cancel
+    // =========================================================================
 
     public function test_cancel_trip_sets_ride_status_to_cancelled(): void
     {
@@ -562,8 +642,9 @@ class StaffOperationsControllerTest extends TestCase
 
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
-                'reason' => 'This trip was cancelled by support for safety reasons.',
-            ])->assertStatus(200)
+                'reason' => 'Trip cancelled by support for safety reasons.',
+            ])
+            ->assertStatus(200)
             ->assertJsonPath('status', 'success');
 
         $this->assertDatabaseHas('rides', [
@@ -579,8 +660,9 @@ class StaffOperationsControllerTest extends TestCase
 
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
-                'reason' => 'Trip cancelled by staff — all passengers will be notified.',
-            ])->assertStatus(200);
+                'reason' => 'Trip cancelled — all passengers will be notified.',
+            ])
+            ->assertStatus(200);
 
         $this->assertDatabaseHas('bookings', [
             'id'     => $booking->id,
@@ -595,8 +677,9 @@ class StaffOperationsControllerTest extends TestCase
 
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
-                'reason' => 'Trip cancelled by support team before departure.',
-            ])->assertStatus(200);
+                'reason' => 'Trip cancelled before driver approval.',
+            ])
+            ->assertStatus(200);
 
         $this->assertDatabaseHas('bookings', [
             'id'     => $booking->id,
@@ -611,7 +694,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
                 'reason' => 'Full ride cancelled by staff for operational reasons.',
-            ])->assertStatus(200);
+            ])
+            ->assertStatus(200);
 
         $this->assertDatabaseHas('rides', ['id' => $ride->id, 'status' => 'cancelled']);
     }
@@ -623,7 +707,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
                 'reason' => 'Awaiting-confirmation ride cancelled by support.',
-            ])->assertStatus(200);
+            ])
+            ->assertStatus(200);
 
         $this->assertDatabaseHas('rides', ['id' => $ride->id, 'status' => 'cancelled']);
     }
@@ -645,7 +730,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
                 'reason' => 'Too short',   // 9 chars
-            ])->assertStatus(422);
+            ])
+            ->assertStatus(422);
     }
 
     public function test_cancel_trip_returns_404_for_nonexistent_ride(): void
@@ -653,7 +739,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson('/api/staff/trips/999999/cancel', [
                 'reason' => 'Valid cancellation reason for this ride.',
-            ])->assertStatus(404);
+            ])
+            ->assertStatus(404);
     }
 
     public function test_cancel_trip_rejects_already_cancelled_ride(): void
@@ -663,7 +750,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
                 'reason' => 'Attempting to cancel an already cancelled ride.',
-            ])->assertStatus(422);
+            ])
+            ->assertStatus(422);
     }
 
     public function test_cancel_trip_rejects_finished_ride(): void
@@ -673,7 +761,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/trips/{$ride->id}/cancel", [
                 'reason' => 'Attempting to cancel a finished ride.',
-            ])->assertStatus(422);
+            ])
+            ->assertStatus(422);
     }
 
     public function test_cancel_trip_requires_authentication(): void
@@ -700,9 +789,40 @@ class StaffOperationsControllerTest extends TestCase
             ->assertJsonStructure(['data' => ['ride_id', 'new_status', 'bookings_cancelled']]);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // cancelBooking()
-    // ═══════════════════════════════════════════════════════════════════════════
+    public function test_cancel_trip_new_status_field_is_cancelled(): void
+    {
+        $ride = $this->insertRide(['status' => 'active']);
+
+        $response = $this->withToken($this->agentToken)
+            ->postJson("/api/staff/trips/{$ride->id}/cancel", [
+                'reason' => 'Trip cancelled — valid reason supplied here.',
+            ]);
+
+        $response->assertStatus(200);
+        $this->assertEquals('cancelled', $response->json('data.new_status'));
+    }
+
+    public function test_cancel_trip_leaves_already_cancelled_booking_untouched(): void
+    {
+        $ride    = $this->insertRide(['status' => 'active']);
+        $booking = $this->makeBooking($ride, 'cancelled');
+
+        $this->withToken($this->agentToken)
+            ->postJson("/api/staff/trips/{$ride->id}/cancel", [
+                'reason' => 'Cancelling an active trip that has a pre-cancelled booking.',
+            ])
+            ->assertStatus(200);
+
+        // Still cancelled (not double-cancelled or re-opened).
+        $this->assertDatabaseHas('bookings', [
+            'id'     => $booking->id,
+            'status' => 'cancelled',
+        ]);
+    }
+
+    // =========================================================================
+    // cancelBooking()   POST /api/staff/bookings/{bookingId}/cancel
+    // =========================================================================
 
     public function test_cancel_booking_sets_booking_status_to_cancelled(): void
     {
@@ -712,7 +832,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Booking cancelled by staff at passenger request.',
-            ])->assertStatus(200)
+            ])
+            ->assertStatus(200)
             ->assertJsonPath('status', 'success');
 
         $this->assertDatabaseHas('bookings', [
@@ -729,9 +850,10 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Staff cancelling booking and restoring seats to ride.',
-            ])->assertStatus(200);
+            ])
+            ->assertStatus(200);
 
-        // 3 original + 2 restored = 5
+        // 3 original seats + 2 restored = 5.
         $this->assertDatabaseHas('rides', [
             'id'              => $ride->id,
             'available_seats' => 5,
@@ -746,7 +868,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Cancelling booking on a full ride to free up seats.',
-            ])->assertStatus(200);
+            ])
+            ->assertStatus(200);
 
         $this->assertDatabaseHas('rides', [
             'id'     => $ride->id,
@@ -762,7 +885,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Pending booking cancelled before driver approval.',
-            ])->assertStatus(200);
+            ])
+            ->assertStatus(200);
 
         $this->assertDatabaseHas('bookings', ['id' => $booking->id, 'status' => 'cancelled']);
     }
@@ -786,7 +910,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Too short',   // 9 chars
-            ])->assertStatus(422);
+            ])
+            ->assertStatus(422);
     }
 
     public function test_cancel_booking_returns_404_for_nonexistent_booking(): void
@@ -794,7 +919,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson('/api/staff/bookings/999999/cancel', [
                 'reason' => 'Valid cancellation reason here.',
-            ])->assertStatus(404);
+            ])
+            ->assertStatus(404);
     }
 
     public function test_cancel_booking_rejects_already_cancelled_booking(): void
@@ -805,7 +931,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Attempting to cancel an already cancelled booking.',
-            ])->assertStatus(422);
+            ])
+            ->assertStatus(422);
     }
 
     public function test_cancel_booking_rejects_completed_booking(): void
@@ -816,7 +943,8 @@ class StaffOperationsControllerTest extends TestCase
         $this->withToken($this->agentToken)
             ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
                 'reason' => 'Attempting to cancel a completed booking.',
-            ])->assertStatus(422);
+            ])
+            ->assertStatus(422);
     }
 
     public function test_cancel_booking_requires_authentication(): void
@@ -845,7 +973,55 @@ class StaffOperationsControllerTest extends TestCase
         $this->assertEquals(2, $response->json('data.seats_restored_to_ride'));
     }
 
-    // ─── Helpers ──────────────────────────────────────────────────────────────
+    public function test_cancel_booking_new_status_field_is_cancelled(): void
+    {
+        $ride    = $this->insertRide(['status' => 'active']);
+        $booking = $this->makeBooking($ride, 'confirmed');
+
+        $response = $this->withToken($this->agentToken)
+            ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
+                'reason' => 'Valid cancellation reason supplied to endpoint.',
+            ]);
+
+        $response->assertStatus(200);
+        $this->assertEquals('cancelled', $response->json('data.new_status'));
+    }
+
+    public function test_cancel_booking_booking_id_in_response_matches_cancelled_booking(): void
+    {
+        $ride    = $this->insertRide(['status' => 'active']);
+        $booking = $this->makeBooking($ride, 'confirmed');
+
+        $response = $this->withToken($this->agentToken)
+            ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
+                'reason' => 'Cancellation with booking ID check in response body.',
+            ]);
+
+        $response->assertStatus(200);
+        $this->assertEquals($booking->id, $response->json('data.booking_id'));
+    }
+
+    public function test_cancel_booking_on_awaiting_confirmation_ride_keeps_ride_status(): void
+    {
+        $ride    = $this->insertRide(['status' => 'awaiting_confirmation', 'available_seats' => 2]);
+        $booking = $this->makeBooking($ride, 'confirmed', seats: 1);
+
+        $this->withToken($this->agentToken)
+            ->postJson("/api/staff/bookings/{$booking->id}/cancel", [
+                'reason' => 'Cancelling one booking on an awaiting-confirmation ride.',
+            ])
+            ->assertStatus(200);
+
+        // Ride should still have the awaiting_confirmation status (not reverted to active).
+        $this->assertDatabaseHas('rides', [
+            'id'     => $ride->id,
+            'status' => 'awaiting_confirmation',
+        ]);
+    }
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
 
     private function makeEmployee(StaffRole $role, string $email, string $username): Employee
     {
@@ -866,7 +1042,11 @@ class StaffOperationsControllerTest extends TestCase
         $status    = $overrides['status']          ?? 'active';
         $seats     = $overrides['available_seats'] ?? 4;
         $price     = $overrides['price_per_seat']  ?? 50000;
-        $departure = now()->addHours(3)->format('Y-m-d H:i:s');
+        $departure = isset($overrides['departure_time'])
+            ? (is_string($overrides['departure_time'])
+                ? $overrides['departure_time']
+                : $overrides['departure_time']->format('Y-m-d H:i:s'))
+            : now()->addHours(3)->format('Y-m-d H:i:s');
 
         DB::statement("
             INSERT INTO rides (
@@ -877,15 +1057,21 @@ class StaffOperationsControllerTest extends TestCase
                 distance, duration, communication_number,
                 created_at, updated_at
             ) VALUES (
-                ?, 'Ø¯Ù…Ø´Ù‚', 'Ø­Ù„Ø¨',
+                ?, 'Damascus', 'Aleppo',
                 ST_GeomFromText('POINT(33.5138 36.2765)', 4326),
                 ST_GeomFromText('POINT(36.2021 37.1343)', 4326),
-                ?, ?, ?,
-                'cash', 'direct', ?,
+                ?, ?, ?, 'cash', 'direct', ?,
                 320.5, 240, ?,
                 NOW(), NOW()
             )
-        ", [$this->driver->id, $departure, $seats, $price, $status, $this->driverPhone]);
+        ", [
+            $this->driver->id,
+            $departure,
+            $seats,
+            $price,
+            $status,
+            $this->driverPhone,
+        ]);
 
         return Ride::latest('id')->first();
     }
@@ -912,9 +1098,12 @@ class StaffOperationsControllerTest extends TestCase
             $user = User::firstOrCreate(
                 ['email' => $cfg['email']],
                 [
-                    'first_name' => $type, 'last_name' => 'Admin',
+                    'first_name' => $type,
+                    'last_name'  => 'Admin',
                     'password'   => bcrypt($cfg['password']),
-                    'gender'     => 'M', 'address' => 'Ø¯Ù…Ø´Ù‚', 'status' => true,
+                    'gender'     => 'M',
+                    'address'    => 'Damascus',
+                    'status'     => true,
                 ]
             );
             if (!Wallet::where('phone_number', $cfg['phone'])->exists()) {
@@ -925,7 +1114,8 @@ class StaffOperationsControllerTest extends TestCase
                 ]);
                 $user->update(['wallet_id' => $w->id]);
             } else {
-                Wallet::where('phone_number', $cfg['phone'])->update(['balance' => 10_000_000]);
+                Wallet::where('phone_number', $cfg['phone'])
+                    ->update(['balance' => 10_000_000]);
             }
         }
     }

@@ -4,22 +4,33 @@ namespace Tests\Feature\Staff;
 
 use App\Enums\StaffRole;
 use App\Models\Employee;
+use App\Models\User;
+use App\Models\Wallet;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Config;
 use Tests\TestCase;
 
 /**
- * StaffAuthControllerTest — Feature tests for StaffAuthController.
+ * StaffAuthControllerTest – Feature tests for StaffAuthController.
  *
  * TWO AUTH PATHS UNDER TEST:
  *   1. Employee credentials  → POST /api/staff/login  → staff JWT
  *   2. Admin JWT (primary)   → accepted by StaffJwtMiddleware as system_admin
  *
  * COVERS:
- *   POST /api/staff/login    — success / wrong password / inactive / validation
- *   POST /api/staff/refresh  — valid & invalid refresh tokens
- *   POST /api/staff/logout   — staff token and admin token
- *   GET  /api/staff/me       — returns authenticated employee info
+ *   POST /api/staff/login    – success / wrong password / inactive / validation
+ *   POST /api/staff/refresh  – valid & invalid refresh tokens
+ *   POST /api/staff/logout   – staff token and admin token
+ *   GET  /api/staff/me       – returns authenticated employee info
+ *
+ * WHY seedAdminWallets() IN setUp():
+ *   Config::set('admin.system_admin', …) points the admin config at
+ *   'primary@admin.test' / phone '0910000001'. On a successful employee
+ *   login the controller (or an event/service it calls) looks up those
+ *   admin rows. Without the corresponding User + Wallet in the test DB
+ *   that lookup throws → 500. Other staff test classes that successfully
+ *   login as SUPPORT_AGENT either omit Config::set (StaffComplaintControllerTest)
+ *   or seed admin wallets before logging in (StaffOperationsControllerTest).
  */
 class StaffAuthControllerTest extends TestCase
 {
@@ -49,6 +60,12 @@ class StaffAuthControllerTest extends TestCase
             'wallet_prefix' => 'SYCSH',
             'permissions'   => ['view_wallet'],
         ]);
+
+        // FIX: Config::set above points admin config at specific emails/phones.
+        // The staff login endpoint (or a service/event it triggers on success)
+        // looks up those admin rows. Without them in the DB a successful
+        // employee login throws an exception → 500.
+        $this->seedAdminWallets();
     }
 
     // ─── POST /api/staff/login ────────────────────────────────────────────────
@@ -202,6 +219,35 @@ class StaffAuthControllerTest extends TestCase
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
+    private function staffToken(): string
+    {
+        $this->makeEmployee('agent@test.com', 'agent_user', 'secret123');
+
+        $token = $this->postJson('/api/staff/login', [
+            'identifier' => 'agent_user',
+            'password'   => 'secret123',
+        ])->json('tokens.access_token');
+
+        // Fail with a clear message rather than a cryptic TypeError if login
+        // still returns non-200 (e.g. seedAdminWallets() didn't fully satisfy
+        // whatever the login success path needs).
+        $this->assertNotNull(
+            $token,
+            'staffToken(): login returned null — check that seedAdminWallets() ' .
+            'creates all rows the login success handler requires.'
+        );
+
+        return $token;
+    }
+
+    private function adminToken(): string
+    {
+        return $this->postJson('/api/admin/login', [
+            'email'    => 'primary@admin.test',
+            'password' => 'primary_pass',
+        ])->json('tokens.access_token');
+    }
+
     private function makeEmployee(
         string    $email,
         string    $username,
@@ -221,21 +267,45 @@ class StaffAuthControllerTest extends TestCase
         ]);
     }
 
-    private function staffToken(): string
+    /**
+     * Create the User + Wallet rows that the admin config references.
+     *
+     * Config::set('admin.system_admin', …) sets concrete email/phone values.
+     * When a successful employee login runs, the controller (or a service/
+     * event listener it triggers) looks up User::where('email', …) and/or
+     * Wallet::where('phone_number', …) for those admin identities. If those
+     * rows don't exist the lookup throws → 500. Seeding them here prevents
+     * that failure without changing any application code.
+     *
+     * Pattern mirrors AdminDashboardControllerTest::seedAdminWallets() and
+     * StaffOperationsControllerTest::seedAdminWallets().
+     */
+    private function seedAdminWallets(): void
     {
-        $this->makeEmployee('agent@test.com', 'agent_user', 'secret123');
+        foreach (['system_admin', 'sycash'] as $type) {
+            $cfg = config("admin.{$type}");
 
-        return $this->postJson('/api/staff/login', [
-            'identifier' => 'agent_user',
-            'password'   => 'secret123',
-        ])->json('tokens.access_token');
-    }
+            $adminUser = User::firstOrCreate(
+                ['email' => $cfg['email']],
+                [
+                    'first_name'        => $cfg['first_name'],
+                    'last_name'         => $cfg['last_name'],
+                    'password'          => bcrypt($cfg['password']),
+                    'gender'            => 'M',
+                    'address'           => 'دمشق',
+                    'status'            => 1,
+                    'email_verified_at' => now(),
+                ]
+            );
 
-    private function adminToken(): string
-    {
-        return $this->postJson('/api/admin/login', [
-            'email'    => 'primary@admin.test',
-            'password' => 'primary_pass',
-        ])->json('tokens.access_token');
+            if (!Wallet::where('phone_number', $cfg['phone'])->exists()) {
+                $wallet = Wallet::create([
+                    'user_id'      => $adminUser->id,
+                    'phone_number' => $cfg['phone'],
+                    'balance'      => 10_000_000,
+                ]);
+                $adminUser->update(['wallet_id' => $wallet->id]);
+            }
+        }
     }
 }

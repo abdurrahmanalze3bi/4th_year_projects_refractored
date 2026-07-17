@@ -213,6 +213,9 @@ Route::middleware('jwt')->group(function () {
         Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
         Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
+        Route::post('/requests',          [WalletRequestController::class, 'store']);
+        Route::get('/requests/{id}',      [WalletRequestController::class, 'show']);
+        Route::delete('/requests/{id}',   [WalletRequestController::class, 'destroy']);
     });
 
     // Complaints
