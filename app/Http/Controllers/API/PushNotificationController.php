@@ -87,4 +87,16 @@ class PushNotificationController extends Controller
             'data' => $notification
         ]);
     }
+    // app/Http/Controllers/API/PushTokenController.php
+    public function store(Request $request, PushNotificationService $pushService)
+    {
+        $request->validate([
+            'token' => 'required|string',
+            'device_type' => 'required|in:android,ios,web',
+        ]);
+
+        $pushService->registerToken(auth()->id(), $request->token, $request->device_type);
+
+        return response()->json(['message' => 'Token registered']);
+    }
 }

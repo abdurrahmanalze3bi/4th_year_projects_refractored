@@ -33,12 +33,14 @@ class User extends Authenticatable
         'verification_status',
         'wallet_id',
         'email_verified_at',
-        // ── Ban fields ─────────────────────────────────────
+        // ── Ban fields ──────────────────────────────────────────────────────
         'ban_reason',
         'ban_type',          // 'permanent' | 'temporary'
         'banned_at',
         'ban_expires_at',
         'banned_by',
+        // ── Identity ────────────────────────────────────────────────────────
+        'national_id',       // set by admin/system_admin during verification approval only
     ];
 
     protected $casts = [
@@ -55,15 +57,13 @@ class User extends Authenticatable
         'google_id',
     ];
 
-    // ── Auth ──────────────────────────────────────────────────────────────────
-
+    // ── Auth ────────────────────────────────────────────────────────────────
     public function sendPasswordResetNotification($token)
     {
         $this->notify(new CustomResetPassword($token));
     }
 
-    // ── Relationships ─────────────────────────────────────────────────────────
-
+    // ── Relationships ────────────────────────────────────────────────────────
     public function profile()
     {
         return $this->hasOne(Profile::class);
@@ -133,8 +133,7 @@ class User extends Authenticatable
         return $this->hasOne(Wallet::class);
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────────────
-
+    // ── Accessors ────────────────────────────────────────────────────────────
     public function getUnreadNotificationCountAttribute()
     {
         return $this->userNotifications()->unread()->count();
@@ -163,9 +162,9 @@ class User extends Authenticatable
     public function getAccountStatusAttribute(): string
     {
         return match ((int) $this->status) {
-            -1 => 'banned',
-            0 => 'logged_out',
-            1 => 'active',
+            -1      => 'banned',
+            0       => 'logged_out',
+            1       => 'active',
             default => 'unknown',
         };
     }

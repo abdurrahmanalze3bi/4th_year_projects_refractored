@@ -6,8 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Models\WalletRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
-
+use App\Services\NotificationService;
 /**
  * WalletRequestController
  *
@@ -20,6 +21,9 @@ use Illuminate\Support\Facades\Validator;
  */
 class WalletRequestController extends Controller
 {
+    public function __construct(
+        private readonly NotificationService $notificationService,
+    ) {}
     // ── POST /api/wallet/request-charge ──────────────────────────────────────
 
     /**
@@ -51,7 +55,6 @@ class WalletRequestController extends Controller
             ], 422);
         }
 
-        // Prevent multiple pending charge requests from the same user
         $alreadyPending = WalletRequest::where('user_id', $user->id)
             ->where('type', 'charge')
             ->where('status', 'pending')
@@ -72,6 +75,20 @@ class WalletRequestController extends Controller
             'status'     => 'pending',
             'user_notes' => $request->input('notes'),
         ]);
+
+        try {
+            $this->notificationService->createNotification(
+                $user,
+                'charge_request_received',
+                'تم استلام طلب الشحن',
+                'سيتم مراجعة طلب شحن المحفظة من قِبل الإدارة قريباً.',
+                ['wallet_request_id' => $walletRequest->id],
+                'normal',
+                'system'
+            );
+        } catch (\Throwable) {}
+
+        Cache::forget("wallet.requests.{$user->id}");
 
         return response()->json([
             'success' => true,
@@ -115,7 +132,6 @@ class WalletRequestController extends Controller
 
         $amount = (float) $request->input('amount');
 
-        // Check current balance
         if ($amount > (float) $wallet->balance) {
             return response()->json([
                 'success' => false,
@@ -123,7 +139,6 @@ class WalletRequestController extends Controller
             ], 422);
         }
 
-        // Prevent multiple pending withdraw requests
         $pendingTotal = WalletRequest::where('user_id', $user->id)
             ->where('type', 'withdraw')
             ->where('status', 'pending')
@@ -145,6 +160,20 @@ class WalletRequestController extends Controller
             'user_notes' => $request->input('notes'),
         ]);
 
+        try {
+            $this->notificationService->createNotification(
+                $user,
+                'withdraw_request_received',
+                'تم استلام طلب السحب',
+                'سيتم مراجعة طلب سحب المحفظة من قِبل الإدارة قريباً.',
+                ['wallet_request_id' => $walletRequest->id],
+                'normal',
+                'system'
+            );
+        } catch (\Throwable) {}
+
+        Cache::forget("wallet.requests.{$user->id}");
+
         return response()->json([
             'success' => true,
             'message' => 'Withdraw request submitted. The admin will process it shortly.',
@@ -159,13 +188,20 @@ class WalletRequestController extends Controller
      */
     public function myRequests(Request $request): JsonResponse
     {
-        $requests = WalletRequest::where('user_id', $request->user()->id)
-            ->orderByDesc('created_at')
-            ->get();
+        $userId = $request->user()->id;
+
+        $data = Cache::remember("wallet.requests.{$userId}", 120, function () use ($userId) {
+            return WalletRequest::where('user_id', $userId)
+                ->orderByDesc('created_at')
+                ->get()
+                ->map(fn($r) => $this->formatRequest($r))
+                ->values()
+                ->all();
+        });
 
         return response()->json([
             'success' => true,
-            'data'    => $requests->map(fn($r) => $this->formatRequest($r))->values(),
+            'data'    => $data,
         ]);
     }
 

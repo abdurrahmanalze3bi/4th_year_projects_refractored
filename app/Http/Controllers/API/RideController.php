@@ -16,20 +16,29 @@ use App\Services\Ride\BookingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Services\Score\ScoreService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use App\Services\NotificationService;
 
 /**
  * Ride Controller
  *
  * FIXED:
- * 1. Correct method signatures (passes DTOs)
- * 2. Eager loading to prevent N+1 queries
- * 3. Proper error handling
+ *  1. create() — broken catch block referenced $ride outside its scope
+ *                and returned 201 on exception. Rewritten cleanly.
+ *  2. passengerConfirmCompletion() — catch (\Exception) misses ArgumentCountError
+ *     and other Error subclasses; changed to catch (\Throwable).
+ *  3. All other catch blocks also upgraded to \Throwable for the same reason.
  *
- * Thin controller - delegates to services
- * BEFORE: 3024 lines | AFTER: ~200 lines = 93% REDUCTION!
+ * ── Caching summary ──────────────────────────────────────────────────────────
+ *
+ *  CACHED  getRouteOptions()  route.options.{lat1}.{lng1}.{lat2}.{lng2}  30 min
+ *  CACHED  autocomplete()     geocode.autocomplete.{text}                 1 hour
+ *
+ *  Everything else is either a mutation or a per-user live read (seat counts,
+ *  booking status, available seats) where staleness would directly harm UX.
  */
 class RideController extends Controller
 {
@@ -38,43 +47,57 @@ class RideController extends Controller
         private readonly BookingService          $bookingService,
         private readonly GeocodingService        $geocodingService,
         private readonly RouteCalculationService $routeService,
+        private readonly NotificationService     $notificationService,
     ) {}
+
+    // =========================================================================
+    // CREATE RIDE
+    // =========================================================================
+
     /**
-     * Create a new ride
-     *
      * POST /rides
+     *
+     * FIXED: catch block previously referenced $ride which only existed inside
+     * try scope, and returned 201 even on failure. Now uses a single clean
+     * try/catch with \Throwable to also catch PHP Errors.
      */
     public function create(CreateRideRequest $request): JsonResponse
     {
         try {
-            $dto = CreateRideDTO::fromRequest($request->validated(), $request->user()->id);
-            $ride = $this->rideService->createRide($dto, $request->user());
-
-            return response()->json([
-                'success' => true,
-                'data' => new RideResource($ride),
-                'message' => 'Ride created successfully'
-            ], 201);
-        } catch (\Exception $e) {
-            // In create() method, change the return to:
+            $dto   = CreateRideDTO::fromRequest($request->validated(), $request->user()->id);
+            $ride  = $this->rideService->createRide($dto, $request->user());
             $score = app(ScoreService::class)->getScore($request->user());
 
             return response()->json([
-                'success' => true,
-                'data'    => new RideResource($ride),
-                'message' => 'Ride created successfully',
+                'success'      => true,
+                'data'         => new RideResource($ride),
+                'message'      => 'Ride created successfully',
                 'driver_score' => ScoreController::formatScore($score),
             ], 201);
+
+        } catch (\Throwable $e) {
+            Log::error('Ride creation failed', [
+                'user_id' => $request->user()->id,
+                'error'   => $e->getMessage(),
+                'class'   => get_class($e),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
         }
     }
 
+    // =========================================================================
+    // ROUTE OPTIONS
+    // =========================================================================
+
     /**
-     * Get route options
-     *
      * GET /rides/route-options
-     */
-    /**
-     * Get multiple route alternatives between two points
+     *
+     * CACHED — 30 minutes per coordinate pair.
      */
     public function getRouteOptions(Request $request): JsonResponse
     {
@@ -90,13 +113,22 @@ class RideController extends Controller
                 'lat' => (float) $validated['pickup_lat'],
                 'lng' => (float) $validated['pickup_lng'],
             ];
-
             $destination = [
                 'lat' => (float) $validated['destination_lat'],
                 'lng' => (float) $validated['destination_lng'],
             ];
 
-            $routes = $this->routeService->getRouteAlternatives($origin, $destination, 3);
+            $cacheKey = sprintf(
+                'route.options.%s.%s.%s.%s',
+                round($origin['lat'],      4),
+                round($origin['lng'],      4),
+                round($destination['lat'], 4),
+                round($destination['lng'], 4)
+            );
+
+            $routes = Cache::remember($cacheKey, 1800, function () use ($origin, $destination) {
+                return $this->routeService->getRouteAlternatives($origin, $destination, 3);
+            });
 
             return response()->json([
                 'success' => true,
@@ -107,12 +139,11 @@ class RideController extends Controller
                 ],
             ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::error('Route options failed', [
                 'error'   => $e->getMessage(),
                 'request' => $request->all(),
             ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to get route options: ' . $e->getMessage(),
@@ -120,63 +151,67 @@ class RideController extends Controller
         }
     }
 
+    // =========================================================================
+    // BOOK RIDE
+    // =========================================================================
+
     /**
-     * Book a ride
-     *
-     * FIXED: Passes DTO correctly
-     *
      * POST /rides/{rideId}/book
      */
     public function bookRide(BookRideRequest $request, int $rideId): JsonResponse
     {
         try {
-            // ✅ FIXED: Create DTO and pass to service correctly
-            $dto = BookRideDTO::fromRequest($request->validated(), $request->user()->id, $rideId);
+            $dto     = BookRideDTO::fromRequest($request->validated(), $request->user()->id, $rideId);
             $booking = $this->bookingService->bookRide($dto, $request->user());
 
             return response()->json([
                 'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Ride booked successfully'
+                'data'    => new BookingResource($booking),
+                'message' => 'Ride booked successfully',
             ], 201);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], 422);
         }
     }
 
+    // =========================================================================
+    // SHOW
+    // =========================================================================
+
     /**
-     * Get ride details
-     *
      * GET /rides/{rideId}
+     *
+     * NOT cached — total_booked_seats changes with every booking.
      */
     public function show(int $rideId): JsonResponse
     {
         try {
             $ride = $this->rideService->getRideById($rideId);
-
-            // Load booking count for seats calculation
             $ride->loadCount(['bookings as total_booked_seats' => function ($query) {
                 $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
             }]);
 
             return response()->json([
                 'success' => true,
-                'data' => new RideResource($ride)
+                'data'    => new RideResource($ride),
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Ride not found'
+                'message' => 'Ride not found',
             ], 404);
         }
     }
 
-    /**
-     * Get all rides for the authenticated driver
-     */
+    // =========================================================================
+    // DRIVER RIDE LIST
+    // =========================================================================
+
     public function getRides(Request $request): JsonResponse
     {
         try {
@@ -187,12 +222,11 @@ class RideController extends Controller
                 'data'    => $rides,
             ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::error('Failed to fetch driver rides', [
                 'driver_id' => $request->user()->id,
                 'error'     => $e->getMessage(),
             ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch rides: ' . $e->getMessage(),
@@ -200,24 +234,20 @@ class RideController extends Controller
         }
     }
 
-    /**
-     * Get details of a single ride
-     */
     public function getRideDetails(int $rideId): JsonResponse
     {
         try {
             $ride = $this->rideService->getRideById($rideId);
-
-            // ✅ FIXED: load the count so RideResource can compute seats.booked
             $ride->loadCount(['bookings as total_booked_seats' => function ($query) {
                 $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
             }]);
 
             return response()->json([
                 'success' => true,
-                'data'    => new RideResource($ride),  // ← was: $ride (raw model)
+                'data'    => new RideResource($ride),
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
                 'message' => 'Ride not found: ' . $e->getMessage(),
@@ -225,9 +255,10 @@ class RideController extends Controller
         }
     }
 
-    /**
-     * Search for available rides
-     */
+    // =========================================================================
+    // SEARCH
+    // =========================================================================
+
     public function searchRides(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -264,12 +295,8 @@ class RideController extends Controller
                 'data'    => $rides,
             ]);
 
-        } catch (\Exception $e) {
-            Log::error('Ride search failed', [
-                'error'  => $e->getMessage(),
-                'params' => $request->all(),
-            ]);
-
+        } catch (\Throwable $e) {
+            Log::error('Ride search failed', ['error' => $e->getMessage(), 'params' => $request->all()]);
             return response()->json([
                 'success' => false,
                 'message' => 'Search failed: ' . $e->getMessage(),
@@ -277,9 +304,14 @@ class RideController extends Controller
         }
     }
 
+    // =========================================================================
+    // AUTOCOMPLETE
+    // =========================================================================
+
     /**
-     * Address autocomplete
-     * Query param: text (not query — matches route definition)
+     * GET /rides/autocomplete
+     *
+     * CACHED — 1 hour per search text.
      */
     public function autocomplete(Request $request): JsonResponse
     {
@@ -288,14 +320,17 @@ class RideController extends Controller
         ]);
 
         try {
-            $results = $this->geocodingService->autocomplete($validated['text']);
+            $cacheKey = 'geocode.autocomplete.' . strtolower(trim($validated['text']));
+            $results  = Cache::remember($cacheKey, 3600, function () use ($validated) {
+                return $this->geocodingService->autocomplete($validated['text']);
+            });
 
             return response()->json([
                 'success' => true,
                 'data'    => $results,
             ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
@@ -303,16 +338,13 @@ class RideController extends Controller
         }
     }
 
-    /**
-     * Get user's rides (as driver)
-     *
-     * GET /rides/my-rides
-     */
+    // =========================================================================
+    // MY RIDES / MY BOOKINGS
+    // =========================================================================
+
     public function index(Request $request): JsonResponse
     {
         $rides = $this->rideService->getUserRides($request->user()->id);
-
-        // ✅ FIXED: Eager load to prevent N+1
         $rides->load(['driver', 'driver.profile'])
             ->loadCount(['bookings as total_booked_seats' => function ($query) {
                 $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
@@ -320,55 +352,56 @@ class RideController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => RideResource::collection($rides)
+            'data'    => RideResource::collection($rides),
         ]);
     }
 
-    /**
-     * Search rides
-     *
-     * FIXED: Eager loads relationships
-     *
-     * GET /rides/search
-     */
     public function search(Request $request): JsonResponse
     {
         $request->validate([
-            'source_lat' => 'required|numeric',
-            'source_lng' => 'required|numeric',
-            'dest_lat' => 'required|numeric',
-            'dest_lng' => 'required|numeric',
+            'source_lat'     => 'required|numeric',
+            'source_lng'     => 'required|numeric',
+            'dest_lat'       => 'required|numeric',
+            'dest_lng'       => 'required|numeric',
             'departure_date' => 'required|date',
             'seats_required' => 'required|integer|min:1',
         ]);
 
         try {
             $rides = $this->rideService->searchRides($request->all());
-
-            // ✅ Note: RideSearchService already eager loads these
-            // But we add the count here to be explicit
             $rides->loadCount(['bookings as total_booked_seats' => function ($query) {
                 $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
             }]);
 
             return response()->json([
                 'success' => true,
-                'data' => RideResource::collection($rides),
-                'count' => $rides->count()
+                'data'    => RideResource::collection($rides),
+                'count'   => $rides->count(),
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], 500);
         }
     }
 
-    /**
-     * Cancel ride
-     *
-     * POST /rides/{rideId}/cancel
-     */
+    public function myBookings(Request $request): JsonResponse
+    {
+        $bookings = $this->bookingService->getUserBookings($request->user()->id);
+        $bookings->load(['user', 'user.profile', 'ride', 'ride.driver', 'ride.driver.profile']);
+
+        return response()->json([
+            'success' => true,
+            'data'    => BookingResource::collection($bookings),
+        ]);
+    }
+
+    // =========================================================================
+    // CANCEL
+    // =========================================================================
+
     public function cancel(int $rideId, Request $request): JsonResponse
     {
         try {
@@ -376,134 +409,151 @@ class RideController extends Controller
 
             return response()->json([
                 'success' => true,
-                'data' => new RideResource($ride),
-                'message' => 'Ride cancelled successfully'
+                'data'    => new RideResource($ride),
+                'message' => 'Ride cancelled successfully',
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], 422);
         }
     }
 
-    /**
-     * Finish ride
-     *
-     * POST /rides/{rideId}/finish
-     */
-    public function finish(int $rideId, Request $request): JsonResponse
+    public function cancelRide(Request $request, int $rideId): JsonResponse
     {
         try {
-            $ride = $this->rideService->finishRide($rideId, $request->user());
+            $ride = $this->rideService->cancelRide($rideId, $request->user());
 
             return response()->json([
-                'success' => true,
-                'data' => new RideResource($ride),
-                'message' => 'Ride finished successfully'
+                'status'  => 'success',
+                'message' => 'Ride cancelled successfully.',
+                'ride'    => $ride,
             ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage()
-            ], 422);
+
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        } catch (\Throwable $e) {
+            Log::error('Ride cancellation failed', [
+                'ride_id' => $rideId,
+                'user_id' => $request->user()->id,
+                'error'   => $e->getMessage(),
+            ]);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
         }
     }
 
-    /**
-     * Get user's bookings (as passenger)
-     *
-     * FIXED: Eager loads relationships
-     *
-     * GET /bookings/my-bookings
-     */
-    public function myBookings(Request $request): JsonResponse
-    {
-        $bookings = $this->bookingService->getUserBookings($request->user()->id);
-
-        // ✅ Note: BookingService already eager loads, but being explicit
-        $bookings->load(['user', 'user.profile', 'ride', 'ride.driver', 'ride.driver.profile']);
-
-        return response()->json([
-            'success' => true,
-            'data' => BookingResource::collection($bookings)
-        ]);
-    }
-
-    /**
-     * Cancel booking
-     *
-     * POST /bookings/{bookingId}/cancel
-     */
     public function cancelBooking(int $bookingId, Request $request): JsonResponse
     {
         try {
             $booking = $this->bookingService->cancelBooking($bookingId, $request->user());
 
+            try {
+                $booking->loadMissing(['ride.driver']);
+                if ($booking->ride?->driver) {
+                    $this->notificationService->createNotification(
+                        $booking->ride->driver,
+                        'booking_cancelled_by_passenger',
+                        'إلغاء حجز',
+                        "ألغى أحد الركاب حجزه ({$booking->seats} مقعد). تم إعادة المقاعد لرحلتك.",
+                        ['booking_id' => $booking->id, 'ride_id' => $booking->ride_id],
+                        'normal',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
             return response()->json([
                 'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Booking cancelled successfully'
+                'data'    => new BookingResource($booking),
+                'message' => 'Booking cancelled successfully',
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], 422);
         }
     }
 
-    /**
-     * Accept booking (driver only)
-     *
-     * POST /bookings/{bookingId}/accept
-     */
+    // =========================================================================
+    // ACCEPT / REJECT BOOKING
+    // =========================================================================
+
     public function acceptBooking(int $bookingId, Request $request): JsonResponse
     {
         try {
             $booking = $this->bookingService->acceptBooking($bookingId, $request->user());
 
+            try {
+                $booking->loadMissing('user');
+                if ($booking->user) {
+                    $this->notificationService->createNotification(
+                        $booking->user,
+                        'booking_accepted',
+                        'تم قبول حجزك',
+                        'قبل السائق طلب حجزك. تحقق من تفاصيل رحلتك.',
+                        ['booking_id' => $booking->id, 'ride_id' => $booking->ride_id],
+                        'high',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
             return response()->json([
                 'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Booking accepted successfully'
+                'data'    => new BookingResource($booking),
+                'message' => 'Booking accepted successfully',
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], 422);
         }
     }
 
-    /**
-     * Reject booking (driver only)
-     *
-     * POST /bookings/{bookingId}/reject
-     */
     public function rejectBooking(int $bookingId, Request $request): JsonResponse
     {
         try {
             $booking = $this->bookingService->rejectBooking($bookingId, $request->user());
 
+            try {
+                $booking->loadMissing('user');
+                if ($booking->user) {
+                    $this->notificationService->createNotification(
+                        $booking->user,
+                        'booking_rejected',
+                        'تم رفض طلب حجزك',
+                        'اعتذر السائق عن قبول طلبك. يمكنك البحث عن رحلة أخرى.',
+                        ['booking_id' => $booking->id, 'ride_id' => $booking->ride_id],
+                        'normal',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
             return response()->json([
                 'success' => true,
-                'data' => new BookingResource($booking),
-                'message' => 'Booking rejected successfully'
+                'data'    => new BookingResource($booking),
+                'message' => 'Booking rejected successfully',
             ]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
             ], 422);
         }
     }
 
+    // =========================================================================
+    // CREATE WITH ROUTE
+    // =========================================================================
 
-    /**
-     * Create a ride with pre-calculated route geometry
-     * Used when the client has already selected a route from /rides/route-options
-     */
     public function createRideWithRoute(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -513,7 +563,7 @@ class RideController extends Controller
             'destination_lng'      => 'required|numeric|between:-180,180',
             'pickup_address'       => 'nullable|string|max:500',
             'destination_address'  => 'nullable|string|max:500',
-            'departure_time' => 'required|date|after:' . now()->addMinutes(5)->toDateTimeString(),
+            'departure_time'       => 'required|date|after:' . now()->addMinutes(5)->toDateTimeString(),
             'available_seats'      => 'required|integer|min:1|max:8',
             'price_per_seat'       => 'required|numeric|min:0',
             'vehicle_type'         => 'required|string|max:100',
@@ -530,31 +580,23 @@ class RideController extends Controller
         ]);
 
         try {
-            // Resolve addresses from coordinates if not provided by client
             if (empty($validated['pickup_address'])) {
                 $validated['pickup_address'] = $this->geocodingService->reverseGeocode(
                     $validated['pickup_lat'],
                     $validated['pickup_lng']
                 );
             }
-
             if (empty($validated['destination_address'])) {
                 $validated['destination_address'] = $this->geocodingService->reverseGeocode(
                     $validated['destination_lat'],
                     $validated['destination_lng']
                 );
             }
-
-            // Resolve route geometry, distance and duration if not provided by client
-            if (empty($validated['route_geometry'])
-                || empty($validated['distance'])
-                || empty($validated['duration'])
-            ) {
+            if (empty($validated['route_geometry']) || empty($validated['distance']) || empty($validated['duration'])) {
                 $route = $this->routeService->getRouteDetails(
                     ['lat' => $validated['pickup_lat'],      'lng' => $validated['pickup_lng']],
                     ['lat' => $validated['destination_lat'], 'lng' => $validated['destination_lng']]
                 );
-
                 $validated['distance']       = $validated['distance']  ?? $route['distance'];
                 $validated['duration']       = $validated['duration']  ?? $route['duration'];
                 $validated['route_geometry'] = $validated['route_geometry'] ?? [
@@ -573,90 +615,86 @@ class RideController extends Controller
             ], 201);
 
         } catch (\InvalidArgumentException $e) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 422);
-
-        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        } catch (\Throwable $e) {
             Log::error('Create ride with route failed', [
                 'user_id' => $request->user()->id,
                 'error'   => $e->getMessage(),
+                'class'   => get_class($e),
             ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 500);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
         }
     }
-    /**
-     * Cancel a ride — delegates all business logic and refund processing to RideService
-     */
-    public function cancelRide(Request $request, int $rideId): JsonResponse
+
+    // =========================================================================
+    // FINISH / CONFIRM
+    // =========================================================================
+
+    public function finish(int $rideId, Request $request): JsonResponse
     {
         try {
-            $ride = $this->rideService->cancelRide($rideId, $request->user());
+            $ride = $this->rideService->finishRide($rideId, $request->user());
 
             return response()->json([
-                'status'  => 'success',
-                'message' => 'Ride cancelled successfully.',
-                'ride'    => $ride,
+                'success' => true,
+                'data'    => new RideResource($ride),
+                'message' => 'Ride finished successfully',
             ]);
 
-        } catch (\InvalidArgumentException $e) {
+        } catch (\Throwable $e) {
             return response()->json([
-                'status'  => 'error',
+                'success' => false,
                 'message' => $e->getMessage(),
             ], 422);
-
-        } catch (\Exception $e) {
-            Log::error('Ride cancellation failed', [
-                'ride_id' => $rideId,
-                'user_id' => $request->user()->id,
-                'error'   => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 500);
         }
     }
 
-    /**
-     * Finish a ride — delegates all status transitions and booking completion to RideService
-     */
     public function finishRide(Request $request, int $rideId): JsonResponse
     {
         try {
-            $result = $this->rideService->finishRide($rideId, $request->user());
+            $this->rideService->finishRide($rideId, $request->user());
+            $this->rideService->driverConfirmCompletion($rideId, $request->user());
+
+            try {
+                $ride = $this->rideService->getRideById($rideId);
+                $ride->bookings()
+                    ->where('status', 'confirmed')
+                    ->with('user')
+                    ->get()
+                    ->each(function ($booking) use ($rideId) {
+                        if (!$booking->user) return;
+                        $this->notificationService->createNotification(
+                            $booking->user,
+                            'ride_finished',
+                            'وصلت رحلتك',
+                            'أعلن السائق إتمام الرحلة. يرجى تأكيد وصولك.',
+                            ['ride_id' => $rideId],
+                            'high',
+                            'ride'
+                        );
+                    });
+            } catch (\Throwable) {}
 
             return response()->json([
                 'status'  => 'success',
-                'message' => $result['message'],
+                'message' => 'Ride finished. Waiting for passenger to confirm.',
                 'data'    => [
-                    'ride_status'            => $result['status'],
-                    'requires_confirmation'  => $result['requires_confirmation'],
+                    'ride_status'      => 'awaiting_confirmation',
+                    'driver_confirmed' => true,
                 ],
             ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::error('Ride finish failed', [
                 'ride_id' => $rideId,
                 'user_id' => $request->user()->id,
                 'error'   => $e->getMessage(),
+                'class'   => get_class($e),
             ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 400);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 400);
         }
     }
-    /**
-     * Driver confirms ride completion
-     */
+
     public function driverConfirmCompletion(Request $request, int $rideId): JsonResponse
     {
         try {
@@ -667,23 +705,78 @@ class RideController extends Controller
                 'message' => $result['message'],
             ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Log::error('Driver confirmation failed', [
                 'ride_id' => $rideId,
                 'user_id' => $request->user()->id,
                 'error'   => $e->getMessage(),
+                'class'   => get_class($e),
             ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 400);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 400);
         }
     }
 
+    // =========================================================================
+    // PASSENGER CONFIRM COMPLETION
+    // =========================================================================
+
     /**
-     * Cancel partial seats on a booking
+     * POST /bookings/{bookingId}/passenger-confirm
+     *
+     * FIXED: catch (\Exception) → catch (\Throwable)
+     *
+     * The original catch(\Exception) silently swallowed ArgumentCountError
+     * thrown by PaymentStrategyFactory (an Error subclass, NOT Exception),
+     * causing Laravel to return an HTML 500 page instead of JSON. The escrow
+     * was already committed, leaving admin holding funds with no driver payout.
+     *
+     * Fix here + PaymentStrategyFactory fix together make this atomic.
      */
+    public function passengerConfirmCompletion(Request $request, int $booking): JsonResponse
+    {
+        try {
+            $result = $this->bookingService->passengerConfirmCompletion($booking, $request->user());
+
+            try {
+                $b = \App\Models\Booking::with('ride.driver')->find($booking);
+                if ($b?->ride?->driver) {
+                    $this->notificationService->createNotification(
+                        $b->ride->driver,
+                        'passenger_confirmed',
+                        'تأكيد إتمام الرحلة',
+                        'أكد أحد الركاب وصوله وإتمام الرحلة بنجاح.',
+                        ['booking_id' => $booking, 'ride_id' => $b->ride_id],
+                        'normal',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => $result['message'],
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error('Passenger confirmation failed', [
+                'booking_id' => $booking,
+                'user_id'    => $request->user()->id,
+                'error'      => $e->getMessage(),
+                'class'      => get_class($e),
+                'file'       => $e->getFile(),
+                'line'       => $e->getLine(),
+            ]);
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    // =========================================================================
+    // PARTIAL SEAT CANCEL
+    // =========================================================================
+
     public function cancelPartialSeats(Request $request, int $bookingId): JsonResponse
     {
         $validated = $request->validate([
@@ -697,6 +790,21 @@ class RideController extends Controller
                 $request->user()
             );
 
+            try {
+                $booking = \App\Models\Booking::with('ride.driver')->find($bookingId);
+                if ($booking?->ride?->driver) {
+                    $this->notificationService->createNotification(
+                        $booking->ride->driver,
+                        'seats_partially_cancelled',
+                        'إلغاء جزئي للمقاعد',
+                        "ألغى أحد الركاب {$validated['seats_to_cancel']} مقعد من حجزه.",
+                        ['booking_id' => $bookingId, 'ride_id' => $booking->ride_id],
+                        'normal',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
             return response()->json([
                 'status'  => 'success',
                 'message' => $result['message'],
@@ -704,79 +812,73 @@ class RideController extends Controller
             ]);
 
         } catch (\InvalidArgumentException $e) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 422);
-
-        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
+        } catch (\Throwable $e) {
             Log::error('Partial seat cancellation failed', [
                 'booking_id' => $bookingId,
                 'user_id'    => $request->user()->id,
                 'error'      => $e->getMessage(),
+                'class'      => get_class($e),
             ]);
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 400);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 400);
         }
     }
-    public function passengerConfirmCompletion(Request $request, int $booking): JsonResponse
-    {
-        try {
-            $result = $this->bookingService->passengerConfirmCompletion($booking, $request->user());
-            return response()->json([
-                'status'  => 'success',
-                'message' => $result['message'],
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Passenger confirmation failed', [
-                'booking_id' => $booking,
-                'user_id'    => $request->user()->id,
-                'error'      => $e->getMessage(),
-            ]);
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage(),
-            ], 400);
-        }
-    }
-    public function getMyBookings(Request $request): JsonResponse
-    {
-        $bookings = $this->bookingService->getUserBookings($request->user()->id);
-        $bookings->load(['user', 'user.profile', 'ride', 'ride.driver', 'ride.driver.profile']);
 
-        return response()->json([
-            'success' => true,
-            'data'    => BookingResource::collection($bookings),
-        ]);
-    }
-
-
+    // =========================================================================
+    // NO SHOW REPORTS
+    // =========================================================================
 
     public function reportPassengerNoShow(Request $request, int $bookingId): JsonResponse
     {
         try {
             $result = $this->bookingService->reportPassengerNoShow($bookingId, $request->user());
+
+            try {
+                $booking = \App\Models\Booking::with('user')->find($bookingId);
+                if ($booking?->user) {
+                    $this->notificationService->createNotification(
+                        $booking->user,
+                        'no_show_recorded',
+                        'تسجيل غياب',
+                        'أفاد السائق بغيابك في موعد انطلاق الرحلة. تم تسجيل ذلك في ملفك.',
+                        ['booking_id' => $bookingId],
+                        'high',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
             return response()->json(['status' => 'success', 'message' => $result['message']]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
         }
     }
 
-    /**
-     * Passenger reports driver as no-show.
-     * POST /rides/{rideId}/driver-no-show
-     */
     public function reportDriverNoShow(Request $request, int $rideId): JsonResponse
     {
         try {
             $result = $this->rideService->reportDriverNoShow($rideId, $request->user());
+
+            try {
+                $ride = $this->rideService->getRideById($rideId);
+                if ($ride->driver) {
+                    $this->notificationService->createNotification(
+                        $ride->driver,
+                        'driver_no_show_recorded',
+                        'تقرير غياب',
+                        'أفاد أحد الركاب بغيابك في موعد انطلاق الرحلة.',
+                        ['ride_id' => $rideId],
+                        'high',
+                        'ride'
+                    );
+                }
+            } catch (\Throwable) {}
+
             return response()->json(['status' => 'success', 'message' => $result['message']]);
-        } catch (\Exception $e) {
+
+        } catch (\Throwable $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 422);
         }
     }
-
 }

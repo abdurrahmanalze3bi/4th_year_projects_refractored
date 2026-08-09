@@ -12,6 +12,7 @@ use App\Services\Admin\AdminUserService;
 use App\Services\Score\ScoreService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
 
 /**
@@ -105,66 +106,68 @@ final class StaffOperationsController extends Controller
     public function userProfile(int $userId): JsonResponse
     {
         try {
-            $profile = Profile::with([
-                'user',
-                'comments.commenter:id,first_name,last_name',
-            ])->where('user_id', $userId)->firstOrFail();
+            // 9+ DB hits per investigation (profile + comments + score + rating + 6 ride/booking counts).
+            // Key is clean and per-user; TTL self-heals score/rating drift.
+            // Busted explicitly by StaffAdminController::approveVerification / rejectVerification.
+            $data = Cache::remember("staff.user-profile.{$userId}", now()->addMinutes(2), function () use ($userId) {
+                $profile = Profile::with([
+                    'user',
+                    'comments.commenter:id,first_name,last_name',
+                ])->where('user_id', $userId)->firstOrFail();
 
-            $user = $profile->user;
+                $user = $profile->user;
 
-            // ── Score ──────────────────────────────────────────────────────
-            $userScore = $this->scoreService->getScore($user);
+                // ── Score ──────────────────────────────────────────────────
+                $userScore = $this->scoreService->getScore($user);
 
-            // ── Rating stats ───────────────────────────────────────────────
-            $ratingStats = UserRating::where('rated_user_id', $userId)
-                ->selectRaw('COUNT(*) as total, ROUND(AVG(rating), 2) as average')
-                ->first();
+                // ── Rating stats ───────────────────────────────────────────
+                $ratingStats = UserRating::where('rated_user_id', $userId)
+                    ->selectRaw('COUNT(*) as total, ROUND(AVG(rating), 2) as average')
+                    ->first();
 
-            // ── Ride history counts ────────────────────────────────────────
-            $driverBase    = \App\Models\Ride::where('driver_id', $userId);
-            $passengerBase = Booking::where('user_id', $userId);
+                // ── Ride history counts ────────────────────────────────────
+                $driverBase    = \App\Models\Ride::where('driver_id', $userId);
+                $passengerBase = Booking::where('user_id', $userId);
 
-            $asDriver = [
-                'total'     => (clone $driverBase)->count(),
-                'completed' => (clone $driverBase)->where('status', 'finished')->count(),
-                'cancelled' => (clone $driverBase)->where('status', 'cancelled')->count(),
-            ];
+                $asDriver = [
+                    'total'     => (clone $driverBase)->count(),
+                    'completed' => (clone $driverBase)->where('status', 'finished')->count(),
+                    'cancelled' => (clone $driverBase)->where('status', 'cancelled')->count(),
+                ];
 
-            $asPassenger = [
-                'total'     => (clone $passengerBase)->count(),
-                'completed' => (clone $passengerBase)->where('status', 'completed')->count(),
-                'cancelled' => (clone $passengerBase)->where('status', 'cancelled')->count(),
-            ];
+                $asPassenger = [
+                    'total'     => (clone $passengerBase)->count(),
+                    'completed' => (clone $passengerBase)->where('status', 'completed')->count(),
+                    'cancelled' => (clone $passengerBase)->where('status', 'cancelled')->count(),
+                ];
 
-            // ── Comments received ──────────────────────────────────────────
-            $comments = $profile->comments->map(fn ($c) => [
-                'id'         => $c->id,
-                'comment'    => $c->comment,
-                'commenter'  => [
-                    'id'   => $c->commenter?->id,
-                    'name' => trim(($c->commenter?->first_name ?? '') . ' ' . ($c->commenter?->last_name ?? '')),
-                ],
-                'created_at' => $c->created_at->toIso8601String(),
-            ])->values();
+                // ── Comments received ──────────────────────────────────────
+                $comments = $profile->comments->map(fn ($c) => [
+                    'id'         => $c->id,
+                    'comment'    => $c->comment,
+                    'commenter'  => [
+                        'id'   => $c->commenter?->id,
+                        'name' => trim(($c->commenter?->first_name ?? '') . ' ' . ($c->commenter?->last_name ?? '')),
+                    ],
+                    'created_at' => $c->created_at->toIso8601String(),
+                ])->values()->all();
 
-            return response()->json([
-                'status' => 'success',
-                'data'   => [
-                    'id'                  => $user->id,
-                    'full_name'           => trim("{$user->first_name} {$user->last_name}"),
-                    'email'               => $user->email,
-                    'gender'              => $user->gender,
-                    'address'             => $user->address,
-                    'verification_status' => $user->verification_status,
-                    'is_verified_driver'  => (bool) $user->is_verified_driver,
+                return [
+                    'id'                    => $user->id,
+                    'full_name'             => trim("{$user->first_name} {$user->last_name}"),
+                    'email'                 => $user->email,
+                    'gender'                => $user->gender,
+                    'address'               => $user->address,
+                    'verification_status'   => $user->verification_status,
+                    'is_verified_driver'    => (bool) $user->is_verified_driver,
                     'is_verified_passenger' => (bool) $user->is_verified_passenger,
-                    'account_status'      => $user->status == 1 ? 'active' : 'suspended',
-                    'joined_at'           => $user->created_at->toIso8601String(),
-                    'profile_photo'       => $profile->profile_photo
+                    'account_status'        => $user->status == 1 ? 'active' : 'suspended',
+                    'joined_at'             => $user->created_at->toIso8601String(),
+                    'profile_photo'         => $profile->profile_photo
                         ? asset("storage/{$profile->profile_photo}")
                         : null,
-                    'description'         => $profile->description,
-                    'score'               => [
+                    'description'           => $profile->description,
+                    'score'                 => [
                         'score'               => $userScore->score,
                         'tier'                => $userScore->tier,
                         'cancel_rate'         => round($userScore->cancel_rate, 2),
@@ -180,7 +183,12 @@ final class StaffOperationsController extends Controller
                         'as_passenger' => $asPassenger,
                     ],
                     'comments_received' => $comments,
-                ],
+                ];
+            });
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $data,
             ]);
         } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
             return response()->json([

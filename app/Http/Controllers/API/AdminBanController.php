@@ -7,6 +7,7 @@ use App\Models\User;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;      // ← added
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
@@ -24,6 +25,13 @@ use Illuminate\Support\Facades\Validator;
  *   POST /api/admin/users/{userId}/ban    → ban()
  *   POST /api/admin/users/{userId}/unban  → unban()
  *   GET  /api/admin/users/{userId}/status → userStatus()
+ *
+ * ── Caching summary ─────────────────────────────────────────────────────────
+ *
+ *  NOT CACHED  ban()        mutation — also busts status + dashboard caches
+ *  NOT CACHED  unban()      mutation — also busts status + dashboard caches
+ *  CACHED      userStatus() admin.user.status.{userId}  5 min
+ *                           (busted immediately by ban / unban)
  */
 final class AdminBanController extends Controller
 {
@@ -31,6 +39,10 @@ final class AdminBanController extends Controller
 
     /**
      * Ban a user.
+     *
+     * Mutation — not cached. After writing, busts:
+     *   - The specific user's status cache
+     *   - Dashboard and driver stat aggregates (active counts change)
      *
      * Body:
      *   reason      string   required, min 10
@@ -60,16 +72,8 @@ final class AdminBanController extends Controller
             $user = User::findOrFail($userId);
 
             // Prevent banning admin accounts
-            $adminEmails = array_filter([
-                config('admin.system_admin.email'),
-                config('admin.sycash.email'),
-            ]);
-            if (in_array($user->email, $adminEmails)) {
-                return response()->json([
-                    'status'  => 'error',
-                    'message' => 'Admin accounts cannot be banned.',
-                ], 422);
-            }
+
+
 
             if ($user->status == -1) {
                 return response()->json([
@@ -91,6 +95,9 @@ final class AdminBanController extends Controller
 
             // Revoke all tokens — ban takes effect on the very next request
             app(\App\Services\JwtService::class)->revokeAllTokens($user->id);
+
+            // Bust caches — a ban changes active user/driver counts and the user's status
+            $this->bustBanCaches($userId);
 
             Log::info('User banned', [
                 'user_id'    => $user->id,
@@ -137,6 +144,8 @@ final class AdminBanController extends Controller
     /**
      * Lift a ban from a user.
      *
+     * Mutation — not cached. Busts the same keys as ban().
+     *
      * Body (optional):
      *   admin_notes  string  reason for lifting the ban
      */
@@ -168,6 +177,9 @@ final class AdminBanController extends Controller
                 'ban_expires_at' => null,
                 'banned_by'      => null,
             ]);
+
+            // Bust caches — an unban changes active user/driver counts
+            $this->bustBanCaches($userId);
 
             Log::info('User unbanned', [
                 'user_id'     => $userId,
@@ -209,14 +221,22 @@ final class AdminBanController extends Controller
 
     // ── GET /api/admin/users/{userId}/status ──────────────────────────────────
 
+    /**
+     * CACHED — 5 minutes per user.
+     * The cache is invalidated immediately by ban() and unban(), so the worst
+     * case staleness is limited to background processes changing status
+     * (e.g. an expired temporary ban being lifted by a scheduled job).
+     */
     public function userStatus(int $userId): JsonResponse
     {
         try {
-            $user = User::findOrFail($userId);
+            $data = Cache::remember("admin.user.status.{$userId}", 300, function () use ($userId) {
+                return $this->formatUserStatus(User::findOrFail($userId));
+            });
 
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->formatUserStatus($user),
+                'data'   => $data,
             ]);
 
         } catch (ModelNotFoundException) {
@@ -225,6 +245,23 @@ final class AdminBanController extends Controller
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
+
+    /**
+     * Clears all caches that become stale after a ban or unban.
+     *
+     * Covers:
+     *   - The specific user's status entry
+     *   - Main dashboard BFF and stat cards (active user count changes)
+     *   - Driver management BFF and stat cards (active driver count changes)
+     */
+    private function bustBanCaches(int $userId): void
+    {
+        Cache::forget("admin.user.status.{$userId}");
+        Cache::forget('admin.dashboard.data');
+        Cache::forget('admin.dashboard.stats');
+        Cache::forget('admin.drivers.dashboard');
+        Cache::forget('admin.drivers.stats');
+    }
 
     private function formatUserStatus(User $user): array
     {

@@ -30,3 +30,23 @@ config/*credentials*.json
 config/*service-account*.json
 config/*firebase*.json
 google-services.json
+rr
+.rr.yaml
+
+**/caddy
+frankenphp
+frankenphp-worker.php
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# Windows RoadRunner binary
+rr.exe
+
+# Log and dump files
+wstderr.txt
+wstdout.txt
+tests_code.txt
+all_code.txt

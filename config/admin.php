@@ -1,36 +1,19 @@
 <?php
 
+// config/admin.php — wallet routing ONLY.
+// Credentials (email, password) have been removed — they now live in the
+// employees table, seeded at deployment via SpecialAccountSeeder.
+// These phone numbers are the only thing wallet services need to find
+// the correct wallet row when processing transactions.
+
 return [
     'system_admin' => [
-        'email'    => env('ADMIN_PRIMARY_EMAIL',    'system_admin@admin.com'),
-        'username' => env('ADMIN_PRIMARY_USERNAME', 'admin'),
-        'password' => env('ADMIN_PRIMARY_PASSWORD', 'admin'),// ✅ Added default
-        'phone' => env('ADMIN_PRIMARY_PHONE', '0912345678'),
-        'first_name' => 'Admin',
-        'last_name' => 'User',
+        'phone'         => env('ADMIN_WALLET_PHONE', '0912345678'),
         'wallet_prefix' => 'ADM',
-        'permissions' => ['*'],
     ],
 
     'sycash' => [
-        'email'    => env('ADMIN_SYCASH_EMAIL',    'sycash@admin.com'),
-        'username' => env('ADMIN_SYCASH_USERNAME', 'sycash'),   // ← add this line
-        'password' => env('ADMIN_SYCASH_PASSWORD', 'sycash123'),
-        'phone' => env('ADMIN_SYCASH_PHONE', '0987654321'),
-        'first_name' => 'SyCash',
-        'last_name' => 'Admin',
+        'phone'         => env('SYCASH_WALLET_PHONE', '0987654321'),
         'wallet_prefix' => 'SYC',
-        'permissions' => ['wallet.view', 'wallet.charge'],
-    ],
-
-    'session' => [
-        'lifetime' => 120,
-        'driver' => 'database',
-    ],
-
-    'security' => [
-        'max_login_attempts' => 3,
-        'lockout_duration' => 15,
-        'require_2fa' => false,
     ],
 ];

@@ -8,8 +8,9 @@ use App\Services\Staff\StaffComplaintService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
-
+use App\Services\NotificationService;
 /**
  * StaffComplaintController
  *
@@ -24,8 +25,8 @@ final class StaffComplaintController extends Controller
 {
     public function __construct(
         private readonly StaffComplaintService $complaintService,
+        private readonly NotificationService   $notificationService,
     ) {}
-
     // ── GET /api/staff/complaints ─────────────────────────────────────────────
     public function index(Request $request): JsonResponse
     {
@@ -93,6 +94,9 @@ final class StaffComplaintController extends Controller
                 agent:       $agent,
             );
 
+            // in_review decrements, 'all' shifts — badge counts are now stale
+            Cache::forget('staff.complaint-counts');
+
             return response()->json([
                 'status'  => 'success',
                 'message' => 'Complaint escalated to admin successfully.',
@@ -120,6 +124,9 @@ final class StaffComplaintController extends Controller
         try {
             $agent     = $request->attributes->get('staffEmployee');
             $complaint = $this->complaintService->openComplaint($complaintId, $agent);
+
+            // pending→in_review transition changes both badge counts
+            Cache::forget('staff.complaint-counts');
 
             return response()->json([
                 'status' => 'success',
@@ -164,6 +171,24 @@ final class StaffComplaintController extends Controller
                 agent:           $agent,
             );
 
+            try {
+                $complaint->loadMissing('user');
+                if ($complaint->user) {
+                    $this->notificationService->createNotification(
+                        $complaint->user,
+                        'complaint_response',
+                        'رد على شكواك',
+                        "تم تحديث حالة شكواك إلى: {$newStatus->label()}.",
+                        ['complaint_id' => $complaintId],
+                        'normal',
+                        'system'
+                    );
+                }
+            } catch (\Throwable) {}
+
+            // Status transition changes resolved/closed/in_review badge counts
+            Cache::forget('staff.complaint-counts');
+
             return response()->json([
                 'status'  => 'success',
                 'message' => "Complaint marked as {$newStatus->label()} and user has been notified.",
@@ -185,18 +210,23 @@ final class StaffComplaintController extends Controller
     // ── Private: tab badge counts ─────────────────────────────────────────────
     private function statusCounts(): array
     {
-        $rows = \App\Models\Complaint::query()
-            ->selectRaw('status, COUNT(*) as total')
-            ->groupBy('status')
-            ->pluck('total', 'status')
-            ->toArray();
+        // GROUP BY aggregate drives all 5 tab badges; called on every index() load.
+        // Busted by escalate(), show(), respond() in this controller.
+        // New complaints from the passenger side self-heal within 1 min.
+        return Cache::remember('staff.complaint-counts', now()->addMinutes(1), function () {
+            $rows = \App\Models\Complaint::query()
+                ->selectRaw('status, COUNT(*) as total')
+                ->groupBy('status')
+                ->pluck('total', 'status')
+                ->toArray();
 
-        return [
-            'all'       => array_sum($rows),
-            'pending'   => $rows[ComplaintStatus::PENDING->value]   ?? 0,
-            'in_review' => $rows[ComplaintStatus::IN_REVIEW->value] ?? 0,
-            'resolved'  => $rows[ComplaintStatus::RESOLVED->value]  ?? 0,
-            'closed'    => $rows[ComplaintStatus::CLOSED->value]    ?? 0,
-        ];
+            return [
+                'all'       => array_sum($rows),
+                'pending'   => $rows[ComplaintStatus::PENDING->value]   ?? 0,
+                'in_review' => $rows[ComplaintStatus::IN_REVIEW->value] ?? 0,
+                'resolved'  => $rows[ComplaintStatus::RESOLVED->value]  ?? 0,
+                'closed'    => $rows[ComplaintStatus::CLOSED->value]    ?? 0,
+            ];
+        });
     }
 }

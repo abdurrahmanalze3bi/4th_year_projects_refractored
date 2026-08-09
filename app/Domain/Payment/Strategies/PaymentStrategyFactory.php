@@ -3,25 +3,27 @@
 namespace App\Domain\Payment\Strategies;
 
 use App\Enums\PaymentMethod;
+use App\Services\Payment\WalletTransactionService;
 use InvalidArgumentException;
 
 /**
  * Payment Strategy Factory
  *
- * FIXED: Uses PaymentMethod enum instead of strings
- *
- * Creates appropriate payment strategy based on payment method
+ * FIXED: Injects WalletTransactionService via constructor so
+ *        EPayPaymentStrategy receives its required dependency
+ *        instead of being constructed with zero arguments
+ *        (which threw ArgumentCountError → silent 500).
  */
 final class PaymentStrategyFactory
 {
     private array $strategies = [];
 
-    public function __construct()
-    {
-        // Register all available payment strategies
+    public function __construct(
+        private readonly WalletTransactionService $walletService,
+    ) {
         $this->strategies = [
             new CashPaymentStrategy(),
-            new EPayPaymentStrategy(),
+            new EPayPaymentStrategy($this->walletService),
         ];
     }
 
@@ -33,7 +35,6 @@ final class PaymentStrategyFactory
      */
     public function make(string|PaymentMethod $paymentMethod): PaymentStrategy
     {
-        // Convert enum to string if needed
         $methodValue = $paymentMethod instanceof PaymentMethod
             ? $paymentMethod->value
             : $paymentMethod;

@@ -7,20 +7,24 @@ use App\Interfaces\PhotoRepositoryInterface;
 use App\Interfaces\ProfileRepositoryInterface;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
-
+use App\Services\NotificationService;
 class VerificationController extends Controller
 {
-    private PhotoRepositoryInterface $photoRepo;
+    private PhotoRepositoryInterface   $photoRepo;
     private ProfileRepositoryInterface $profileRepo;
+    private NotificationService        $notificationService;
 
     public function __construct(
-        PhotoRepositoryInterface $photoRepo,
-        ProfileRepositoryInterface $profileRepo
+        PhotoRepositoryInterface   $photoRepo,
+        ProfileRepositoryInterface $profileRepo,
+        NotificationService        $notificationService,
     ) {
-        $this->photoRepo   = $photoRepo;
-        $this->profileRepo = $profileRepo;
+        $this->photoRepo           = $photoRepo;
+        $this->profileRepo         = $profileRepo;
+        $this->notificationService = $notificationService;
     }
 
     /* ------------------------------------------
@@ -73,7 +77,6 @@ class VerificationController extends Controller
                 }
             }
 
-            // FIX: was $profile->id (profile PK) — must be $user->id (FK used in WHERE clause)
             if (!empty($profileData)) {
                 $this->profileRepo->updateProfile($user->id, $profileData);
             }
@@ -83,6 +86,20 @@ class VerificationController extends Controller
                 'is_verified_driver'    => false,
                 'is_verified_passenger' => false,
             ]);
+
+            try {
+                $this->notificationService->createNotification(
+                    $user,
+                    'verification_submitted',
+                    'تم استلام طلب التحقق',
+                    'تم استلام مستنداتك وستتم مراجعتها من قِبل الفريق قريباً.',
+                    [],
+                    'normal',
+                    'system'
+                );
+            } catch (\Throwable) {}
+
+            Cache::forget("verification.status.{$user->id}");
 
             return response()->json([
                 'success' => true,
@@ -135,7 +152,7 @@ class VerificationController extends Controller
                 'back_id_pic'         => 'back_id',
                 'driving_license_pic' => 'license',
                 'mechanic_card_pic'   => 'mechanic_card',
-                'car_pic'             => 'car_pic', // folder only
+                'car_pic'             => 'car_pic',
             ];
 
             $profileData = [];
@@ -163,8 +180,6 @@ class VerificationController extends Controller
             }
 
             $merged = array_merge($profileData, $vehicleData);
-
-            // FIX: was $profile->id (profile PK) — must be $user->id (FK used in WHERE clause)
             if (!empty($merged)) {
                 $this->profileRepo->updateProfile($user->id, $merged);
             }
@@ -174,6 +189,20 @@ class VerificationController extends Controller
                 'is_verified_driver'    => false,
                 'is_verified_passenger' => false,
             ]);
+
+            try {
+                $this->notificationService->createNotification(
+                    $user,
+                    'verification_submitted',
+                    'تم استلام طلب التحقق',
+                    'تم استلام مستنداتك وستتم مراجعتها من قِبل الفريق قريباً.',
+                    [],
+                    'normal',
+                    'system'
+                );
+            } catch (\Throwable) {}
+
+            Cache::forget("verification.status.{$user->id}");
 
             return response()->json([
                 'success' => true,
@@ -189,36 +218,41 @@ class VerificationController extends Controller
     public function status(int $userId)
     {
         try {
-            $user = User::findOrFail($userId);
+            $data = Cache::remember("verification.status.{$userId}", 120, function () use ($userId) {
+                $user = User::findOrFail($userId);
 
-            $statusLabels = [
-                'none'     => 'not_verified',
-                'pending'  => 'pending',
-                'rejected' => 'rejected',
-                'approved' => 'approved',
-            ];
+                $statusLabels = [
+                    'none'     => 'not_verified',
+                    'pending'  => 'pending',
+                    'rejected' => 'rejected',
+                    'approved' => 'approved',
+                ];
 
-            $documents = $this->photoRepo
-                ->getUserDocumentsByType($userId, ['face_id', 'back_id', 'license', 'mechanic_card'])
-                ->mapWithKeys(fn($doc) => [$doc->type => asset("storage/{$doc->path}")]);
+                $documents = $this->photoRepo
+                    ->getUserDocumentsByType($userId, ['face_id', 'back_id', 'license', 'mechanic_card'])
+                    ->mapWithKeys(fn($doc) => [$doc->type => asset("storage/{$doc->path}")])
+                    ->toArray();
 
-            $profile = $this->profileRepo->getProfileByUserId($userId);
+                $profile = $this->profileRepo->getProfileByUserId($userId);
 
-            return response()->json([
-                'success'   => true,
-                'status'    => $statusLabels[$user->verification_status] ?? 'unknown',
-                'documents' => $documents,
-                'vehicle'   => $profile ? [
-                    'type'  => $profile->type_of_car,
-                    'color' => $profile->color_of_car,
-                    'seats' => $profile->number_of_seats,
-                    'photo' => $profile->car_pic ? asset("storage/{$profile->car_pic}") : null,
-                ] : null,
-                'verified'  => [
-                    'passenger' => (bool) $user->is_verified_passenger,
-                    'driver'    => (bool) $user->is_verified_driver,
-                ],
-            ]);
+                return [
+                    'success'   => true,
+                    'status'    => $statusLabels[$user->verification_status] ?? 'unknown',
+                    'documents' => $documents,
+                    'vehicle'   => $profile ? [
+                        'type'  => $profile->type_of_car,
+                        'color' => $profile->color_of_car,
+                        'seats' => $profile->number_of_seats,
+                        'photo' => $profile->car_pic ? asset("storage/{$profile->car_pic}") : null,
+                    ] : null,
+                    'verified'  => [
+                        'passenger' => (bool) $user->is_verified_passenger,
+                        'driver'    => (bool) $user->is_verified_driver,
+                    ],
+                ];
+            });
+
+            return response()->json($data);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,

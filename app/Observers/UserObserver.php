@@ -2,9 +2,9 @@
 
 namespace App\Observers;
 
+use App\Interfaces\ProfileRepositoryInterface;
 use App\Models\User;
 use App\Models\UserRating;
-use App\Interfaces\ProfileRepositoryInterface;
 use App\Services\Score\ScoreService;
 
 class UserObserver
@@ -16,26 +16,22 @@ class UserObserver
 
     public function created(User $user): void
     {
-        // Auto-create profile row
+        // Auto-create the profile row for this user
         $this->profileRepo->createFromUser($user);
 
         // Initialize trust score at 70 (Silver tier) per SRS v5
         $this->scoreService->initializeScore($user);
 
-        // Seed a 3.0 base rating so every new user starts visible with a rating.
-        // The admin account acts as the system rater (same pattern as verifyDriver).
-        // firstOrCreate prevents duplicates if the observer fires more than once.
-        $adminUser = User::where('email', config('admin.system_admin.email'))->first();
-        if ($adminUser) {
-            UserRating::firstOrCreate(
-                [
-                    'rater_id'      => $adminUser->id,
-                    'rated_user_id' => $user->id,
-                ],
-                [
-                    'rating' => 3.0,
-                ]
-            );
-        }
+        // Seed a 3.0 base rating with rater_id = NULL (platform-assigned).
+        // No longer depends on a system_admin User row.
+        UserRating::firstOrCreate(
+            [
+                'rater_id'      => null,
+                'rated_user_id' => $user->id,
+            ],
+            [
+                'rating' => 3.0,
+            ]
+        );
     }
 }

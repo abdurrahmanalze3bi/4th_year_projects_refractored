@@ -294,37 +294,32 @@ class RideRepository implements RideRepositoryInterface
     }
 
     /**
-     * Create a ride with pre-calculated geometry
+     * Create a ride with pre-calculated geometry.
+     *
+     * Uses fill() against $fillable instead of listing every column manually.
+     * This means any new fillable field added to the Ride model (e.g. cash_creation_fee,
+     * cash_fee_deferred) is automatically passed through without touching this method.
+     *
+     * Spatial columns (pickup_location, destination_location) are excluded from fill()
+     * and assigned separately so the custom mutators (ST_GeomFromText) always fire.
      */
     public function createRideWithGeometry(array $data): Ride
     {
         return DB::transaction(function () use ($data) {
             $ride = new Ride();
-            $ride->driver_id = $data['driver_id'];
-            $ride->pickup_address = $data['pickup_address'];
-            $ride->destination_address = $data['destination_address'];
-            $ride->distance = $data['distance'];
-            $ride->duration = $data['duration'];
-            $ride->route_geometry = $data['route_geometry'];
-            $ride->chosen_route_index = $data['chosen_route_index'] ?? null;
-            $ride->departure_time = Carbon::parse($data['departure_time']);
-            $ride->available_seats = $data['available_seats'];
-            $ride->price_per_seat = $data['price_per_seat'];
-            $ride->payment_method = $data['payment_method'];
-            $ride->vehicle_type = $data['vehicle_type'];
-            $ride->notes = $data['notes'] ?? null;
-            $ride->booking_type = $data['booking_type'] ?? 'direct';
-            $ride->communication_number = $data['communication_number'] ?? null;
 
-            $ride->pickup_location = [
-                'lat' => $data['pickup_location']['lat'],
-                'lng' => $data['pickup_location']['lng'],
-            ];
+            // Fill every $fillable column except the two spatial ones.
+            // Any column present in $data AND in $fillable is written automatically —
+            // new columns never need a matching line added here.
+            $ride->fill(array_diff_key($data, array_flip([
+                'pickup_location',
+                'destination_location',
+            ])));
 
-            $ride->destination_location = [
-                'lat' => $data['destination_location']['lat'],
-                'lng' => $data['destination_location']['lng'],
-            ];
+            // Spatial columns go through the custom mutators so they are stored
+            // as ST_GeomFromText(POINT(...)) rather than plain JSON.
+            $ride->pickup_location      = $data['pickup_location'];
+            $ride->destination_location = $data['destination_location'];
 
             $ride->save();
             return $ride->fresh();

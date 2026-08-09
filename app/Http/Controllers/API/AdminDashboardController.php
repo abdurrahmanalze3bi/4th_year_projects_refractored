@@ -10,6 +10,7 @@ use App\Services\Admin\AdminReportService;
 use App\Services\Admin\AdminExportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;      // ← added
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
@@ -23,7 +24,7 @@ final class AdminDashboardController extends Controller
     ) {}
 
     // =========================================================================
-    // AUTH
+    // AUTH — never cached (tokens / credentials must always be live)
     // =========================================================================
 
     public function login(Request $request): JsonResponse
@@ -95,7 +96,10 @@ final class AdminDashboardController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
-        $this->authService->logout($request->user()->id);
+        /** @var \App\Models\Employee $admin */
+        $admin = $request->attributes->get('staffEmployee');
+
+        $this->authService->logout($admin->id);
 
         return response()->json([
             'status'  => 'success',
@@ -107,10 +111,18 @@ final class AdminDashboardController extends Controller
     // DASHBOARD — BFF
     // =========================================================================
 
+    /**
+     * CACHED — 5 minutes.
+     * The BFF payload is the most expensive call (multiple sub-queries across
+     * users, rides, wallets). All 3 cluster nodes share this single Redis key,
+     * so only ONE MySQL hit per 5-minute window regardless of traffic.
+     */
     public function dashboard(): JsonResponse
     {
         try {
-            $data = $this->reportService->getDashboardData();
+            $data = Cache::remember('admin.dashboard.data', 300, function () {
+                return $this->reportService->getDashboardData();
+            });
 
             return response()->json([
                 'status' => 'success',
@@ -126,46 +138,81 @@ final class AdminDashboardController extends Controller
         }
     }
 
+    /**
+     * CACHED — 5 minutes.
+     * Stat cards are aggregate counts. A 5-minute stale window is acceptable
+     * for an admin overview panel.
+     */
     public function dashboardStats(): JsonResponse
     {
+        $data = Cache::remember('admin.dashboard.stats', 300, function () {
+            return $this->reportService->getStats();
+        });
+
         return response()->json([
             'status' => 'success',
-            'data'   => $this->reportService->getStats(),
+            'data'   => $data,
         ]);
     }
 
+    /**
+     * CACHED — 15 minutes per $months value.
+     * Growth chart is historical; month-level data does not change within a session.
+     * Up to 12 possible Redis keys (months 1–12).
+     */
     public function dashboardGrowth(Request $request): JsonResponse
     {
         $months = (int) $request->get('months', 6);
         $months = max(1, min($months, 12));
 
+        $data = Cache::remember("admin.dashboard.growth.{$months}", 900, function () use ($months) {
+            return $this->reportService->getGrowthChart($months);
+        });
+
         return response()->json([
             'status' => 'success',
-            'data'   => $this->reportService->getGrowthChart($months),
+            'data'   => $data,
         ]);
     }
 
+    /**
+     * CACHED — 30 minutes.
+     * City/geographic distribution shifts very slowly; a long TTL is safe.
+     */
     public function dashboardCities(): JsonResponse
     {
+        $data = Cache::remember('admin.dashboard.cities', 1800, function () {
+            return $this->reportService->getCityDistribution();
+        });
+
         return response()->json([
             'status' => 'success',
-            'data'   => $this->reportService->getCityDistribution(),
+            'data'   => $data,
         ]);
     }
 
+    /**
+     * CACHED — 1 minute per $limit value.
+     * "Recent" implies freshness, so 60 s is the shortest cache window
+     * worth having (still removes the per-request DB hit under load).
+     */
     public function dashboardRecent(Request $request): JsonResponse
     {
         $limit = (int) $request->get('limit', 10);
         $limit = max(1, min($limit, 50));
 
+        $data = Cache::remember("admin.dashboard.recent.{$limit}", 60, function () use ($limit) {
+            return $this->reportService->getRecentActivities($limit);
+        });
+
         return response()->json([
             'status' => 'success',
-            'data'   => $this->reportService->getRecentActivities($limit),
+            'data'   => $data,
         ]);
     }
 
     // =========================================================================
-    // WALLET
+    // WALLET — never cached (live financial data must always be exact)
     // =========================================================================
 
     public function getAdminWallet(Request $request): JsonResponse
@@ -271,6 +318,13 @@ final class AdminDashboardController extends Controller
     // FINANCIAL REPORT  [primary only]
     // =========================================================================
 
+    /**
+     * CACHED — 5 minutes per date range.
+     * generateReport() is the most expensive query in the system. A 5-minute
+     * cache window is safe because financial totals don't shift meaningfully
+     * within that period. Key includes the date range so different ranges each
+     * get their own Redis entry.
+     */
     public function showReport(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -286,10 +340,16 @@ final class AdminDashboardController extends Controller
         }
 
         try {
-            $report = $this->reportService->generateReport(
-                $request->input('start_date'),
-                $request->input('end_date'),
-            );
+            $startKey = $request->input('start_date', 'all');
+            $endKey   = $request->input('end_date', 'all');
+            $cacheKey = "admin.report.{$startKey}.{$endKey}";
+
+            $report = Cache::remember($cacheKey, 300, function () use ($request) {
+                return $this->reportService->generateReport(
+                    $request->input('start_date'),
+                    $request->input('end_date'),
+                );
+            });
 
             return response()->json([
                 'status'      => 'success',
@@ -306,20 +366,9 @@ final class AdminDashboardController extends Controller
     }
 
     // =========================================================================
-    // PDF EXPORT  [primary only]
+    // PDF EXPORT  [primary only] — never cached (binary stream, no-store header)
     // =========================================================================
 
-    /**
-     * GET /api/admin/export/pdf
-     *
-     * Query params (all optional):
-     *   start_date  Y-m-d
-     *   end_date    Y-m-d   must be >= start_date
-     *   sections[]  any of: stats, financial, growth, cities, recent
-     *               omit to include ALL sections
-     *
-     * Returns: application/pdf (inline stream)
-     */
     public function exportPdf(Request $request): \Symfony\Component\HttpFoundation\Response
     {
         $validator = Validator::make($request->all(), [
@@ -369,6 +418,11 @@ final class AdminDashboardController extends Controller
     // VERIFICATION  [primary only]
     // =========================================================================
 
+    /**
+     * NOT cached.
+     * Admins work through this as a live action queue. Caching would show a
+     * stale count in the same session immediately after approving/rejecting.
+     */
     public function pendingVerifications(): JsonResponse
     {
         $pending = \App\Models\User::with(['photos', 'profile'])
@@ -394,8 +448,41 @@ final class AdminDashboardController extends Controller
         return response()->json(['status' => 'success', 'data' => $pending]);
     }
 
-    public function approveVerification(int $userId): JsonResponse
+    /**
+     * Mutation — not cached. Busts all dashboard and driver-stat caches so the
+     * next read reflects the newly verified user.
+     */
+    public function approveVerification(int $userId, Request $request): JsonResponse
     {
+        $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+            'national_id' => 'required|string|max:50',
+        ], [
+            'national_id.required' => 'The national ID number is required to approve verification.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'error',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $nationalId = trim($request->input('national_id'));
+
+        $duplicate = \App\Models\User::where('national_id', $nationalId)
+            ->where('id', '!=', $userId)
+            ->first();
+
+        if ($duplicate) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'This national ID is already linked to another verified account. Verification blocked.',
+                'data'    => [
+                    'conflicting_user_id' => $duplicate->id,
+                ],
+            ], 422);
+        }
+
         try {
             $user     = \App\Models\User::with(['photos'])->findOrFail($userId);
             $docTypes = $user->photos->pluck('type')->toArray();
@@ -406,14 +493,22 @@ final class AdminDashboardController extends Controller
                 ? $repo->verifyDriver($userId)
                 : $repo->verifyPassenger($userId);
 
+            $verifiedUser->national_id = $nationalId;
+            $verifiedUser->save();
+
+            // Bust caches that reflect user/driver counts and verification stats
+            $this->bustVerificationCaches();
+
             return response()->json([
                 'status'  => 'success',
                 'message' => ($isDriver ? 'Driver' : 'Passenger') . ' verification approved',
                 'user'    => [
                     'id'                  => $verifiedUser->id,
+                    'national_id'         => $verifiedUser->national_id,
                     'verification_status' => $verifiedUser->verification_status,
                 ],
             ]);
+
         } catch (\Exception $e) {
             return response()->json([
                 'status'  => 'error',
@@ -422,6 +517,9 @@ final class AdminDashboardController extends Controller
         }
     }
 
+    /**
+     * Mutation — not cached. Busts the same caches as approveVerification.
+     */
     public function rejectVerification(int $userId): JsonResponse
     {
         $user = \App\Models\User::findOrFail($userId);
@@ -431,6 +529,32 @@ final class AdminDashboardController extends Controller
             'is_verified_driver'    => false,
         ]);
 
+        $this->bustVerificationCaches();
+
         return response()->json(['status' => 'success', 'message' => 'Verification rejected']);
+    }
+
+    // =========================================================================
+    // Private helpers
+    // =========================================================================
+
+    /**
+     * Clears all caches that become stale after a verification decision.
+     *
+     * Covers:
+     *   - Main dashboard BFF and stat cards
+     *   - Driver management BFF and stat cards
+     *   - Verification efficiency (3 period variants)
+     */
+    private function bustVerificationCaches(): void
+    {
+        Cache::forget('admin.dashboard.data');
+        Cache::forget('admin.dashboard.stats');
+        Cache::forget('admin.drivers.dashboard');
+        Cache::forget('admin.drivers.stats');
+
+        foreach (['day', 'week', 'month'] as $period) {
+            Cache::forget("admin.drivers.verification.efficiency.{$period}");
+        }
     }
 }

@@ -3,259 +3,294 @@
 namespace App\Services\Staff;
 
 use App\Enums\StaffRole;
-use App\Interfaces\EmployeeRepositoryInterface;
 use App\Models\Employee;
-use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
 
 /**
  * EmployeeManagementService
  *
- * Handles employee CRUD with role-based authorization enforcement.
+ * All CRUD for Employee accounts lives here — never in the controller.
  *
- * Authorization matrix:
- *   system_admin → can create / manage admin + support_agent
- *   admin        → can create / manage support_agent only
- *   support_agent→ no management permissions
- *
- * The system_admin role can only be created via the seeder / artisan command.
- * This prevents privilege escalation through the API.
+ * Invariants enforced unconditionally:
+ *   1. system_admin and sycash (restricted roles) can never be created,
+ *      deactivated, or deleted via the API. They are seeded once at
+ *      deployment by SpecialAccountSeeder. Password rotation goes through
+ *      `php artisan admin:rotate-password {role}`.
+ *   2. A requester can only manage roles that StaffRole::canManage() permits
+ *      for their own role tier.
  */
-final class EmployeeManagementService
+class EmployeeManagementService
 {
     public function __construct(
-        private readonly EmployeeRepositoryInterface $employeeRepository,
-        private readonly StaffJwtService             $jwtService,
-        private readonly EmployeeAuthService         $authService,
+        private readonly StaffJwtService $staffJwtService,
     ) {}
 
-    // ── Create ────────────────────────────────────────────────────────────────
+    // =========================================================================
+    // READ
+    // =========================================================================
 
     /**
-     * Create a new employee.
+     * All employees visible to the requester.
      *
-     * @throws \DomainException  if the creator lacks permission to assign the role.
-     * @throws \RuntimeException if the username/email is already taken.
+     * system_admin → everyone
+     * admin        → admin + support_agent  (restricted rows hidden)
+     * others       → caller should gate before reaching here
      */
-    public function create(array $data, Employee $creator): Employee
+    public function getAll(Employee $requester): Collection
     {
-        $targetRole = StaffRole::from($data['role']);
-
-        $this->assertCanCreateRole($creator, $targetRole);
-        $this->assertUsernameAvailable($data['username']);
-
-        if (!empty($data['email'])) {
-            $this->assertEmailAvailable($data['email']);
-        }
-
-        $employee = $this->employeeRepository->create([
-            'username'     => $data['username'],
-            'email'        => $data['email'] ?? null,
-            'password'     => Hash::make($data['password']),
-            'first_name'   => $data['first_name'],
-            'last_name'    => $data['last_name'],
-            'role'         => $targetRole->value,
-            'is_active'    => true,
-            'created_by'   => $creator->id,
-            'token_version'=> 0,
-        ]);
-
-        Log::info('Employee created', [
-            'new_employee_id' => $employee->id,
-            'role'            => $employee->role->value,
-            'created_by'      => $creator->id,
-        ]);
-
-        return $employee;
+        return Employee::orderBy('role')
+            ->orderBy('username')
+            ->get()
+            ->filter(fn (Employee $emp) =>
+                $emp->id === $requester->id
+                || $requester->role->canManage($emp->role)
+            )
+            ->values();
     }
 
-    // ── Update ────────────────────────────────────────────────────────────────
-
     /**
-     * Update an employee's non-sensitive fields.
+     * Single employee — enforces visibility by role tier.
      *
-     * @throws \DomainException if the updater lacks authority over the target.
-     */
-    public function update(int $id, array $data, Employee $updater): Employee
-    {
-        $target = $this->findOrFail($id);
-
-        $this->assertCanManage($updater, $target);
-
-        // Strip fields the caller is not allowed to change via this method.
-        $allowed = array_intersect_key($data, array_flip([
-            'first_name', 'last_name', 'email',
-        ]));
-
-        if (!empty($allowed['email'])) {
-            $this->assertEmailAvailable($allowed['email'], excludeId: $id);
-        }
-
-        return $this->employeeRepository->update($id, $allowed);
-    }
-
-    // ── Toggle active status ──────────────────────────────────────────────────
-
-    /**
+     * @throws \Illuminate\Database\Eloquent\ModelNotFoundException
      * @throws \DomainException
-     */
-    public function toggleActive(int $id, Employee $updater): Employee
-    {
-        $target = $this->findOrFail($id);
-        $this->assertCanManage($updater, $target);
-
-        $newStatus = !$target->is_active;
-
-        $employee = $this->employeeRepository->update($id, ['is_active' => $newStatus]);
-
-        // Revoke all tokens when deactivating.
-        if (!$newStatus) {
-            $this->jwtService->revokeAllTokens($id);
-        }
-
-        Log::info('Employee active status toggled', [
-            'employee_id' => $id,
-            'is_active'   => $newStatus,
-            'changed_by'  => $updater->id,
-        ]);
-
-        return $employee;
-    }
-
-    // ── Reset password ────────────────────────────────────────────────────────
-
-    /**
-     * @throws \DomainException
-     */
-    public function resetPassword(int $id, string $newPassword, Employee $updater): void
-    {
-        $target = $this->findOrFail($id);
-        $this->assertCanManage($updater, $target);
-
-        $this->employeeRepository->update($id, [
-            'password' => Hash::make($newPassword),
-        ]);
-
-        // Invalidate all active sessions for the target employee.
-        $this->jwtService->revokeAllTokens($id);
-
-        Log::info('Employee password reset', [
-            'employee_id' => $id,
-            'reset_by'    => $updater->id,
-        ]);
-    }
-
-    // ── List ──────────────────────────────────────────────────────────────────
-
-    public function list(Employee $requestingEmployee): Collection
-    {
-        return $requestingEmployee->isSystemAdmin()
-            ? $this->employeeRepository->listAll()
-            : $this->employeeRepository->listManageableBy($requestingEmployee);
-    }
-
-    // ── Get one ───────────────────────────────────────────────────────────────
-
-    /**
-     * @throws \DomainException if requester can't see this employee.
      */
     public function getById(int $id, Employee $requester): Employee
     {
-        $target = $this->findOrFail($id);
+        $employee = Employee::findOrFail($id);
 
-        // system_admin can view anyone; others only view those they can manage.
-        if (!$requester->isSystemAdmin() && !$requester->canManage($target)) {
-            throw new \DomainException('You do not have permission to view this employee.');
-        }
-
-        return $target->load('creator:id,username,first_name,last_name');
-    }
-
-    // ── Format ────────────────────────────────────────────────────────────────
-
-    public function formatEmployee(Employee $employee): array
-    {
-        return [
-            'id'           => $employee->id,
-            'username'     => $employee->username,
-            'email'        => $employee->email,
-            'full_name'    => $employee->fullName(),
-            'first_name'   => $employee->first_name,
-            'last_name'    => $employee->last_name,
-            'role'         => $employee->role->value,
-            'role_label'   => $employee->role->label(),
-            'is_active'    => $employee->is_active,
-            'created_by'   => $employee->creator ? [
-                'id'       => $employee->creator->id,
-                'username' => $employee->creator->username,
-                'name'     => $employee->creator->fullName(),
-            ] : null,
-            'last_login_at'=> $employee->last_login_at?->toIso8601String(),
-            'created_at'   => $employee->created_at->toIso8601String(),
-        ];
-    }
-
-    // ── Private authorization guards ──────────────────────────────────────────
-
-    /**
-     * @throws \DomainException
-     */
-    private function assertCanManage(Employee $manager, Employee $target): void
-    {
-        if (!$manager->canManage($target)) {
+        if (
+            $employee->id !== $requester->id
+            && !$requester->role->canManage($employee->role)
+        ) {
             throw new \DomainException(
-                "Your role ({$manager->role->label()}) does not have authority over " .
-                "this employee's role ({$target->role->label()})."
-            );
-        }
-    }
-
-    /**
-     * @throws \DomainException
-     */
-    private function assertCanCreateRole(Employee $creator, StaffRole $targetRole): void
-    {
-        // Prevent anyone from creating a system_admin through the API.
-        if ($targetRole === StaffRole::SYSTEM_ADMIN) {
-            throw new \DomainException(
-                'System administrators can only be created via the artisan command.'
-            );
-        }
-
-        if (!$creator->role->canManage($targetRole)) {
-            throw new \DomainException(
-                "Your role ({$creator->role->label()}) cannot create a {$targetRole->label()}."
-            );
-        }
-    }
-
-    private function assertUsernameAvailable(string $username): void
-    {
-        if ($this->employeeRepository->findByUsername($username)) {
-            throw new \RuntimeException("Username '{$username}' is already taken.");
-        }
-    }
-
-    private function assertEmailAvailable(string $email, ?int $excludeId = null): void
-    {
-        $existing = $this->employeeRepository->findByEmail($email);
-
-        if ($existing && $existing->id !== $excludeId) {
-            throw new \RuntimeException("Email '{$email}' is already taken.");
-        }
-    }
-
-    private function findOrFail(int $id): Employee
-    {
-        $employee = $this->employeeRepository->findById($id);
-
-        if (!$employee) {
-            throw new \Illuminate\Database\Eloquent\ModelNotFoundException(
-                "Employee with ID {$id} not found."
+                "Your role ({$requester->role->label()}) cannot view this account."
             );
         }
 
         return $employee;
+    }
+
+    // =========================================================================
+    // CREATE
+    // =========================================================================
+
+    /**
+     * Create a new employee account.
+     *
+     * Guards (checked in order before any DB write):
+     *   1. Target role must not be restricted (system_admin / sycash).
+     *   2. Requester's role must be permitted to manage the target role.
+     *   3. Username must be unique across the employees table.
+     *   4. Email (optional) must be unique across the employees table.
+     *
+     * @throws \DomainException
+     */
+    public function create(array $data, Employee $requester): Employee
+    {
+        $role = StaffRole::from($data['role']);
+
+        // ── Guard 1: restricted roles can never be created via the API ────────
+        if ($role->isRestricted()) {
+            throw new \DomainException(
+                "The '{$role->label()}' account cannot be created via the API. " .
+                "It is seeded once at deployment. To rotate the password run: " .
+                "php artisan admin:rotate-password {$role->value}"
+            );
+        }
+
+        // ── Guard 2: requester must be permitted to create this role ──────────
+        if (!$requester->role->canManage($role)) {
+            throw new \DomainException(
+                "Your role ({$requester->role->label()}) is not permitted to " .
+                "create a '{$role->label()}' account."
+            );
+        }
+
+        // ── Guard 3: unique username ──────────────────────────────────────────
+        if (Employee::where('username', $data['username'])->exists()) {
+            throw new \DomainException("Username '{$data['username']}' is already taken.");
+        }
+
+        // ── Guard 4: unique email (field is optional) ─────────────────────────
+        if (
+            !empty($data['email'])
+            && Employee::where('email', $data['email'])->exists()
+        ) {
+            throw new \DomainException("Email '{$data['email']}' is already in use.");
+        }
+
+        return Employee::create([
+            'username'   => $data['username'],
+            'email'      => $data['email'] ?? null,
+            'password'   => Hash::make($data['password']),
+            'first_name' => $data['first_name'],
+            'last_name'  => $data['last_name'],
+            'role'       => $role->value,
+            'is_active'  => true,
+        ]);
+    }
+
+    // =========================================================================
+    // UPDATE (non-password fields)
+    // =========================================================================
+
+    /**
+     * Update mutable profile fields on an employee.
+     * Password changes are handled by rotatePassword() — never here.
+     *
+     * @throws \DomainException
+     */
+    public function update(int $id, array $data, Employee $requester): Employee
+    {
+        $employee = $this->getById($id, $requester);
+
+        // Restricted accounts are immutable via the API
+        if ($employee->role->isRestricted()) {
+            throw new \DomainException(
+                "The '{$employee->role->label()}' account cannot be modified via the API."
+            );
+        }
+
+        // Role changes must target a non-restricted role the requester can manage
+        if (isset($data['role'])) {
+            $newRole = StaffRole::from($data['role']);
+
+            if ($newRole->isRestricted()) {
+                throw new \DomainException(
+                    "Cannot assign the restricted role '{$newRole->label()}' via the API."
+                );
+            }
+
+            if (!$requester->role->canManage($newRole)) {
+                throw new \DomainException(
+                    "Your role ({$requester->role->label()}) cannot assign '{$newRole->label()}'."
+                );
+            }
+
+            $data['role'] = $newRole->value;
+        }
+
+        // Username uniqueness when changing
+        if (
+            isset($data['username'])
+            && $data['username'] !== $employee->username
+            && Employee::where('username', $data['username'])->exists()
+        ) {
+            throw new \DomainException("Username '{$data['username']}' is already taken.");
+        }
+
+        // Email uniqueness when changing
+        if (
+            isset($data['email'])
+            && $data['email'] !== $employee->email
+            && Employee::where('email', $data['email'])->exists()
+        ) {
+            throw new \DomainException("Email '{$data['email']}' is already in use.");
+        }
+
+        $employee->fill(
+            array_intersect_key($data, array_flip([
+                'username', 'email', 'first_name', 'last_name', 'role',
+            ]))
+        );
+        $employee->save();
+
+        return $employee;
+    }
+
+    // =========================================================================
+    // PASSWORD ROTATION
+    // =========================================================================
+
+    /**
+     * Rotate an employee's password and invalidate all active sessions.
+     *
+     * Restricted accounts (system_admin / sycash) must use the Artisan command
+     * instead — this method throws for them so the API can never touch them.
+     *
+     * @throws \DomainException
+     */
+    public function rotatePassword(int $id, string $newPassword, Employee $requester): Employee
+    {
+        $employee = $this->getById($id, $requester);
+
+        if ($employee->role->isRestricted()) {
+            throw new \DomainException(
+                "The '{$employee->role->label()}' password must be rotated via Artisan: " .
+                "php artisan admin:rotate-password {$employee->role->value}"
+            );
+        }
+
+        $employee->password      = Hash::make($newPassword);
+        $employee->token_version = ($employee->token_version ?? 0) + 1;
+        $employee->save();
+
+        $this->staffJwtService->revokeAllTokens($employee->id);
+
+        return $employee;
+    }
+
+    // =========================================================================
+    // TOGGLE ACTIVE
+    // =========================================================================
+
+    /**
+     * Flip is_active on an employee account.
+     * Deactivating immediately revokes all tokens so in-flight requests fail.
+     *
+     * @throws \DomainException
+     */
+    public function toggleActive(int $id, Employee $requester): Employee
+    {
+        $employee = $this->getById($id, $requester);
+
+        // Restricted accounts cannot be deactivated via the API
+        if ($employee->role->isRestricted()) {
+            throw new \DomainException(
+                "The '{$employee->role->label()}' account cannot be deactivated via the API."
+            );
+        }
+
+        $employee->is_active = !$employee->is_active;
+        $employee->save();
+
+        if (!$employee->is_active) {
+            $this->staffJwtService->revokeAllTokens($employee->id);
+        }
+
+        return $employee;
+    }
+
+    // =========================================================================
+    // DELETE
+    // =========================================================================
+
+    /**
+     * Permanently delete an employee account.
+     * Tokens are revoked first so any in-flight requests are rejected cleanly.
+     *
+     * @throws \DomainException
+     */
+    public function delete(int $id, Employee $requester): void
+    {
+        $employee = $this->getById($id, $requester);
+
+        // Restricted accounts cannot be deleted via the API
+        if ($employee->role->isRestricted()) {
+            throw new \DomainException(
+                "The '{$employee->role->label()}' account cannot be deleted via the API."
+            );
+        }
+
+        if (!$requester->role->canManage($employee->role)) {
+            throw new \DomainException(
+                "Your role ({$requester->role->label()}) cannot delete " .
+                "a '{$employee->role->label()}' account."
+            );
+        }
+
+        $this->staffJwtService->revokeAllTokens($employee->id);
+        $employee->delete();
     }
 }

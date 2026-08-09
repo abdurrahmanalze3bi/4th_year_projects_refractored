@@ -13,10 +13,6 @@ class Ride extends Model
 {
     use HasFactory;
 
-    /**
-     * Fillable: DO NOT include old pickup_lat/pickup_lng or destination_lat/destination_lng here.
-     * Instead, include only driver_id, pickup_address, destination_address, distance, etc.
-     */
     protected $fillable = [
         'driver_id',
         'pickup_address',
@@ -24,7 +20,8 @@ class Ride extends Model
         'status',
         'distance',
         'duration',
-        'route_geometry',       // JSON
+        'route_geometry',
+        'chosen_route_index',       // ← added (was missing; fill() silently dropped it)
         'departure_time',
         'available_seats',
         'price_per_seat',
@@ -34,26 +31,26 @@ class Ride extends Model
         'communication_number',
         'notes',
         'finished_at',
-
+        'driver_confirmed_at',
+        // ── Cash ride fee ───────────────────────────────────────────────────
+        'cash_creation_fee',        // 5% of total value, recorded at creation time
+        'cash_fee_deferred',        // true = added to debt (rides 1-2), false = paid immediately (rides 3+)
         // We will write to pickup_location and destination_location via the setter
     ];
-    /**
-     * Append computed lat/lng fields to all serialized output
-     */
 
-    /**
-     * Cast route_geometry (JSON) into a PHP array automatically.
-     */
     protected $casts = [
-        'departure_time' => 'datetime',
-        'pickup_location' => 'array',
-        'destination_location' => 'array',
-        'route_geometry' => 'array',
-        'status' => 'string',
-          'driver_confirmed_at' => 'datetime',
-        'payment_method' => 'string',
-        'booking_type' => 'string',
-        'finished_at' => 'datetime',
+        'departure_time'      => 'datetime',
+        'pickup_location'     => 'array',
+        'destination_location'=> 'array',
+        'route_geometry'      => 'array',
+        'status'              => 'string',
+        'driver_confirmed_at' => 'datetime',
+        'payment_method'      => 'string',
+        'booking_type'        => 'string',
+        'finished_at'         => 'datetime',
+        'cash_creation_fee'   => 'decimal:2',
+        'cash_fee_deferred'   => 'boolean',
+        'chosen_route_index'  => 'integer',
     ];
 
     //------------------------------------------------------------------------//
@@ -74,10 +71,6 @@ class Ride extends Model
     // Custom Accessors for pickup_location / destination_location
     //------------------------------------------------------------------------//
 
-    /**
-     * Return pickup_location as an array [ 'lat' => ..., 'lng' => ... ].
-     * The database column is a POINT; here we run a raw SELECT ST_AsText(...) to parse it.
-     */
     public function getPickupLocationAttribute(): ?array
     {
         if (!isset($this->attributes['id'])) {
@@ -93,15 +86,10 @@ class Ride extends Model
             return null;
         }
 
-        // wkt looks like "POINT(<lng> <lat>)"
         sscanf($row->wkt, 'POINT(%f %f)', $lng, $lat);
-
         return ['lat' => $lat, 'lng' => $lng];
     }
 
-    /**
-     * Return destination_location as an array [ 'lat' => ..., 'lng' => ... ].
-     */
     public function getDestinationLocationAttribute(): ?array
     {
         if (!isset($this->attributes['id'])) {
@@ -118,7 +106,6 @@ class Ride extends Model
         }
 
         sscanf($row->wkt, 'POINT(%f %f)', $lng, $lat);
-
         return ['lat' => $lat, 'lng' => $lng];
     }
 
@@ -126,10 +113,6 @@ class Ride extends Model
     // Custom Mutators (Setters) for pickup_location / destination_location
     //------------------------------------------------------------------------//
 
-    /**
-     * Expect $coords = [ 'lat' => float, 'lng' => float ].
-     * We convert it into a MySQL POINT(...) with SRID 4326 when saving.
-     */
     public function setPickupLocationAttribute(array $coords)
     {
         if (isset($coords['lat'], $coords['lng'])) {
@@ -141,9 +124,6 @@ class Ride extends Model
         }
     }
 
-    /**
-     * Same for destination_location.
-     */
     public function setDestinationLocationAttribute(array $coords)
     {
         if (isset($coords['lat'], $coords['lng'])) {
@@ -156,21 +136,14 @@ class Ride extends Model
     }
 
     //------------------------------------------------------------------------//
-    // (Optional) Scope for “nearby” searching by pickup location
+    // Scope
     //------------------------------------------------------------------------//
 
-    /**
-     * Scope to find all rides whose pickup_location is within $radiusKm kilometers.
-     * You can use this in your repository or controllers if needed.
-     */
     public function scopeNearLocation(Builder $query, float $latitude, float $longitude, int $radiusKm = 10): void
     {
         $radiusMeters = $radiusKm * 1000;
         $query->whereRaw(
-            "ST_Distance_Sphere(
-                `pickup_location`,
-                ST_GeomFromText('POINT(? ?)', 4326)
-            ) <= ?",
+            "ST_Distance_Sphere( `pickup_location`, ST_GeomFromText('POINT(? ?)', 4326) ) <= ?",
             [$longitude, $latitude, $radiusMeters]
         );
     }

@@ -1,8 +1,5 @@
 <?php
 
-
-// app/Http/Controllers/API/NotificationController.php
-
 namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
@@ -29,34 +26,24 @@ class NotificationController extends Controller
         );
 
         return response()->json([
-            'success' => true,
-            'data' => $notifications,
+            'success'      => true,
+            'data'         => $notifications,
             'unread_count' => $request->user()->unread_notifications_count,
         ]);
     }
 
-    public function show(UserNotification $notification): JsonResponse
+    // FIX: was `UserNotification $notification` — {id} never bound to $notification
+    //      so Laravel tried to resolve it from the container → 500
+    public function markAsRead(Request $request, int $id): JsonResponse
     {
-        // Ensure user can only see their own notifications
-        if ($notification->user_id !== auth()->id()) {
+        $notification = UserNotification::where('user_id', $request->user()->id)
+            ->where('id', $id)
+            ->first();
+
+        if (! $notification) {
             return response()->json([
                 'success' => false,
-                'message' => 'Notification not found'
-            ], 404);
-        }
-
-        return response()->json([
-            'success' => true,
-            'data' => $notification
-        ]);
-    }
-
-    public function markAsRead(UserNotification $notification): JsonResponse
-    {
-        if ($notification->user_id !== auth()->id()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Notification not found'
+                'message' => 'Notification not found',
             ], 404);
         }
 
@@ -65,25 +52,30 @@ class NotificationController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Notification marked as read',
-            'data' => $notification->fresh()
+            'data'    => $notification->fresh(),
         ]);
     }
 
-    public function markAsUnread(UserNotification $notification): JsonResponse
+    // FIX: same route-binding mismatch as markAsRead
+    public function markAsUnread(Request $request, int $id): JsonResponse
     {
-        if ($notification->user_id !== auth()->id()) {
+        $notification = UserNotification::where('user_id', $request->user()->id)
+            ->where('id', $id)
+            ->first();
+
+        if (! $notification) {
             return response()->json([
                 'success' => false,
-                'message' => 'Notification not found'
+                'message' => 'Notification not found',
             ], 404);
         }
 
-        $notification->markAsUnread();
+        $notification->update(['read_at' => null]);
 
         return response()->json([
             'success' => true,
             'message' => 'Notification marked as unread',
-            'data' => $notification->fresh()
+            'data'    => $notification->fresh(),
         ]);
     }
 
@@ -92,18 +84,23 @@ class NotificationController extends Controller
         $this->notificationService->markAllAsRead($request->user());
 
         return response()->json([
-            'success' => true,
-            'message' => 'All notifications marked as read',
-            'unread_count' => 0
+            'success'      => true,
+            'message'      => 'All notifications marked as read',
+            'unread_count' => 0,
         ]);
     }
 
-    public function destroy(UserNotification $notification): JsonResponse
+    // FIX: same route-binding mismatch as markAsRead
+    public function destroy(Request $request, int $id): JsonResponse
     {
-        if ($notification->user_id !== auth()->id()) {
+        $notification = UserNotification::where('user_id', $request->user()->id)
+            ->where('id', $id)
+            ->first();
+
+        if (! $notification) {
             return response()->json([
                 'success' => false,
-                'message' => 'Notification not found'
+                'message' => 'Notification not found',
             ], 404);
         }
 
@@ -111,15 +108,15 @@ class NotificationController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => 'Notification deleted'
+            'message' => 'Notification deleted',
         ]);
     }
 
     public function getUnreadCount(Request $request): JsonResponse
     {
         return response()->json([
-            'success' => true,
-            'unread_count' => $request->user()->unread_notifications_count
+            'success'      => true,
+            'unread_count' => $request->user()->unread_notifications_count,
         ]);
     }
 
@@ -127,24 +124,24 @@ class NotificationController extends Controller
     {
         $categories = [
             'general' => 'General',
-            'ride' => 'Rides',
-            'chat' => 'Messages',
+            'ride'    => 'Rides',
+            'chat'    => 'Messages',
             'profile' => 'Profile',
-            'system' => 'System'
+            'system'  => 'System',
         ];
 
         return response()->json([
             'success' => true,
-            'data' => $categories
+            'data'    => $categories,
         ]);
     }
 
     public function bulkAction(Request $request): JsonResponse
     {
         $request->validate([
-            'action' => 'required|in:mark_read,mark_unread,delete',
-            'notification_ids' => 'required|array',
-            'notification_ids.*' => 'exists:user_notifications,id'
+            'action'               => 'required|in:mark_read,mark_unread,delete',
+            'notification_ids'     => 'required|array',
+            'notification_ids.*'   => 'exists:user_notifications,id',
         ]);
 
         $notifications = UserNotification::whereIn('id', $request->notification_ids)
@@ -154,31 +151,31 @@ class NotificationController extends Controller
         if ($notifications->isEmpty()) {
             return response()->json([
                 'success' => false,
-                'message' => 'No notifications found'
+                'message' => 'No notifications found',
             ], 404);
         }
 
         switch ($request->action) {
             case 'mark_read':
-                $notifications->each(fn($n) => $this->notificationService->markAsRead($n));
+                $notifications->each(fn ($n) => $this->notificationService->markAsRead($n));
                 $message = 'Notifications marked as read';
                 break;
 
             case 'mark_unread':
-                $notifications->each(fn($n) => $n->markAsUnread());
+                $notifications->each(fn ($n) => $n->update(['read_at' => null]));
                 $message = 'Notifications marked as unread';
                 break;
 
             case 'delete':
-                $notifications->each(fn($n) => $this->notificationService->deleteNotification($n));
+                $notifications->each(fn ($n) => $this->notificationService->deleteNotification($n));
                 $message = 'Notifications deleted';
                 break;
         }
 
         return response()->json([
-            'success' => true,
-            'message' => $message,
-            'unread_count' => $request->user()->unread_notifications_count
+            'success'      => true,
+            'message'      => $message,
+            'unread_count' => $request->user()->unread_notifications_count,
         ]);
     }
 }

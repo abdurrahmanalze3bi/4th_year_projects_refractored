@@ -11,27 +11,31 @@ use App\Models\UserScore;
  *
  * Scoring grid (passenger, cancel seat(s)):
  *
- *  Elapsed     | cancel rate ≤ 50 % | cancel rate > 50 %
- *  0–30 %      |        0 pts        |      −10 pts
- *  30–50 %     |       −5 pts        |      −10 pts
- *  50–100 %    |      −10 pts        |      −10 pts
+ *  Elapsed     | normal          | high cancel rate
+ *  0–30 %      |   0 pts         |    −10 pts
+ *  30–50 %     |  −5 pts         |    −10 pts
+ *  50–100 %    | −10 pts         |    −10 pts
  *
- * The high-rate override only activates after MIN_INTERACTIONS total
- * rides+cancellations, preventing new users from being penalised on
- * their very first cancellation.
+ * High cancel rate override activates when:
+ *   - total_cancellations >= MIN_CANCELLATIONS (3), AND
+ *   - cancel_rate > HIGH_RATE_THRESHOLD (50 %)
+ *
+ * The cancellation count gate prevents penalising new passengers on their
+ * first cancellations before a meaningful rate can be established.
+ * Base tier penalties (−5, −10) always apply even without the override.
  */
 final class PassengerCancelPolicy implements ScorePolicyInterface
 {
     private const HIGH_RATE_THRESHOLD = 50.0; // > 50 % triggers the penalty tier
-    private const MIN_INTERACTIONS    = 5;    // cancel rate only counts after this many total rides+cancellations
+    private const MIN_CANCELLATIONS   = 3;    // override only kicks in after this many cancellations
 
-    // Base points per time tier (normal cancel rate)
     private const BASE_POINTS = [
         'passenger_cancel_early' => 0,
         'passenger_cancel_mid'   => -5,
         'passenger_cancel_late'  => -10,
     ];
-    private const HIGH_RATE_POINTS = -10; // flat penalty when rate exceeded
+
+    private const HIGH_RATE_POINTS = -10;
 
     public function supports(ScoreAction $action): bool
     {
@@ -44,8 +48,7 @@ final class PassengerCancelPolicy implements ScorePolicyInterface
 
     public function calculate(ScoreAction $action, UserScore $userScore, array $context = []): ScoreResult
     {
-        $totalInteractions = $userScore->total_rides + $userScore->total_cancellations;
-        $highRate = $totalInteractions >= self::MIN_INTERACTIONS
+        $highRate = $userScore->total_cancellations >= self::MIN_CANCELLATIONS
             && $userScore->cancel_rate > self::HIGH_RATE_THRESHOLD;
 
         if ($highRate) {

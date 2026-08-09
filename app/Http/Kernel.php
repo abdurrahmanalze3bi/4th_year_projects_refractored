@@ -43,6 +43,7 @@ class Kernel extends HttpKernel
             // \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
             \Illuminate\Routing\Middleware\ThrottleRequests::class.':api',
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\CacheStatusHeader::class,
         ],
     ];
 
@@ -68,6 +69,7 @@ class Kernel extends HttpKernel
         'auth.admin'   => \App\Http\Middleware\AdminJwtMiddleware::class,
         'jwt'           => \App\Http\Middleware\JwtAuthMiddleware::class,
         'staff' => \App\Http\Middleware\StaffJwtMiddleware::class,
+
 
     ];
 }

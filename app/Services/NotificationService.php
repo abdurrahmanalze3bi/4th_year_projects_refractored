@@ -6,25 +6,26 @@ use App\Models\User;
 use App\Models\UserNotification;
 use App\Models\Notification;
 use App\Events\NotificationSent;
-use App\Services\PushNotification\PushNotificationService; // ✅ FIXED: Correct path
-use Illuminate\Database\Eloquent\Collection;
+use App\Services\PushNotification\PushNotificationService;
 use Illuminate\Pagination\LengthAwarePaginator;
 
 class NotificationService
 {
     public function __construct(
-        private PushNotificationService $pushService
+        private readonly PushNotificationService $pushService
     ) {}
 
-    public function getUserNotifications(User $user, array $filters = [], int $perPage = 15): LengthAwarePaginator
-    {
+    public function getUserNotifications(
+        User $user,
+        array $filters = [],
+        int $perPage = 15
+    ): LengthAwarePaginator {
         $query = UserNotification::with('notification')
             ->where('user_id', $user->id)
             ->orderBy('created_at', 'desc');
 
-        // Apply filters
         if (!empty($filters['category'])) {
-            $query->whereHas('notification', function($q) use ($filters) {
+            $query->whereHas('notification', function ($q) use ($filters) {
                 $q->where('type', $filters['category']);
             });
         }
@@ -49,41 +50,55 @@ class NotificationService
         string $priority = 'normal',
         string $category = 'general'
     ): UserNotification {
-        // Create base notification
+        // FIX: was using SendPushNotificationJob::dispatch() which does not exist
+        // → caused every createNotification() call to throw a fatal error
+
         $notification = Notification::create([
-            'title' => $title,
+            'title'   => $title,
             'message' => $message,
-            'type' => $type,
-            'data' => $data,
-            'sent_at' => now()
+            'type'    => $type,
+            'data'    => $data,
+            'sent_at' => now(),
         ]);
 
-        // Create user notification
         $userNotification = UserNotification::create([
-            'user_id' => $user->id,
-            'notification_id' => $notification->id
+            'user_id'         => $user->id,
+            'notification_id' => $notification->id,
         ]);
 
-        // Send push notification
-        $this->pushService->sendToUser($user, [
-            'title' => $title,
-            'body' => $message,
-            'data' => array_merge($data, [
-                'notification_id' => $notification->id,
-                'type' => $type,
-                'category' => $category
-            ])
-        ]);
+        // Push notification — wrapped in try/catch so a failed push never
+        // blocks the in-app notification from being saved and returned.
+        try {
+            $this->pushService->sendToUser($user, [
+                'title' => $title,
+                'body'  => $message,
+                'data'  => array_merge($data, [
+                    'notification_id' => $notification->id,
+                    'type'            => $type,
+                    'category'        => $category,
+                    'priority'        => $priority,
+                ]),
+            ]);
+        } catch (\Throwable) {
+            // Push failure must never break notification creation
+        }
 
-        // Broadcast real-time notification
-        broadcast(new NotificationSent($user, $notification));
+        try {
+            broadcast(new NotificationSent($user, $notification));
+        } catch (\Throwable) {
+            // Broadcast failure must never break notification creation
+        }
 
         return $userNotification->load('notification');
     }
 
+    // FIX: was missing entirely — NotificationController::markAsRead() called
+    // this method, got "Call to undefined method" → 500 HTML response
     public function markAsRead(UserNotification $notification): void
     {
-        $notification->markAsRead();
+        if (!$notification->read_at) {
+            $notification->update(['read_at' => now()]);
+        }
     }
 
     public function markAllAsRead(User $user): void

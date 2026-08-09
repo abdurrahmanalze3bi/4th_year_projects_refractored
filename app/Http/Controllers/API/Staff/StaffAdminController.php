@@ -10,6 +10,7 @@ use App\Services\Staff\StaffComplaintService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
@@ -26,7 +27,7 @@ use Illuminate\Support\Facades\Validator;
  *   POST  /api/staff/verifications/{userId}/approve  → approveVerification()
  *   POST  /api/staff/verifications/{userId}/reject   → rejectVerification()
  *
- * ── Escalated Complaints (admin handles after agent escalates) ─────────────
+ * ── Escalated Complaints ──────────────────────────────────────────────────
  *   GET   /api/staff/escalated-complaints            → escalatedComplaints()
  *   PATCH /api/staff/escalated-complaints/{id}/resolve → resolveEscalated()
  */
@@ -38,50 +39,49 @@ final class StaffAdminController extends Controller
     ) {}
 
     // =========================================================================
-    // UC-ADM-10 — PENDING VERIFICATIONS LIST
+    // UC-ADM-10 – PENDING VERIFICATIONS LIST
     // =========================================================================
 
-    /**
-     * GET /api/staff/verifications/pending
-     *
-     * Returns all users whose verification_status = 'pending',
-     * along with their uploaded documents, so the admin can review them.
-     */
     public function pendingVerifications(): JsonResponse
     {
         try {
-            $pending = User::with(['photos', 'profile'])
-                ->where('verification_status', 'pending')
-                ->orderByDesc('updated_at')
-                ->get()
-                ->map(function (User $u) {
-                    $docTypes = $u->photos->pluck('type')->toArray();
-                    $isDriver = in_array('license', $docTypes)
-                        || in_array('mechanic_card', $docTypes);
+            // Heavy eager load (photos + profiles for every pending user).
+            // Busted explicitly by approveVerification() and rejectVerification().
+            // New submissions from the user side self-heal within TTL.
+            $pending = Cache::remember('staff.pending-verifications', now()->addMinutes(2), function () {
+                return User::with(['photos', 'profile'])
+                    ->where('verification_status', 'pending')
+                    ->orderByDesc('updated_at')
+                    ->get()
+                    ->map(function (User $u) {
+                        $docTypes = $u->photos->pluck('type')->toArray();
+                        $isDriver = in_array('license', $docTypes) || in_array('mechanic_card', $docTypes);
 
-                    return [
-                        'user_id'      => $u->id,
-                        'name'         => trim("{$u->first_name} {$u->last_name}"),
-                        'email'        => $u->email,
-                        'gender'       => $u->gender,
-                        'address'      => $u->address,
-                        'type'         => $isDriver ? 'driver' : 'passenger',
-                        'profile_photo'=> $u->profile?->profile_photo
-                            ? asset('storage/' . $u->profile->profile_photo)
-                            : null,
-                        'documents'    => $u->photos->map(fn ($p) => [
-                            'type' => $p->type,
-                            'url'  => asset('storage/' . $p->path),
-                        ])->values(),
-                        'submitted_at' => $u->updated_at->toIso8601String(),
-                    ];
-                });
+                        return [
+                            'user_id'      => $u->id,
+                            'name'         => trim("{$u->first_name} {$u->last_name}"),
+                            'email'        => $u->email,
+                            'gender'       => $u->gender,
+                            'address'      => $u->address,
+                            'type'         => $isDriver ? 'driver' : 'passenger',
+                            'profile_photo'=> $u->profile?->profile_photo
+                                ? asset('storage/' . $u->profile->profile_photo)
+                                : null,
+                            'documents'    => $u->photos->map(fn ($p) => [
+                                'type' => $p->type,
+                                'url'  => asset('storage/' . $p->path),
+                            ])->values()->all(),
+                            'submitted_at' => $u->updated_at->toIso8601String(),
+                        ];
+                    })->values()->all();
+            });
 
             return response()->json([
                 'status' => 'success',
-                'total'  => $pending->count(),
+                'total'  => count($pending),
                 'data'   => $pending,
             ]);
+
         } catch (\Exception $e) {
             Log::error('StaffAdmin: pendingVerifications failed', ['error' => $e->getMessage()]);
             return $this->serverError();
@@ -89,27 +89,63 @@ final class StaffAdminController extends Controller
     }
 
     // =========================================================================
-    // UC-ADM-11 — APPROVE VERIFICATION
+    // UC-ADM-11 – APPROVE VERIFICATION
     // =========================================================================
 
     /**
      * POST /api/staff/verifications/{userId}/approve
      *
-     * Approves the user's verification request.
-     * - If the user uploaded driver docs → verifyDriver()
-     * - Otherwise                        → verifyPassenger()
+     * Body (required):
+     *   national_id  string  The national ID number read from the submitted documents.
+     *                        Must be unique across all verified users.
+     *
+     * Only admin and system_admin may call this endpoint.
+     * Support agents are blocked at the route/middleware level.
      */
-    public function approveVerification(int $userId): JsonResponse
+    public function approveVerification(int $userId, Request $request): JsonResponse
     {
+        $validator = Validator::make($request->all(), [
+            'national_id' => 'required|string|max:50',
+        ], [
+            'national_id.required' => 'The national ID number is required to approve verification.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'error',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $nationalId = trim($request->input('national_id'));
+
+        // Check uniqueness: is this national ID already linked to another account?
+        $duplicate = User::where('national_id', $nationalId)
+            ->where('id', '!=', $userId)
+            ->first();
+
+        if ($duplicate) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'This national ID is already linked to another verified account. Verification blocked.',
+                'data'    => [
+                    'conflicting_user_id' => $duplicate->id,
+                ],
+            ], 422);
+        }
+
         try {
             $user     = User::with('photos')->findOrFail($userId);
             $docTypes = $user->photos->pluck('type')->toArray();
-            $isDriver = in_array('license', $docTypes)
-                || in_array('mechanic_card', $docTypes);
+            $isDriver = in_array('license', $docTypes) || in_array('mechanic_card', $docTypes);
 
             $verified = $isDriver
                 ? $this->verificationRepo->verifyDriver($userId)
                 : $this->verificationRepo->verifyPassenger($userId);
+
+            // Save national ID — cannot be changed through normal flows after this point
+            $verified->national_id = $nationalId;
+            $verified->save();
 
             // Fire the broadcast event so the user's app updates in real time
             event(new \App\Events\UserVerified(
@@ -117,16 +153,22 @@ final class StaffAdminController extends Controller
                 $isDriver ? 'driver' : 'passenger'
             ));
 
+            // User leaves the pending list; their staff profile now shows new verification status
+            Cache::forget('staff.pending-verifications');
+            Cache::forget("staff.user-profile.{$userId}");
+
             return response()->json([
                 'status'  => 'success',
                 'message' => ($isDriver ? 'Driver' : 'Passenger') . ' verification approved.',
                 'data'    => [
-                    'user_id'             => $verified->id,
-                    'verification_status' => $verified->verification_status,
-                    'is_verified_driver'  => (bool) $verified->is_verified_driver,
+                    'user_id'               => $verified->id,
+                    'national_id'           => $verified->national_id,
+                    'verification_status'   => $verified->verification_status,
+                    'is_verified_driver'    => (bool) $verified->is_verified_driver,
                     'is_verified_passenger' => (bool) $verified->is_verified_passenger,
                 ],
             ]);
+
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
         } catch (\Exception $e) {
@@ -139,14 +181,9 @@ final class StaffAdminController extends Controller
     }
 
     // =========================================================================
-    // UC-ADM-11 — REJECT VERIFICATION
+    // UC-ADM-11 – REJECT VERIFICATION
     // =========================================================================
 
-    /**
-     * POST /api/staff/verifications/{userId}/reject
-     *
-     * Body: { "reason": "..." }   (optional but recommended for UX)
-     */
     public function rejectVerification(int $userId, Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -173,20 +210,22 @@ final class StaffAdminController extends Controller
                 'is_verified_driver'    => false,
             ]);
 
-            // Notify the user
             try {
                 app(\App\Services\NotificationService::class)->createNotification(
                     $user,
                     'verification_rejected',
                     'طلب التوثيق مرفوض',
-                    'تم رفض طلب توثيق حسابك.' . ($request->input('reason') ? ' السبب: ' . $request->input('reason') : ' يمكنك إعادة التقديم بعد تصحيح البيانات.'),
+                    'تم رفض طلب توثيق حسابك.'
+                    . ($request->input('reason') ? ' السبب: ' . $request->input('reason') : ' يمكنك إعادة التقديم بعد تصحيح البيانات.'),
                     ['user_id' => $user->id],
                     'high',
                     'system'
                 );
-            } catch (\Throwable) {
-                // Notification failure must never block the rejection
-            }
+            } catch (\Throwable) {}
+
+            // User leaves the pending list; their staff profile now shows new verification status
+            Cache::forget('staff.pending-verifications');
+            Cache::forget("staff.user-profile.{$userId}");
 
             return response()->json([
                 'status'  => 'success',
@@ -196,6 +235,7 @@ final class StaffAdminController extends Controller
                     'verification_status' => $user->verification_status,
                 ],
             ]);
+
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
         } catch (\Exception $e) {
@@ -208,19 +248,9 @@ final class StaffAdminController extends Controller
     }
 
     // =========================================================================
-    // ESCALATED COMPLAINTS — LIST
+    // ESCALATED COMPLAINTS – LIST
     // =========================================================================
 
-    /**
-     * GET /api/staff/escalated-complaints
-     *
-     * Query params:
-     *   status   = escalated | resolved | closed  (default: escalated)
-     *   type     = trip_safety | driver_behavior | ...
-     *   date     = last_7_days | last_30_days
-     *   per_page = 1-50  (default 15)
-     *   page     = int
-     */
     public function escalatedComplaints(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -259,16 +289,9 @@ final class StaffAdminController extends Controller
     }
 
     // =========================================================================
-    // ESCALATED COMPLAINTS — RESOLVE
+    // ESCALATED COMPLAINTS – RESOLVE
     // =========================================================================
 
-    /**
-     * PATCH /api/staff/escalated-complaints/{id}/resolve
-     *
-     * Body:
-     *   resolution_notes  string   required, min 10
-     *   status            string   required, in: resolved, closed
-     */
     public function resolveEscalated(int $complaintId, Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -295,11 +318,14 @@ final class StaffAdminController extends Controller
                 admin:           $admin,
             );
 
+            Cache::forget('staff.escalated-counts');
+
             return response()->json([
                 'status'  => 'success',
                 'message' => "Escalated complaint marked as {$newStatus->label()} and user has been notified.",
                 'data'    => $this->complaintService->format($complaint),
             ]);
+
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'Complaint not found.'], 404);
         } catch (\DomainException $e) {
@@ -319,11 +345,15 @@ final class StaffAdminController extends Controller
 
     private function escalatedStatusCounts(): array
     {
-        return [
-            'escalated' => \App\Models\Complaint::where('status', ComplaintStatus::ESCALATED->value)->count(),
-            'resolved'  => \App\Models\Complaint::where('status', ComplaintStatus::RESOLVED->value)->count(),
-            'closed'    => \App\Models\Complaint::where('status', ComplaintStatus::CLOSED->value)->count(),
-        ];
+        // 3 COUNT queries on every admin complaint page open.
+        // Busted by resolveEscalated(); self-heals within 1 min for cross-controller escalations.
+        return Cache::remember('staff.escalated-counts', now()->addMinutes(1), function () {
+            return [
+                'escalated' => \App\Models\Complaint::where('status', ComplaintStatus::ESCALATED->value)->count(),
+                'resolved'  => \App\Models\Complaint::where('status', ComplaintStatus::RESOLVED->value)->count(),
+                'closed'    => \App\Models\Complaint::where('status', ComplaintStatus::CLOSED->value)->count(),
+            ];
+        });
     }
 
     private function serverError(): JsonResponse

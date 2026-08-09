@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Services\Admin\AdminTripService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;      // ← added
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
@@ -21,6 +22,13 @@ use Illuminate\Support\Facades\Validator;
  *   GET  /api/admin/trips/live           → live()
  *   GET  /api/admin/routes/popular       → popularRoutes()
  *   GET  /api/admin/drivers/top          → topDrivers()
+ *
+ * ── Caching summary ─────────────────────────────────────────────────────────
+ *
+ *  NOT CACHED  index()         trips change status in real time (active → finished)
+ *  NOT CACHED  live()          real-time feed; even 30 s stale is misleading
+ *  CACHED      popularRoutes() admin.trips.popular.routes.{limit}   15 min
+ *  CACHED      topDrivers()    admin.trips.top.drivers.{limit}      10 min
  */
 final class AdminTripController extends Controller
 {
@@ -29,11 +37,18 @@ final class AdminTripController extends Controller
     ) {}
 
     // =========================================================================
-    // TRIP LIST
+    // TRIP LIST — NOT cached
     // =========================================================================
 
     /**
      * GET /api/admin/trips
+     *
+     * NOT cached.
+     * Two reasons:
+     *   1. Trip status changes continuously (scheduled → active → finished).
+     *      A 5-minute stale page would show trips as "active" after they finish.
+     *   2. The inline getStatusCounts() call is a live count; caching the
+     *      paginated rows but serving a stale count badge would be inconsistent.
      *
      * Query params:
      *   filter   = all | active | scheduled | completed | cancelled  (default: all)
@@ -50,7 +65,7 @@ final class AdminTripController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'filter'   => 'sometimes|in:all,active,scheduled,completed,cancelled,awaiting', // ← add awaiting
+            'filter'   => 'sometimes|in:all,active,scheduled,completed,cancelled,awaiting',
             'per_page' => 'sometimes|integer|min:1|max:50',
             'page'     => 'sometimes|integer|min:1',
         ]);
@@ -95,11 +110,17 @@ final class AdminTripController extends Controller
     }
 
     // =========================================================================
-    // LIVE TRIPS
+    // LIVE TRIPS — NOT cached
     // =========================================================================
 
     /**
      * GET /api/admin/trips/live
+     *
+     * NOT cached — ever.
+     * This endpoint returns trips currently on the road with their passenger
+     * lists. A trip can finish, a passenger can board, or a driver can go
+     * offline within seconds. Caching even for 30 s would actively mislead
+     * the admin monitoring screen.
      *
      * Rides currently on the road:
      *   status = 'active'  AND  departure_time <= now()
@@ -132,6 +153,11 @@ final class AdminTripController extends Controller
     /**
      * GET /api/admin/routes/popular
      *
+     * CACHED — 15 minutes per $limit value.
+     * This is a pure historical aggregate (COUNT trips per route). Route
+     * popularity does not shift meaningfully within a 15-minute window —
+     * one new trip won't reorder the leaderboard.
+     *
      * Routes sorted descending by trip count.
      * "Damascus → Homs (5 trips)" ranks above "Homs → Aleppo (4 trips)".
      *
@@ -152,9 +178,15 @@ final class AdminTripController extends Controller
         }
 
         try {
+            $limit = (int) $request->get('limit', 10);
+
+            $data = Cache::remember("admin.trips.popular.routes.{$limit}", 900, function () use ($limit) {
+                return $this->tripService->getPopularRoutes($limit);
+            });
+
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->tripService->getPopularRoutes((int) $request->get('limit', 10)),
+                'data'   => $data,
             ]);
         } catch (\Exception $e) {
             Log::error('Popular routes failed', ['error' => $e->getMessage()]);
@@ -172,6 +204,10 @@ final class AdminTripController extends Controller
 
     /**
      * GET /api/admin/drivers/top
+     *
+     * CACHED — 10 minutes per $limit value.
+     * Average ratings are accumulated over many trips; a single new rating
+     * won't change the leaderboard order within a 10-minute window.
      *
      * Verified drivers sorted by average rating (highest first).
      * Drivers with no ratings yet appear last.
@@ -193,9 +229,15 @@ final class AdminTripController extends Controller
         }
 
         try {
+            $limit = (int) $request->get('limit', 10);
+
+            $data = Cache::remember("admin.trips.top.drivers.{$limit}", 600, function () use ($limit) {
+                return $this->tripService->getTopDrivers($limit);
+            });
+
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->tripService->getTopDrivers((int) $request->get('limit', 10)),
+                'data'   => $data,
             ]);
         } catch (\Exception $e) {
             Log::error('Top drivers failed', ['error' => $e->getMessage()]);

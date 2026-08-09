@@ -7,9 +7,10 @@ use App\Interfaces\ProfileRepositoryInterface;
 use App\Services\Profile\ProfileUpdateService;
 use App\Services\Profile\ProfileInteractionService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;      // ← added
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use App\Http\Controllers\API\ScoreController;
-use Illuminate\Support\Facades\Log;
 
 /**
  * Profile Controller (REFACTORED)
@@ -18,6 +19,14 @@ use Illuminate\Support\Facades\Log;
  * - ProfileUpdateService: Profile updates
  * - ProfileInteractionService: Comments and ratings
  * - ProfileRepositoryInterface: Data retrieval
+ *
+ * ── Caching summary ─────────────────────────────────────────────────────────
+ *
+ *  CACHED    show()       profile.user.{userId}   3 min  (non-owners only)
+ *  NOT CACHED show()      profile owner always gets live data
+ *  BUST      update()     profile.user.{id} + admin driver/passenger caches
+ *  BUST      comment()    profile.user.{targetId}
+ *  BUST      rateUser()   profile.user.{targetId}
  */
 class ProfileController extends Controller
 {
@@ -33,16 +42,37 @@ class ProfileController extends Controller
 
     /**
      * GET /profile/{userId}
+     *
+     * CACHED — 3 minutes, non-owners only.
+     *
+     * formatProfileData() fires ~10 DB queries (comments, rating stats, docs,
+     * score, 4× driver ride counts, 4× passenger booking counts). Caching is
+     * high-value for driver profiles viewed by multiple passengers.
+     *
+     * Owner is excluded from the cache so their own edits reflect immediately
+     * without needing to bust the entry, and to future-proof the code for when
+     * $isOwner starts affecting the returned payload.
      */
     public function show(Request $request, int $userId)
     {
         try {
-            $profile = $this->profileRepo->getProfileWithUser($userId);
             $isOwner = $request->user()->id === $userId;
+
+            if ($isOwner) {
+                // Profile owner always gets a live response
+                $profile = $this->profileRepo->getProfileWithUser($userId);
+                $data    = $this->formatProfileData($profile, $profile->user, true);
+            } else {
+                // Everyone else shares one cached entry per user
+                $data = Cache::remember("profile.user.{$userId}", 180, function () use ($userId) {
+                    $profile = $this->profileRepo->getProfileWithUser($userId);
+                    return $this->formatProfileData($profile, $profile->user, false);
+                });
+            }
 
             return response()->json([
                 'success' => true,
-                'data'    => $this->formatProfileData($profile, $profile->user, $isOwner),
+                'data'    => $data,
             ]);
         } catch (\Exception $e) {
             Log::error("Profile fetch error: {$e->getMessage()}");
@@ -60,6 +90,9 @@ class ProfileController extends Controller
 
     /**
      * POST /profile
+     *
+     * Mutation. Busts the user's own profile cache AND admin-side caches that
+     * embed this user's profile data (driver profile modal, passenger profile BFF).
      */
     public function update(Request $request)
     {
@@ -110,6 +143,14 @@ class ProfileController extends Controller
         try {
             $result = $this->updateService->updateProfile($user, $data);
 
+            // Bust every cache that may contain stale data for this user.
+            // Covers: user-facing profile, admin driver modal, admin passenger BFF.
+            Cache::forget("profile.user.{$user->id}");
+            Cache::forget("admin.driver.profile.{$user->id}");
+            Cache::forget("admin.driver.dashboard.{$user->id}");
+            Cache::forget("admin.passenger.full-profile.{$user->id}");
+            Cache::forget("admin.passenger.stats.{$user->id}");
+
             return response()->json([
                 'success' => true,
                 'message' => 'Profile updated successfully',
@@ -131,6 +172,9 @@ class ProfileController extends Controller
 
     /**
      * POST /profile/{userId}/comments
+     *
+     * Mutation. Busts the TARGET user's profile cache because their comments
+     * section has a new entry.
      */
     public function comment(Request $request, int $userId)
     {
@@ -152,6 +196,8 @@ class ProfileController extends Controller
                 $request->input('comment')
             );
 
+            Cache::forget("profile.user.{$userId}"); // target now has a new comment
+
             return response()->json([
                 'success' => true,
                 'message' => 'Comment added',
@@ -171,6 +217,10 @@ class ProfileController extends Controller
 
     /**
      * POST /profile/{userId}/rate
+     *
+     * Mutation. Busts the TARGET user's profile cache (rating stats changed).
+     * The admin topDrivers cache (10-min TTL) self-heals without explicit
+     * busting — a single new rating rarely reorders the leaderboard.
      */
     public function rateUser(Request $request, int $userId)
     {
@@ -191,6 +241,8 @@ class ProfileController extends Controller
                 $userId,
                 (float) $request->input('rating')
             );
+
+            Cache::forget("profile.user.{$userId}"); // target's rating stats changed
 
             return response()->json([
                 'success' => true,

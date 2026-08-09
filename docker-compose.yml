@@ -1,67 +1,166 @@
-version: '3.8'
-
 services:
 
-    # ============================================================
-    # Laravel Application (PHP + Apache)
-    # ============================================================
-    app:
+    app1:
         build:
             context: .
             dockerfile: Dockerfile
-        image: syride_app:latest
-        container_name: syride_app
-        ports:
-            - "8080:80"
+        image: syride_octane:latest
+        container_name: syride_app1
         restart: unless-stopped
         env_file: .env
         environment:
             APP_ENV: production
             APP_DEBUG: "false"
-            APP_URL: https://api.onwayride.me
             DB_HOST: mysql
+            DB_PASSWORD: "secret"
+            REDIS_HOST: redis
+            CACHE_DRIVER: redis
+            QUEUE_CONNECTION: sync
+            SESSION_DRIVER: file
+        volumes:
+            - ./storage/logs:/var/www/html/storage/logs
+            - ./app:/var/www/html/app
+            - ./database:/var/www/html/database
+        command: >
+            sh -c "php artisan octane:start
+            --server=roadrunner
+            --host=0.0.0.0
+            --port=8000
+            --workers=8
+            --max-requests=1000"
         depends_on:
             mysql:
                 condition: service_healthy
+            redis:
+                condition: service_started
 
-    # ============================================================
-    # MySQL Database
-    # ============================================================
+    app2:
+        image: syride_octane:latest
+        container_name: syride_app2
+        restart: unless-stopped
+        env_file: .env
+        environment:
+            APP_ENV: production
+            APP_DEBUG: "false"
+            DB_HOST: mysql
+            DB_PASSWORD: "secret"
+            REDIS_HOST: redis
+            CACHE_DRIVER: redis
+            QUEUE_CONNECTION: sync
+            SESSION_DRIVER: file
+        volumes:
+            - ./storage/logs:/var/www/html/storage/logs
+            - ./app:/var/www/html/app
+        command: >
+            sh -c "php artisan octane:start
+            --server=roadrunner
+            --host=0.0.0.0
+            --port=8000
+            --workers=8
+            --max-requests=1000"
+        depends_on:
+            mysql:
+                condition: service_healthy
+            redis:
+                condition: service_started
+
+    app3:
+        image: syride_octane:latest
+        container_name: syride_app3
+        restart: unless-stopped
+        env_file: .env
+        environment:
+            APP_ENV: production
+            APP_DEBUG: "false"
+            DB_HOST: mysql
+            DB_PASSWORD: "secret"
+            REDIS_HOST: redis
+            CACHE_DRIVER: redis
+            QUEUE_CONNECTION: sync
+            SESSION_DRIVER: file
+        volumes:
+            - ./storage/logs:/var/www/html/storage/logs
+            - ./app:/var/www/html/app
+        command: >
+            sh -c "php artisan octane:start
+            --server=roadrunner
+            --host=0.0.0.0
+            --port=8000
+            --workers=8
+            --max-requests=1000"
+        depends_on:
+            mysql:
+                condition: service_healthy
+            redis:
+                condition: service_started
+
+    nginx:
+        image: nginx:alpine
+        container_name: syride_nginx
+        ports:
+            - "8080:80"
+        volumes:
+            - ./nginx-docker.conf:/etc/nginx/nginx.conf:ro
+        depends_on:
+            - app1
+            - app2
+            - app3
+        restart: unless-stopped
+
+    redis:
+        image: redis:7-alpine
+        container_name: syride_redis
+        restart: unless-stopped
+
     mysql:
         image: mysql:8.0
         container_name: syride_mysql
         environment:
-            MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-            MYSQL_DATABASE: ${DB_DATABASE}
+            MYSQL_ROOT_PASSWORD: "secret"
+            MYSQL_DATABASE: "4th_year_project_db"
         volumes:
             - mysql_data:/var/lib/mysql
         healthcheck:
-            test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$DB_PASSWORD"]
+            test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-psecret"]
             interval: 5s
             timeout: 5s
             retries: 15
         restart: unless-stopped
 
-    # ============================================================
-    # Queue Worker
-    # ============================================================
+    phpmyadmin:
+        image: phpmyadmin/phpmyadmin
+        container_name: syride_phpmyadmin
+        restart: unless-stopped
+        ports:
+            - "8081:80"
+        environment:
+            PMA_HOST: mysql
+            PMA_PORT: 3306
+            MYSQL_ROOT_PASSWORD: "secret"
+            UPLOAD_LIMIT: 100M
+        depends_on:
+            mysql:
+                condition: service_healthy
+
     queue:
-        image: syride_app:latest
+        image: syride_octane:latest
         container_name: syride_queue
         command: php artisan queue:work --tries=3 --timeout=60 --sleep=3
         env_file: .env
         environment:
             APP_ENV: production
             DB_HOST: mysql
+            DB_PASSWORD: "secret"
+            REDIS_HOST: redis
+            CACHE_DRIVER: redis
+            QUEUE_CONNECTION: sync
+        volumes:
+            - ./storage/logs:/var/www/html/storage/logs
+            - ./app:/var/www/html/app
         depends_on:
             mysql:
                 condition: service_healthy
-            app:
-                condition: service_started
         restart: unless-stopped
 
-# ============================================================
-# Volumes
-# ============================================================
 volumes:
     mysql_data:

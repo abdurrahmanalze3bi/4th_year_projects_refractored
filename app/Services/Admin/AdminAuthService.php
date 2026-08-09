@@ -2,126 +2,134 @@
 
 namespace App\Services\Admin;
 
-use App\Models\User;
-use App\Services\JwtService;
+use App\Models\Employee;
+use App\Services\Staff\StaffJwtService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 
 /**
  * AdminAuthService
  *
- * Handles admin login / refresh / logout.
+ * Handles authentication for system_admin and sycash employees.
  *
- * Admin users are kept as lightweight User rows purely so JwtService
- * can issue tokens. They have no wallet attached — system wallets
- * (Primary Escrow, SyCash) are standalone rows seeded via SystemWalletSeeder.
+ * What changed vs. the old version:
+ *   OLD → looked up a User by email, then verified the email existed in
+ *         config/admin.php to decide "this person is an admin".
+ *   NEW → looks up an Employee by username OR email, then checks the
+ *         Employee's role is an admin role. The DB is the source of truth.
+ *
+ * Token management is delegated entirely to StaffJwtService so admin
+ * tokens and staff tokens share the same format and revocation table.
  */
 final class AdminAuthService
 {
     public function __construct(
-        private readonly JwtService $jwtService,
+        private readonly StaffJwtService $jwtService,
     ) {}
 
     // =========================================================================
-    // LOGIN
+    // AUTH
     // =========================================================================
 
     /**
-     * Validate credentials (email OR username) + password.
-     * Ensure a minimal admin User row exists (for JWT), then return token pair.
+     * Authenticate a system_admin or sycash account.
      *
-     * @return array{tokens: array, admin: array}|null
+     * @param string $identifier  Username or email
+     * @param string $password
+     * @return array{admin: array, tokens: array}|null  null on failure
      */
-    public function authenticate(string $emailOrUsername, string $password): ?array
+    public function authenticate(string $identifier, string $password): ?array
     {
-        $adminConfig = $this->findAdminConfig($emailOrUsername, $password);
+        $employee = Employee::where('username', $identifier)
+            ->orWhere('email', $identifier)
+            ->first();
 
-        if (!$adminConfig) {
-            Log::warning('Admin login failed', ['identifier' => $emailOrUsername]);
+        if (!$employee) {
             return null;
         }
 
-        // Ensure a User row exists for this admin so JwtService can sign tokens.
-        // This row has NO wallet — it is only a JWT principal.
-        $adminUser = User::firstOrCreate(
-            ['email' => $adminConfig['email']],
-            [
-                'first_name' => $adminConfig['first_name'],
-                'last_name'  => $adminConfig['last_name'],
-                'password'   => bcrypt($adminConfig['password']),
-                'gender'     => 'M',
-                'address'    => $adminConfig['address'] ?? 'دمشق',
-                'status'     => 1,
-            ]
-        );
+        // Only system_admin and sycash may use the admin panel
+        if (!$employee->role->isAdminRole()) {
+            Log::warning('Non-admin attempted admin login', [
+                'identifier' => $identifier,
+                'role'       => $employee->role->value,
+            ]);
+            return null;
+        }
 
-        $tokens = $this->jwtService->generateTokenPair($adminUser);
+        if (!$employee->is_active) {
+            return null;
+        }
 
-        Log::info('Admin logged in', [
-            'identifier' => $emailOrUsername,
-            'admin_type' => $adminConfig['type'],
-        ]);
+        if (!Hash::check($password, $employee->password)) {
+            return null;
+        }
 
         return [
-            'tokens' => $tokens,
-            'admin'  => [
-                'type'  => $adminConfig['type'],
-                'email' => $adminConfig['email'],
-                'name'  => $adminConfig['first_name'] . ' ' . $adminConfig['last_name'],
-                'phone' => $adminConfig['phone'],
-            ],
+            'admin'  => $this->formatAdmin($employee),
+            'tokens' => $this->jwtService->generateTokenPair($employee),
         ];
     }
 
-    // =========================================================================
-    // REFRESH / LOGOUT
-    // =========================================================================
-
+    /**
+     * Refresh an admin token pair.
+     *
+     * @return array{access_token: string, refresh_token: string}|null
+     */
     public function refresh(string $refreshToken): ?array
     {
         return $this->jwtService->refreshAccessToken($refreshToken);
     }
 
-    public function logout(int $adminUserId): void
+    /**
+     * Revoke all tokens for the given employee (logout).
+     */
+    public function logout(int $employeeId): void
     {
-        $this->jwtService->revokeAllTokens($adminUserId);
-        Log::info('Admin logged out', ['user_id' => $adminUserId]);
+        $this->jwtService->revokeAllTokens($employeeId);
     }
 
     // =========================================================================
-    // HELPERS used by controllers / middleware
-    // =========================================================================
-
-    public function getAdminConfigFromRequest(\Illuminate\Http\Request $request): ?array
-    {
-        return $request->attributes->get('adminConfig');
-    }
-
-    public function isPrimary(\Illuminate\Http\Request $request): bool
-    {
-        return $request->attributes->get('adminType') === 'system_admin';
-    }
-
-    // =========================================================================
-    // PRIVATE
+    // REQUEST HELPERS
     // =========================================================================
 
     /**
-     * Match $identifier against each admin config's 'email' OR 'username' field,
-     * then verify the password.
+     * Build the "adminConfig" array that AdminWalletService expects.
+     *
+     * AdminJwtMiddleware sets 'adminEmployee' on every authenticated request,
+     * so this is just a projection — no DB hit.
      */
-    private function findAdminConfig(string $identifier, string $password): ?array
+    public function getAdminConfigFromRequest(Request $request): array
     {
-        foreach (['system_admin', 'sycash'] as $type) {
-            $config = config("admin.{$type}");
+        /** @var Employee $employee */
+        $employee = $request->attributes->get('staffEmployee');
 
-            $emailMatch    = isset($config['email'])    && $config['email']    === $identifier;
-            $usernameMatch = isset($config['username']) && $config['username'] === $identifier;
+        // role->value is 'system_admin' or 'sycash' — matches config/admin.php keys exactly
+        $roleKey = $employee->role->value;
 
-            if (($emailMatch || $usernameMatch) && $config['password'] === $password) {
-                return array_merge($config, ['type' => $type]);
-            }
-        }
+        return [
+            'type'        => $roleKey,
+            'phone'       => config("admin.$roleKey.phone"),
+            'email'       => $employee->email,
+            'employee_id' => $employee->id,
+        ];
+    }
 
-        return null;
+    // =========================================================================
+    // FORMAT
+    // =========================================================================
+
+    public function formatAdmin(Employee $employee): array
+    {
+        return [
+            'id'         => $employee->id,
+            'username'   => $employee->username,
+            'email'      => $employee->email,
+            'first_name' => $employee->first_name,
+            'last_name'  => $employee->last_name,
+            'role'       => $employee->role->value,
+            'role_label' => $employee->role->label(),
+        ];
     }
 }

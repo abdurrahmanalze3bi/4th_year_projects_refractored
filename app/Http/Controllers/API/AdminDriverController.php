@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Services\Admin\AdminDriverService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;      // ← added
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
@@ -24,6 +25,16 @@ use Illuminate\Support\Facades\Validator;
  *  GET  /api/admin/drivers/activity           → recent activity feed
  *
  *  GET  /api/admin/drivers/{driverId}/profile → single driver detail
+ *
+ * ── Caching summary ─────────────────────────────────────────────────────────
+ *
+ *  CACHED     dashboard              admin.drivers.dashboard                5 min
+ *  CACHED     stats                  admin.drivers.stats                    5 min
+ *  NOT CACHED index                  (filter+page+search = unbounded keys)
+ *  CACHED     activity               admin.drivers.activity.{limit}         1 min
+ *  CACHED     driverProfile          admin.driver.profile.{id}             10 min
+ *  CACHED     driverDashboard        admin.driver.dashboard.{id}            5 min
+ *  CACHED     verificationEfficiency admin.drivers.verification.efficiency.{period} 5 min
  */
 final class AdminDriverController extends Controller
 {
@@ -38,6 +49,8 @@ final class AdminDriverController extends Controller
     /**
      * GET /api/admin/drivers/dashboard
      *
+     * CACHED — 5 minutes. One shared Redis key for all 3 cluster nodes.
+     *
      * Returns every widget the driver management page needs in one call:
      *   - admin_photo
      *   - stats  (total, active, pending, suspended, avg_rating)
@@ -49,9 +62,11 @@ final class AdminDriverController extends Controller
     public function dashboard(Request $request): JsonResponse
     {
         try {
-            $data = $this->driverService->getDashboardData(
-                $request->user()?->id
-            );
+            $data = Cache::remember('admin.drivers.dashboard', 300, function () use ($request) {
+                return $this->driverService->getDashboardData(
+                    $request->user()?->id
+                );
+            });
 
             return response()->json([
                 'status' => 'success',
@@ -73,15 +88,20 @@ final class AdminDriverController extends Controller
     /**
      * GET /api/admin/drivers/stats
      *
+     * CACHED — 5 minutes.
      * Returns the four stat cards independently so the frontend can refresh
      * just the numbers without reloading the whole page.
      */
     public function stats(): JsonResponse
     {
         try {
+            $data = Cache::remember('admin.drivers.stats', 300, function () {
+                return $this->driverService->getStats();
+            });
+
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->driverService->getStats(),
+                'data'   => $data,
             ]);
         } catch (\Exception $e) {
             Log::error('Driver stats failed', ['error' => $e->getMessage()]);
@@ -93,11 +113,17 @@ final class AdminDriverController extends Controller
     }
 
     // =========================================================================
-    // DRIVER TABLE
+    // DRIVER TABLE — NOT cached
     // =========================================================================
 
     /**
      * GET /api/admin/drivers
+     *
+     * NOT cached.
+     * Reason: the combination of filter + page + per_page + search creates
+     * effectively unbounded cache keys. Free-text search alone generates a
+     * unique key per query string. Caching paginated search results fills Redis
+     * with one-time entries and gives near-zero hit rate in practice.
      *
      * Query params:
      *   filter   = all | verified | pending | suspended   (default: all)
@@ -160,6 +186,11 @@ final class AdminDriverController extends Controller
     /**
      * GET /api/admin/drivers/activity
      *
+     * CACHED — 1 minute per $limit value.
+     * "Recent" implies freshness. 60 s is the shortest cache window worth
+     * having — it still removes the per-request DB hit under concurrent load
+     * while keeping the feed nearly live.
+     *
      * Query params:
      *   limit = 1-50   (default: 10)
      */
@@ -179,9 +210,13 @@ final class AdminDriverController extends Controller
         try {
             $limit = (int) $request->get('limit', 10);
 
+            $data = Cache::remember("admin.drivers.activity.{$limit}", 60, function () use ($limit) {
+                return $this->driverService->getRecentActivity($limit);
+            });
+
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->driverService->getRecentActivity($limit),
+                'data'   => $data,
             ]);
         } catch (\Exception $e) {
             Log::error('Driver activity feed failed', ['error' => $e->getMessage()]);
@@ -199,13 +234,19 @@ final class AdminDriverController extends Controller
     /**
      * GET /api/admin/drivers/{driverId}/profile
      *
+     * CACHED — 10 minutes per driver.
+     * Profile data (name, vehicle, documents, licence scan, rating) changes
+     * rarely. Per-driver key means a profile update only busts one entry.
+     *
      * Returns the full profile of a single driver including:
      *   - personal info, vehicle details, documents, rating, recent rides
      */
     public function driverProfile(int $driverId): JsonResponse
     {
         try {
-            $profile = $this->driverService->getDriverProfile($driverId);
+            $profile = Cache::remember("admin.driver.profile.{$driverId}", 600, function () use ($driverId) {
+                return $this->driverService->getDriverProfile($driverId);
+            });
 
             return response()->json([
                 'status' => 'success',
@@ -227,10 +268,17 @@ final class AdminDriverController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * CACHED — 5 minutes per driver.
+     * Per-driver key so a status change only busts that specific entry.
+     */
     public function driverDashboard(int $driverId): JsonResponse
     {
         try {
-            $data = $this->driverService->getDriverDashboard($driverId);
+            $data = Cache::remember("admin.driver.dashboard.{$driverId}", 300, function () use ($driverId) {
+                return $this->driverService->getDriverDashboard($driverId);
+            });
 
             return response()->json([
                 'status' => 'success',
@@ -253,6 +301,13 @@ final class AdminDriverController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * CACHED — 5 minutes per period.
+     * Three possible Redis keys: efficiency.day / efficiency.week / efficiency.month
+     * All three are busted by AdminDashboardController::bustVerificationCaches()
+     * when a verification is approved or rejected.
+     */
     public function verificationEfficiency(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -269,9 +324,17 @@ final class AdminDriverController extends Controller
         try {
             $period = $request->get('period', 'week');
 
+            $data = Cache::remember(
+                "admin.drivers.verification.efficiency.{$period}",
+                300,
+                function () use ($period) {
+                    return $this->driverService->getVerificationEfficiency($period);
+                }
+            );
+
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->driverService->getVerificationEfficiency($period),
+                'data'   => $data,
             ]);
         } catch (\Exception $e) {
             Log::error('Verification efficiency failed', ['error' => $e->getMessage()]);
@@ -281,6 +344,11 @@ final class AdminDriverController extends Controller
             ], 500);
         }
     }
+
+    // =========================================================================
+    // Private helpers — not endpoints, no caching
+    // =========================================================================
+
     private function resolvePeriodBounds(string $period): array
     {
         $now = \Carbon\Carbon::now();
@@ -317,6 +385,7 @@ final class AdminDriverController extends Controller
 
         return [$currentStart, $currentEnd, $previousStart, $previousEnd, $label, $prevLabel];
     }
+
     private function countProcessedVerifications(
         \Carbon\Carbon $start,
         \Carbon\Carbon $end
@@ -326,6 +395,7 @@ final class AdminDriverController extends Controller
             ->whereBetween('updated_at', [$start, $end])
             ->count();
     }
+
     private function countIncomingVerifications(
         \Carbon\Carbon $start,
         \Carbon\Carbon $end

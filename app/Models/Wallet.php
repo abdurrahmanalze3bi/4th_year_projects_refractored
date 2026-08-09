@@ -15,11 +15,13 @@ class Wallet extends Model
         'user_id',         // nullable — system wallets have no owner
         'wallet_number',
         'balance',
+        'cash_ride_debt',  // deferred cash ride creation fees owed to platform
         'phone_number',
     ];
 
     protected $casts = [
-        'balance' => 'decimal:2',
+        'balance'        => 'decimal:2',
+        'cash_ride_debt' => 'decimal:2',
     ];
 
     protected static function booted(): void

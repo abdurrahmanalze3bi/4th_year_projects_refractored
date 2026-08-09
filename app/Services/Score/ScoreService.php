@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Services\Score;
 
 use App\Domain\Score\ScorePolicyFactory;
@@ -75,6 +76,9 @@ final class ScoreService
      *
      * CASH rides only — for E-PAY rides the wallet time-based refund is the
      * "penalty"; no score change is applied.
+     *
+     * ORDER: increment cancellations FIRST so the policy reads the updated
+     * count and rate when deciding whether the high-cancel-rate tier applies.
      */
     public function recordPassengerCancel(
         User    $passenger,
@@ -87,6 +91,9 @@ final class ScoreService
         }
 
         DB::transaction(function () use ($passenger, $booking, $elapsedPct) {
+            // Increment FIRST — policy must see the updated cancel rate
+            $this->incrementCancellations($passenger);
+
             $action = ScoreAction::passengerCancelAction($elapsedPct);
             $this->applyAction(
                 user:      $passenger,
@@ -94,7 +101,6 @@ final class ScoreService
                 reference: $booking,
                 context:   ['elapsed_pct' => $elapsedPct],
             );
-            $this->incrementCancellations($passenger);
         });
     }
 
@@ -102,37 +108,37 @@ final class ScoreService
      * Penalise a passenger marked as no-show.
      *
      * CASH rides only: −15 pts.
-     * E-PAY rides: wallet split handles the penalty (95% driver, 5% SyCash) — no score change.
+     * E-PAY rides: wallet split handles the penalty — no score change.
      */
     public function recordPassengerNoShow(
-        \App\Models\User    $passenger,
-        \App\Models\Booking $booking,
-        string              $paymentMethod
+        User    $passenger,
+        Booking $booking,
+        string  $paymentMethod
     ): void {
         $userScore = $this->getOrCreateScore($passenger);
-        $action    = \App\Enums\ScoreAction::PASSENGER_NO_SHOW;
+        $action    = ScoreAction::PASSENGER_NO_SHOW;
         $result    = $this->policyFactory->make($action)
             ->calculate($action, $userScore);
 
         // E-PAY: wallet already penalises the passenger — no score deduction.
         // We still write a zero-point transaction so the history is complete.
-        $points = ($paymentMethod === \App\Enums\PaymentMethod::E_PAY->value)
+        $points = ($paymentMethod === PaymentMethod::E_PAY->value)
             ? 0
-            : $result->points;            // −15 for CASH
+            : $result->points; // −15 for CASH
 
         $previousScore = $userScore->score;
-        $userScore->applyDelta($points);  // clamps to [0, 100] and saves
-        $userScore->incrementNoShows();   // bumps total_no_shows
+        $userScore->applyDelta($points);
+        $userScore->incrementNoShows();
 
-        \App\Models\ScoreTransaction::create([
+        ScoreTransaction::create([
             'user_id'                  => $passenger->id,
             'action'                   => $action->value,
             'points'                   => $points,
             'previous_score'           => $previousScore,
             'new_score'                => $userScore->score,
-            'reference_type'           => \App\Models\Booking::class,
+            'reference_type'           => Booking::class,
             'reference_id'             => $booking->id,
-            'reason'                   => $paymentMethod === \App\Enums\PaymentMethod::E_PAY->value
+            'reason'                   => $paymentMethod === PaymentMethod::E_PAY->value
                 ? 'Passenger no-show (e-pay) — score unchanged, wallet settled'
                 : $result->reason,
             'high_cancel_rate_applied' => false,
@@ -142,8 +148,6 @@ final class ScoreService
             ],
         ]);
     }
-
-
 
     /**
      * Penalise a driver who cancelled a single passenger seat.
@@ -164,7 +168,12 @@ final class ScoreService
     /**
      * Penalise a driver who cancelled their entire ride.
      * Applies to both CASH and E-PAY rides.
-     * Tier: 0–30% = 0pts, 30–50% = −7pts, 50–100% = −12pts; ≥50% cancel rate → −15 always.
+     *
+     * Tiers (normal):    0–30% = 0 pts, 30–50% = −7 pts, 50–100% = −12 pts
+     * High cancel rate:  cancellations >= 3 AND rate >= 50% → −15 always
+     *
+     * ORDER: increment cancellations FIRST so the policy reads the updated
+     * count and rate when deciding whether the high-cancel-rate tier applies.
      */
     public function recordDriverCancelRide(
         User  $driver,
@@ -172,6 +181,9 @@ final class ScoreService
         float $elapsedPct,
     ): void {
         DB::transaction(function () use ($driver, $ride, $elapsedPct) {
+            // Increment FIRST — policy must see the updated cancel rate
+            $this->incrementCancellations($driver);
+
             $action = ScoreAction::driverCancelRideAction($elapsedPct);
             $this->applyAction(
                 user:      $driver,
@@ -179,7 +191,6 @@ final class ScoreService
                 reference: $ride,
                 context:   ['elapsed_pct' => $elapsedPct],
             );
-            $this->incrementCancellations($driver);
         });
     }
 
@@ -188,32 +199,32 @@ final class ScoreService
      * −15 pts always for BOTH cash and e-pay rides.
      */
     public function recordDriverNoShow(
-        \App\Models\User $driver,
-        \App\Models\Ride $ride,
-        string           $paymentMethod
+        User $driver,
+        Ride $ride,
+        string $paymentMethod
     ): void {
         $userScore = $this->getOrCreateScore($driver);
-        $action    = \App\Enums\ScoreAction::DRIVER_NO_SHOW;
+        $action    = ScoreAction::DRIVER_NO_SHOW;
         $result    = $this->policyFactory->make($action)
             ->calculate($action, $userScore);
 
-        $points = ($paymentMethod === \App\Enums\PaymentMethod::E_PAY->value)
+        $points = ($paymentMethod === PaymentMethod::E_PAY->value)
             ? 0
-            : $result->points;            // −15 for CASH
+            : $result->points; // −15 for CASH
 
         $previousScore = $userScore->score;
         $userScore->applyDelta($points);
         $userScore->incrementNoShows();
 
-        \App\Models\ScoreTransaction::create([
+        ScoreTransaction::create([
             'user_id'                  => $driver->id,
             'action'                   => $action->value,
             'points'                   => $points,
             'previous_score'           => $previousScore,
             'new_score'                => $userScore->score,
-            'reference_type'           => \App\Models\Ride::class,
+            'reference_type'           => Ride::class,
             'reference_id'             => $ride->id,
-            'reason'                   => $paymentMethod === \App\Enums\PaymentMethod::E_PAY->value
+            'reason'                   => $paymentMethod === PaymentMethod::E_PAY->value
                 ? 'Driver no-show (e-pay) — score unchanged, passengers refunded'
                 : $result->reason,
             'high_cancel_rate_applied' => false,
@@ -235,18 +246,7 @@ final class ScoreService
             ['score' => 70, 'total_rides' => 0, 'total_cancellations' => 0],
         );
     }
-    private function getOrCreateScore(\App\Models\User $user): \App\Models\UserScore
-    {
-        return \App\Models\UserScore::firstOrCreate(
-            ['user_id' => $user->id],
-            [
-                'score'               => 70,
-                'total_rides'         => 0,
-                'total_cancellations' => 0,
-                'total_no_shows'      => 0,
-            ]
-        );
-    }
+
     public function getHistory(User $user, int $limit = 20): \Illuminate\Database\Eloquent\Collection
     {
         return ScoreTransaction::where('user_id', $user->id)
@@ -276,6 +276,19 @@ final class ScoreService
     // =========================================================================
     // PRIVATE
     // =========================================================================
+
+    private function getOrCreateScore(User $user): UserScore
+    {
+        return UserScore::firstOrCreate(
+            ['user_id' => $user->id],
+            [
+                'score'               => 70,
+                'total_rides'         => 0,
+                'total_cancellations' => 0,
+                'total_no_shows'      => 0,
+            ]
+        );
+    }
 
     private function applyAction(
         User        $user,

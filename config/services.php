@@ -45,6 +45,7 @@ return [
     'fcm' => [
         'server_key' => env('FCM_SERVER_KEY'),
         'sender_id' => env('FCM_SENDER_ID'),
+        'credentials' => env('FCM_CREDENTIALS'),
     ],
     'chatdaddy' => [
         'api_key' => env('CHATDADDY_API_KEY'),

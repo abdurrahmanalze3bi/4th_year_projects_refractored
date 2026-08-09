@@ -2,8 +2,8 @@
 
 namespace App\Http\Middleware;
 
-use App\Services\JwtService;
-use App\Models\User;
+use App\Models\Employee;
+use App\Services\Staff\StaffJwtService;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -11,106 +11,96 @@ use Symfony\Component\HttpFoundation\Response;
 /**
  * AdminJwtMiddleware
  *
- * Validates every protected admin API route.
+ * Guards routes that require system_admin or sycash access.
  *
- * Strategy (no JwtService changes required):
- *   1. Decode the Bearer token with the existing JwtService::decodeToken()
- *   2. Load the User from the 'sub' claim
- *   3. Look up the user's email in config/admin.php to confirm they are admin
- *      ↳ This server-side check is actually stronger than a claim in the token
- *        because it always reflects the current config, not a stale payload.
- *   4. Inject adminConfig + adminType into $request->attributes
+ * What changed vs. the old version:
+ *   OLD → decoded a User JWT, then matched the user's email against
+ *         hardcoded values in config/admin.php to decide "is this an admin?".
+ *   NEW → decodes an Employee JWT (via StaffJwtService), then checks that
+ *         the Employee's role is an admin role (system_admin or sycash).
+ *         The database IS the source of truth — no config lookup needed.
  *
  * Usage:
- *   middleware('auth.admin')              — any admin
- *   middleware('auth.admin:primary')      — primary admin only
+ *   middleware('auth.admin')               — any admin role
+ *   middleware('auth.admin:system_admin')  — system_admin only
+ *   middleware('auth.admin:sycash')        — sycash only
  */
 final class AdminJwtMiddleware
 {
     public function __construct(
-        private readonly JwtService $jwtService
+        private readonly StaffJwtService $staffJwtService,
     ) {}
 
-    public function handle(Request $request, Closure $next, ?string $requiredType = null): Response
+    public function handle(Request $request, Closure $next, ?string $requiredRole = null): Response
     {
-        // ── 1. Extract Bearer token ──────────────────────────────────────────
+        // ── 1. Extract Bearer token ───────────────────────────────────────────
         $token = $this->extractToken($request);
-
         if (!$token) {
-            return $this->unauthorized('Admin access token missing');
+            return $this->unauthorized('Admin access token missing.');
         }
 
-        // ── 2. Decode & validate (expiry + signature) ────────────────────────
-        $payload = $this->jwtService->decodeToken($token);
-
+        // ── 2. Decode & verify signature + expiry ─────────────────────────────
+        $payload = $this->staffJwtService->decodeToken($token);
         if (!$payload) {
-            return $this->unauthorized('Invalid or expired admin token');
+            return $this->unauthorized('Invalid or expired admin token.');
         }
 
-        // ── 3. Must be an access token, not a refresh token ──────────────────
+        // ── 3. Must be an access token ────────────────────────────────────────
         if (($payload['type'] ?? null) !== 'access') {
-            return $this->unauthorized('Provide the access token, not the refresh token');
+            return $this->unauthorized('Provide the access token, not the refresh token.');
         }
 
-        // ── 4. Load User ─────────────────────────────────────────────────────
-        $user = User::find($payload['sub']);
-
-        if (!$user) {
-            return $this->unauthorized('User account not found');
+        // ── 4. Load the Employee record ───────────────────────────────────────
+        $employee = Employee::find($payload['sub']);
+        if (!$employee) {
+            return $this->unauthorized('Account not found.');
         }
 
-        // ── 5. Confirm this user is an admin via config lookup ───────────────
-        //      We check email (set when AdminWalletService creates the user row)
-        //      against config/admin.php — server-side, always fresh, unforgeable.
-        $adminConfig = $this->resolveAdminConfig($user->email);
-
-        if (!$adminConfig) {
-            return $this->unauthorized('This account does not have admin privileges');
+        if (!$employee->is_active) {
+            return $this->unauthorized('This account has been deactivated.');
         }
 
-        // ── 6. Optional per-route type gate: middleware('auth.admin:primary') ─
-        if ($requiredType && $adminConfig['type'] !== $requiredType) {
+        // ── 5. Verify this is an admin-level role ─────────────────────────────
+        //      system_admin and sycash are the only two admin roles.
+        //      Regular admins and support agents use StaffJwtMiddleware instead.
+        if (!$employee->role->isAdminRole()) {
+            return $this->unauthorized(
+                'Access denied. This endpoint requires an admin account.'
+            );
+        }
+
+        // ── 6. Token version check (invalidates tokens after password rotation)─
+        if (!$this->staffJwtService->validateTokenVersion($payload, $employee)) {
+            return $this->unauthorized(
+                'Your session has been invalidated. Please log in again.'
+            );
+        }
+
+        // ── 7. Optional per-route role gate ───────────────────────────────────
+        //      middleware('auth.admin:sycash') restricts to financial admin only.
+        if ($requiredRole && $employee->role->value !== $requiredRole) {
             return response()->json([
                 'status'  => 'error',
                 'code'    => 'FORBIDDEN',
-                'message' => "This action requires '{$requiredType}' admin access",
+                'message' => "This action requires '{$requiredRole}' access.",
             ], 403);
         }
 
-        // ── 7. Inject context — controllers read this, never decode tokens ───
-        $request->setUserResolver(fn () => $user);
-        $request->attributes->set('adminConfig', $adminConfig);
-        $request->attributes->set('adminType',   $adminConfig['type']);
+        // ── 8. Inject into request ────────────────────────────────────────────
+        // Set user resolver so $request->user()->id works in all admin controllers.
+        $request->setUserResolver(fn () => $employee);
+        $request->attributes->set('adminEmployee', $employee);
+        $request->attributes->set('adminType',     $employee->role->value);
 
         return $next($request);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Find the admin config block whose email matches the given email.
-     * Returns null if no match → not an admin.
-     */
-    private function resolveAdminConfig(string $email): ?array
-    {
-        foreach (['system_admin', 'sycash'] as $type) {
-            $config = config("admin.{$type}");
-
-            if (isset($config['email']) && $config['email'] === $email) {
-                return array_merge($config, ['type' => $type]);
-            }
-        }
-
-        return null;
-    }
-
     private function extractToken(Request $request): ?string
     {
         $header = $request->header('Authorization', '');
-
-        return str_starts_with($header, 'Bearer ')
-            ? substr($header, 7)
-            : null;
+        return str_starts_with($header, 'Bearer ') ? substr($header, 7) : null;
     }
 
     private function unauthorized(string $message): Response

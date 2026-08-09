@@ -2,63 +2,61 @@
 
 namespace App\Http\Middleware;
 
-use App\Enums\StaffRole;
 use App\Models\Employee;
-use App\Models\User;
-use App\Services\JwtService;
 use App\Services\Staff\StaffJwtService;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
+/**
+ * StaffJwtMiddleware
+ *
+ * Guards routes that require any staff role (support_agent, admin, system_admin,
+ * or sycash). Role-level access is enforced by individual controllers / services.
+ *
+ * What changed vs. the old version:
+ *   OLD → had a dual-path: tried StaffJwtService first, then fell back to
+ *         JwtService (user tokens) and auto-created an Employee row on the fly
+ *         for the system admin. This was a workaround for the hardcoded config.
+ *   NEW → single path: all staff (including system_admin and sycash) have proper
+ *         Employee rows seeded at deployment. No fallback, no on-the-fly creation.
+ *         JwtService import removed — staff tokens only.
+ *
+ * Usage (unchanged from caller's perspective):
+ *   middleware('staff')                        — any active employee
+ *   middleware('staff:admin,system_admin')     — admin or system_admin
+ *   middleware('staff:support_agent')          — support_agent only
+ */
 final class StaffJwtMiddleware
 {
     public function __construct(
         private readonly StaffJwtService $staffJwtService,
-        private readonly JwtService      $jwtService,
     ) {}
 
     /**
-     * FIX: Laravel invokes middleware parameters as separate positional
-     * arguments, not as one comma-joined string — `staff:admin,system_admin`
-     * calls handle($request, $next, 'admin', 'system_admin'). The previous
-     * `?string $roles = null` signature only ever received 'admin'; PHP
-     * silently drops extra arguments a function doesn't declare, so any
-     * route requiring more than one role effectively enforced only the
-     * first role listed. That locked out every other listed role (e.g.
-     * system_admin on `staff:admin,system_admin` routes), which is why the
-     * primary admin got 403'd on logout/wallet/dashboard/reports/etc.
+     * Laravel passes middleware parameters as separate string arguments:
+     *   middleware('staff:admin,system_admin') → handle($req, $next, 'admin', 'system_admin')
      */
     public function handle(Request $request, Closure $next, string ...$roles): Response
     {
+        // ── 1. Extract Bearer token ───────────────────────────────────────────
         $token = $this->extractToken($request);
         if (!$token) {
             return $this->fail('TOKEN_MISSING', 'Staff access token is required.');
         }
 
-        // ─── Try staff token first ───────────────────────────────────────
-        $staffPayload = $this->staffJwtService->decodeToken($token);
-        if ($staffPayload) {
-            return $this->handleStaffToken($request, $next, $staffPayload, $roles);
+        // ── 2. Decode with StaffJwtService (staff-specific secret + claims) ───
+        $payload = $this->staffJwtService->decodeToken($token);
+        if (!$payload) {
+            return $this->fail('TOKEN_INVALID', 'Invalid or expired token.');
         }
 
-        // ─── Fall back to admin token (system admin = system_admin) ───
-        $adminPayload = $this->jwtService->decodeToken($token);
-        if ($adminPayload) {
-            return $this->handleAdminToken($request, $next, $adminPayload, $roles);
-        }
-
-        return $this->fail('TOKEN_INVALID', 'Invalid or expired token.');
-    }
-
-    // ─── Staff JWT path ────────────────────────────────────────────────
-
-    private function handleStaffToken(Request $request, Closure $next, array $payload, array $roles): Response
-    {
+        // ── 3. Must be an access token ────────────────────────────────────────
         if (($payload['type'] ?? null) !== 'access') {
             return $this->fail('TOKEN_TYPE_INVALID', 'Provide the access token, not the refresh token.');
         }
 
+        // ── 4. Load Employee ──────────────────────────────────────────────────
         $employee = Employee::find($payload['sub']);
         if (!$employee) {
             return $this->fail('EMPLOYEE_NOT_FOUND', 'Employee account not found.');
@@ -68,72 +66,30 @@ final class StaffJwtMiddleware
             return $this->fail('ACCOUNT_INACTIVE', 'This employee account has been deactivated.');
         }
 
+        // ── 5. Token version check ────────────────────────────────────────────
         if (!$this->staffJwtService->validateTokenVersion($payload, $employee)) {
             return $this->fail('TOKEN_INVALIDATED', 'Session invalidated. Please log in again.');
         }
 
+        // ── 6. Role gate ──────────────────────────────────────────────────────
         if (!$this->checkRoles($employee->role->value, $roles)) {
             return $this->forbidden($roles);
         }
 
+        // ── 7. Inject context ─────────────────────────────────────────────────
         $request->attributes->set('staffEmployee', $employee);
+
         return $next($request);
     }
 
-    // ─── Admin JWT path (system admin token = system_admin access) ──────
-
-    private function handleAdminToken(Request $request, Closure $next, array $payload, array $roles): Response
-    {
-        if (($payload['type'] ?? null) !== 'access') {
-            return $this->fail('TOKEN_TYPE_INVALID', 'Provide the access token, not the refresh token.');
-        }
-
-        $user = User::find($payload['sub']);
-        if (!$user) {
-            return $this->fail('USER_NOT_FOUND', 'User not found.');
-        }
-
-        $systemAdminEmail = config('admin.system_admin.email');
-        if ($user->email !== $systemAdminEmail) {
-            return $this->fail('FORBIDDEN', 'Admin access only for the system admin.');
-        }
-
-        $employee = Employee::firstOrCreate(
-            ['username' => config('admin.system_admin.username')],
-            [
-                'email'         => $systemAdminEmail,
-                'password'      => bcrypt(config('admin.system_admin.password')),
-                'first_name'    => config('admin.system_admin.first_name', 'System'),
-                'last_name'     => config('admin.system_admin.last_name', 'Admin'),
-                'role'          => StaffRole::SYSTEM_ADMIN->value,
-                'is_active'     => true,
-                'token_version' => 0,
-            ]
-        );
-
-        if (!$this->checkRoles(StaffRole::SYSTEM_ADMIN->value, $roles)) {
-            return $this->forbidden($roles);
-        }
-
-        // set user resolver so $request->user() works in admin controllers
-        // (AdminDashboardController::logout() calls $request->user()->id)
-        $request->setUserResolver(fn () => $user);
-
-        $request->attributes->set('staffEmployee', $employee);
-        return $next($request);
-    }
-
-    // ─── Helpers ──────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private function checkRoles(string $actualRole, array $allowedRoles): bool
     {
         if (empty($allowedRoles)) {
-            return true;
+            return true; // No restriction — any active employee passes
         }
-
-        $allowed = array_map('trim', $allowedRoles);
-
-        return in_array($actualRole, $allowed, strict: true);
+        return in_array($actualRole, array_map('trim', $allowedRoles), strict: true);
     }
 
     private function extractToken(Request $request): ?string

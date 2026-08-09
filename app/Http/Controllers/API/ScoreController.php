@@ -5,6 +5,7 @@ use App\Http\Controllers\Controller;
 use App\Services\Score\ScoreService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 
 class ScoreController extends Controller
 {
@@ -16,11 +17,15 @@ class ScoreController extends Controller
      */
     public function show(Request $request): JsonResponse
     {
-        $userScore = $this->scoreService->getScore($request->user());
+        $userId = $request->user()->id;
+
+        $data = Cache::remember("score.user.{$userId}", 120, function () use ($request) {
+            return $this->formatScore($this->scoreService->getScore($request->user()));
+        });
 
         return response()->json([
             'success' => true,
-            'data'    => $this->formatScore($userScore),
+            'data'    => $data,
         ]);
     }
 
@@ -30,12 +35,11 @@ class ScoreController extends Controller
      */
     public function history(Request $request): JsonResponse
     {
-        $limit   = min((int) $request->get('limit', 20), 50);
-        $history = $this->scoreService->getHistory($request->user(), $limit);
+        $userId = $request->user()->id;
+        $limit  = min((int) $request->get('limit', 20), 50);
 
-        return response()->json([
-            'success' => true,
-            'data'    => $history->map(fn($tx) => [
+        $data = Cache::remember("score.history.{$userId}.{$limit}", 60, function () use ($request, $limit) {
+            return $this->scoreService->getHistory($request->user(), $limit)->map(fn($tx) => [
                 'id'                       => $tx->id,
                 'action'                   => $tx->action,
                 'points'                   => $tx->formatted_points,
@@ -46,7 +50,12 @@ class ScoreController extends Controller
                 'reference_type'           => class_basename($tx->reference_type ?? ''),
                 'reference_id'             => $tx->reference_id,
                 'created_at'               => $tx->created_at->toIso8601String(),
-            ]),
+            ])->all();
+        });
+
+        return response()->json([
+            'success' => true,
+            'data'    => $data,
         ]);
     }
 

@@ -16,6 +16,9 @@ use App\Repositories\ProfileRepository;
 use App\Repositories\UserRepository;
 use App\Repositories\RideRepository;
 use App\Services\TextMeBotOtpService;
+use Illuminate\Cache\Events\CacheHit;
+use Illuminate\Cache\Events\CacheMissed;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use App\Interfaces\EmailOtpServiceInterface;
@@ -80,6 +83,7 @@ class AppServiceProvider extends ServiceProvider
         // ========================================
         // PAYMENT SERVICES
         // ========================================
+        $this->app->singleton(\App\Services\Payment\CashRideFeeService::class);
         $this->app->singleton(\App\Services\Payment\WalletTransactionService::class);
         $this->app->singleton(\App\Domain\Payment\Strategies\EPayPaymentStrategy::class);
         $this->app->singleton(\App\Domain\Payment\Strategies\CashPaymentStrategy::class);
@@ -183,6 +187,19 @@ class AppServiceProvider extends ServiceProvider
     {
         Schema::defaultStringLength(191);
         User::observe(UserObserver::class);
+        Event::listen(CacheHit::class, function () {
+            try {
+                request()->attributes->set('cache_status', 'HIT');
+            } catch (\Throwable) {}
+        });
 
+        Event::listen(CacheMissed::class, function () {
+            try {
+                $req = request();
+                if ($req->attributes->get('cache_status') !== 'HIT') {
+                    $req->attributes->set('cache_status', 'MISS');
+                }
+            } catch (\Throwable) {}
+        });
     }
 }

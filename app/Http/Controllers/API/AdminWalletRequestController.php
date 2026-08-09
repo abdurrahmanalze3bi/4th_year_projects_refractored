@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Wallet;
 use App\Models\WalletRequest;
 use App\Models\WalletTransaction;
+use App\Services\Payment\CashRideFeeService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -19,23 +20,23 @@ use Illuminate\Support\Facades\Validator;
  * Admin endpoints for reviewing and acting on wallet charge/withdraw requests.
  *
  * Routes (all behind `auth.admin` middleware):
- *   GET   /api/admin/wallet/requests           → index()
+ *   GET   /api/admin/wallet/requests              → index()
  *   POST  /api/admin/wallet/requests/{id}/approve → approve()
  *   POST  /api/admin/wallet/requests/{id}/reject  → reject()
+ *
+ * ── Fixes applied ────────────────────────────────────────────────────────────
+ *  1. Withdrawal WalletTransaction amount stored as -$amount (outflow convention).
+ *  2. reject() now eager-loads user + wallet so formatRequest() has no N+1.
+ *  3. autoClearDebt wrapped in its own DB::transaction() so lockForUpdate()
+ *     inside it actually holds a row lock.
  */
 final class AdminWalletRequestController extends Controller
 {
-    // ── GET /api/admin/wallet/requests ────────────────────────────────────────
+    public function __construct(
+        private readonly CashRideFeeService $cashRideFeeService,
+    ) {}
 
-    /**
-     * List wallet requests with optional filters.
-     *
-     * Query params:
-     *   status  = pending | approved | rejected   (default: pending)
-     *   type    = charge | withdraw               (default: all)
-     *   per_page = 1-50                           (default: 15)
-     *   page    = int
-     */
+    // ── GET /api/admin/wallet/requests ──────────────────────────────────────
     public function index(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -51,7 +52,7 @@ final class AdminWalletRequestController extends Controller
 
         $query = WalletRequest::with([
             'user:id,first_name,last_name,email',
-            'wallet:id,wallet_number,phone_number,balance',
+            'wallet:id,wallet_number,phone_number,balance,cash_ride_debt',
         ])->orderByDesc('created_at');
 
         $status = $request->get('status', 'pending');
@@ -68,7 +69,6 @@ final class AdminWalletRequestController extends Controller
             (int) $request->get('page', 1)
         );
 
-        // Counts for tab badges
         $counts = [
             'pending'  => WalletRequest::where('status', 'pending')->count(),
             'approved' => WalletRequest::where('status', 'approved')->count(),
@@ -90,17 +90,7 @@ final class AdminWalletRequestController extends Controller
         ]);
     }
 
-    // ── POST /api/admin/wallet/requests/{id}/approve ──────────────────────────
-
-    /**
-     * Approve a pending request.
-     *
-     * Charge  → adds  amount to user's wallet balance.
-     * Withdraw → deducts amount from user's wallet balance (re-checks balance).
-     *
-     * Both operations are wrapped in a DB transaction so the balance
-     * update and the request status change are atomic.
-     */
+    // ── POST /api/admin/wallet/requests/{id}/approve ─────────────────────────
     public function approve(int $id, Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -126,7 +116,6 @@ final class AdminWalletRequestController extends Controller
                 $amount = (float) $walletRequest->amount;
 
                 if ($walletRequest->isWithdraw()) {
-                    // Re-check balance at approval time
                     if ($amount > (float) $wallet->balance) {
                         throw new \DomainException(
                             "Insufficient wallet balance ({$wallet->balance} SYP) to process withdrawal of {$amount} SYP."
@@ -134,26 +123,27 @@ final class AdminWalletRequestController extends Controller
                     }
                     $previousBalance = (float) $wallet->balance;
                     $newBalance      = $previousBalance - $amount;
-                    $wallet->balance = $newBalance;
                     $transactionType = 'withdrawal';
-                    $description     = "Withdrawal processed by admin";
+                    // FIX 1: withdrawal is an outflow — store as negative to match
+                    //         the convention used everywhere else in the codebase.
+                    $transactionAmount = -$amount;
+                    $description       = 'Withdrawal processed by admin';
                 } else {
-                    // Charge: add to balance
-                    $previousBalance = (float) $wallet->balance;
-                    $newBalance      = $previousBalance + $amount;
-                    $wallet->balance = $newBalance;
-                    $transactionType = 'admin_charge';
-                    $description     = "Balance topped up by admin";
+                    $previousBalance   = (float) $wallet->balance;
+                    $newBalance        = $previousBalance + $amount;
+                    $transactionType   = 'admin_charge';
+                    $transactionAmount = $amount;
+                    $description       = 'Balance topped up by admin';
                 }
 
+                $wallet->balance = $newBalance;
                 $wallet->save();
 
-                // Record the wallet transaction for audit trail
                 WalletTransaction::create([
                     'wallet_id'        => $wallet->id,
                     'user_id'          => $walletRequest->user_id,
                     'type'             => $transactionType,
-                    'amount'           => $amount,
+                    'amount'           => $transactionAmount,
                     'previous_balance' => $previousBalance,
                     'new_balance'      => $newBalance,
                     'description'      => $description,
@@ -162,7 +152,6 @@ final class AdminWalletRequestController extends Controller
                     'reference'        => 'wallet_request:' . $walletRequest->id,
                 ]);
 
-                // Mark request as approved
                 $walletRequest->update([
                     'status'       => 'approved',
                     'admin_notes'  => $request->input('admin_notes'),
@@ -180,9 +169,34 @@ final class AdminWalletRequestController extends Controller
                 ]);
             });
 
-            $walletRequest->refresh()->load('wallet');
+            $walletRequest->refresh()->load([
+                'user:id,first_name,last_name,email',
+                'wallet:id,wallet_number,phone_number,balance,cash_ride_debt',
+            ]);
 
-            // Notify user
+            // ── Auto-clear cash ride debt after a top-up ────────────────────
+            // Only for charges; withdrawals reduce the balance so debt clearing
+            // would immediately fail the balance >= debt check anyway.
+            // FIX 3: wrapped in its own DB::transaction() so that the
+            //         lockForUpdate() inside autoClearDebt is actually effective.
+            if ($walletRequest->isCharge() && $walletRequest->user && $walletRequest->wallet) {
+                try {
+                    DB::transaction(function () use ($walletRequest) {
+                        $this->cashRideFeeService->autoClearDebt(
+                            $walletRequest->wallet->fresh(),
+                            $walletRequest->user
+                        );
+                    });
+                } catch (\Throwable $e) {
+                    // Debt clearing failure must never block the approval response.
+                    Log::error('Auto debt clear failed after wallet charge', [
+                        'wallet_request_id' => $walletRequest->id,
+                        'error'             => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            // ── Notify user ─────────────────────────────────────────────────
             try {
                 $label = $walletRequest->isCharge() ? 'Wallet Charge' : 'Wallet Withdrawal';
                 $msg   = $walletRequest->isCharge()
@@ -198,9 +212,7 @@ final class AdminWalletRequestController extends Controller
                     'high',
                     'system'
                 );
-            } catch (\Throwable) {
-                // Notification failure must never block the approval
-            }
+            } catch (\Throwable) {}
 
             return response()->json([
                 'status'  => 'success',
@@ -218,13 +230,7 @@ final class AdminWalletRequestController extends Controller
         }
     }
 
-    // ── POST /api/admin/wallet/requests/{id}/reject ───────────────────────────
-
-    /**
-     * Reject a pending request — no balance change occurs.
-     *
-     * Body: { "admin_notes": "reason..." }   (recommended)
-     */
+    // ── POST /api/admin/wallet/requests/{id}/reject ──────────────────────────
     public function reject(int $id, Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -236,7 +242,12 @@ final class AdminWalletRequestController extends Controller
         }
 
         try {
-            $walletRequest = WalletRequest::findOrFail($id);
+            // FIX 2: eager-load relationships so formatRequest() and the
+            //         notification call below have no lazy-load N+1 queries.
+            $walletRequest = WalletRequest::with([
+                'user:id,first_name,last_name,email',
+                'wallet:id,wallet_number,phone_number,balance,cash_ride_debt',
+            ])->findOrFail($id);
 
             if (!$walletRequest->isPending()) {
                 return response()->json([
@@ -259,9 +270,8 @@ final class AdminWalletRequestController extends Controller
                 'user_id'    => $walletRequest->user_id,
             ]);
 
-            // Notify user
             try {
-                $label = $walletRequest->isCharge() ? 'Wallet Charge' : 'Wallet Withdrawal';
+                $label  = $walletRequest->isCharge() ? 'Wallet Charge' : 'Wallet Withdrawal';
                 $reason = $request->input('admin_notes') ? ' Reason: ' . $request->input('admin_notes') : '';
 
                 app(\App\Services\NotificationService::class)->createNotification(
@@ -273,9 +283,7 @@ final class AdminWalletRequestController extends Controller
                     'normal',
                     'system'
                 );
-            } catch (\Throwable) {
-                // Notification failure must never block the rejection
-            }
+            } catch (\Throwable) {}
 
             return response()->json([
                 'status'  => 'success',
@@ -291,29 +299,29 @@ final class AdminWalletRequestController extends Controller
         }
     }
 
-    // ── Private ───────────────────────────────────────────────────────────────
-
+    // ── Private ──────────────────────────────────────────────────────────────
     private function formatRequest(WalletRequest $r): array
     {
         return [
-            'id'             => $r->id,
-            'type'           => $r->type,
-            'amount'         => (float) $r->amount,
-            'status'         => $r->status,
-            'user_notes'     => $r->user_notes,
-            'admin_notes'    => $r->admin_notes,
-            'processed_at'   => $r->processed_at?->toIso8601String(),
-            'created_at'     => $r->created_at->toIso8601String(),
-            'user' => $r->user ? [
+            'id'           => $r->id,
+            'type'         => $r->type,
+            'amount'       => (float) $r->amount,
+            'status'       => $r->status,
+            'user_notes'   => $r->user_notes,
+            'admin_notes'  => $r->admin_notes,
+            'processed_at' => $r->processed_at?->toIso8601String(),
+            'created_at'   => $r->created_at->toIso8601String(),
+            'user'   => $r->user ? [
                 'id'    => $r->user->id,
                 'name'  => trim("{$r->user->first_name} {$r->user->last_name}"),
                 'email' => $r->user->email,
             ] : null,
             'wallet' => $r->wallet ? [
-                'id'             => $r->wallet->id,
-                'wallet_number'  => $r->wallet->wallet_number,
-                'phone_number'   => $r->wallet->phone_number,
-                'current_balance'=> (float) $r->wallet->balance,
+                'id'              => $r->wallet->id,
+                'wallet_number'   => $r->wallet->wallet_number,
+                'phone_number'    => $r->wallet->phone_number,
+                'current_balance' => (float) $r->wallet->balance,
+                'cash_ride_debt'  => (float) $r->wallet->cash_ride_debt,
             ] : null,
         ];
     }

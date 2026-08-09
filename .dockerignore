@@ -4,3 +4,17 @@ vendor
 .git
 docker-compose.yml
 README.md
+
+vendor/
+rr.exe
+rr.bat
+
+.rr.yaml
+
+vendor/
+rr.exe
+rr
+rr.bat
+*.php.patch
+
+rr
