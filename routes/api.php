@@ -44,10 +44,24 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 | API Routes
 |--------------------------------------------------------------------------
+|
+| Throttle limiter mapping (defined in RouteServiceProvider):
+|
+|   throttle:auth    → login, signup, OTP, password reset (strict — 5/min)
+|   throttle:api     → all authenticated user endpoints   (60/min)
+|   throttle:search  → search, autocomplete, route options (30/min)  ← additive on top of throttle:api
+|   throttle:uploads → file/document uploads              (10/min)   ← additive on top of throttle:api
+|   throttle:admin   → admin panel + employee management  (300/min)
+|   throttle:staff   → staff panel                        (200/min)
+|
+| "Additive" means both limiters apply independently; the stricter one
+| is the effective cap (e.g. search is capped at 30 not 60).
+|
 */
 
 // ========================================
-// UTILITY / DEBUG
+// UTILITY / DEBUG — no throttle
+// Remove /test-db before production (exposes DB config)
 // ========================================
 
 Route::get('/test', fn () => response()->json([
@@ -77,24 +91,28 @@ Route::get('/test-db', function () {
 });
 
 // ========================================
-// PUBLIC — OTP (WhatsApp / TextMeBot)
+// PUBLIC — OTP (WhatsApp / TextMeBot) [throttle:auth]
 // ========================================
 
-Route::prefix('otp')->group(function () {
-    Route::post('/send',   [OtpController::class, 'sendOtp']);
-    Route::post('/verify', [OtpController::class, 'verifyOtp']);
+Route::middleware('throttle:auth')->group(function () {
+
+    Route::prefix('otp')->group(function () {
+        Route::post('/send',   [OtpController::class, 'sendOtp']);
+        Route::post('/verify', [OtpController::class, 'verifyOtp']);
+    });
+
+    Route::prefix('textme-otp')->group(function () {
+        Route::post('/send',   [TextMeOtpController::class, 'sendOtp']);
+        Route::post('/verify', [TextMeOtpController::class, 'verifyOtp']);
+    });
+
 });
 
-Route::prefix('textme-otp')->group(function () {
-    Route::post('/send',   [TextMeOtpController::class, 'sendOtp']);
-    Route::post('/verify', [TextMeOtpController::class, 'verifyOtp']);
-});
-
 // ========================================
-// PUBLIC — AUTHENTICATION
+// PUBLIC — AUTHENTICATION [throttle:auth]
 // ========================================
 
-Route::prefix('auth')->group(function () {
+Route::middleware('throttle:auth')->prefix('auth')->group(function () {
 
     Route::post('/signup',  [SignupController::class, 'register']);
     Route::post('/login',   LoginController::class);
@@ -104,23 +122,24 @@ Route::prefix('auth')->group(function () {
     Route::post('/password/forgot',     ForgotPasswordController::class);
     Route::post('/password/verify-otp', VerifyPasswordOtpController::class);
     Route::post('/password/reset',      ResetPasswordController::class);
+
 });
 
 // ========================================
-// PUBLIC — EMAIL VERIFICATION
+// PUBLIC — EMAIL VERIFICATION [throttle:auth]
 // ========================================
 
-Route::prefix('email-verification')->group(function () {
+Route::middleware('throttle:auth')->prefix('email-verification')->group(function () {
     Route::post('/send',   [EmailVerificationController::class, 'send']);
     Route::post('/verify', [EmailVerificationController::class, 'verify']);
     Route::post('/resend', [EmailVerificationController::class, 'resend']);
 });
 
 // ========================================
-// PROTECTED — JWT AUTH REQUIRED
+// PROTECTED — JWT AUTH REQUIRED [throttle:api]
 // ========================================
 
-Route::middleware('jwt')->group(function () {
+Route::middleware(['jwt', 'throttle:api'])->group(function () {
 
     // Session
     Route::get('/user', fn (Request $r) => response()->json([
@@ -135,13 +154,19 @@ Route::middleware('jwt')->group(function () {
         Route::get('/history', [ScoreController::class, 'history']);
     });
 
-    // Autocomplete
-    Route::get('/autocomplete', [RideController::class, 'autocomplete']);
+    // Autocomplete [+throttle:search — effective cap: 30/min]
+    Route::middleware('throttle:search')
+        ->get('/autocomplete', [RideController::class, 'autocomplete']);
 
-    // Profile
+    // ── Profile ──────────────────────────────────────────────────────────────
+
     Route::prefix('profile')->group(function () {
-        Route::post('/',          [ProfileController::class, 'update']);
-        Route::post('/documents', [DocumentController::class, 'store']);
+
+        Route::post('/', [ProfileController::class, 'update']);
+
+        // Document upload [+throttle:uploads — effective cap: 10/min]
+        Route::middleware('throttle:uploads')
+            ->post('/documents', [DocumentController::class, 'store']);
 
         Route::prefix('verify')->group(function () {
             Route::post('/passenger',      [VerificationController::class, 'verifyPassenger']);
@@ -152,13 +177,20 @@ Route::middleware('jwt')->group(function () {
         Route::get('/{userId}',           [ProfileController::class, 'show']);
         Route::post('/{userId}/comments', [ProfileController::class, 'comment']);
         Route::post('/{userId}/rate',     [ProfileController::class, 'rateUser']);
+
     });
 
-    // Rides
+    // ── Rides ─────────────────────────────────────────────────────────────────
+
     Route::prefix('rides')->group(function () {
-        Route::get('/search',             [RideController::class, 'searchRides']);
-        Route::post('/search',            [RideController::class, 'searchRides']);
-        Route::post('/route-options',     [RideController::class, 'getRouteOptions']);
+
+        // Search / route calculation [+throttle:search — effective cap: 30/min]
+        Route::middleware('throttle:search')->group(function () {
+            Route::get('/search',         [RideController::class, 'searchRides']);
+            Route::post('/search',        [RideController::class, 'searchRides']);
+            Route::post('/route-options', [RideController::class, 'getRouteOptions']);
+        });
+
         Route::post('/create-with-route', [RideController::class, 'createRideWithRoute']);
 
         Route::get('/',  [RideController::class, 'getRides']);
@@ -170,9 +202,11 @@ Route::middleware('jwt')->group(function () {
         Route::post('/{rideId}/finish',         [RideController::class, 'finishRide']);
         Route::post('/{rideId}/driver-confirm', [RideController::class, 'driverConfirmCompletion']);
         Route::post('/{rideId}/driver-no-show', [RideController::class, 'reportDriverNoShow']);
+
     });
 
-    // Bookings
+    // ── Bookings ──────────────────────────────────────────────────────────────
+
     Route::prefix('bookings')->group(function () {
         Route::get('/',                               [RideController::class, 'myBookings']);
         Route::post('/{bookingId}/accept',            [RideController::class, 'acceptBooking']);
@@ -183,7 +217,8 @@ Route::middleware('jwt')->group(function () {
         Route::post('/{bookingId}/passenger-no-show', [RideController::class, 'reportPassengerNoShow']);
     });
 
-    // Chat
+    // ── Chat ──────────────────────────────────────────────────────────────────
+
     Route::prefix('chat')->group(function () {
         Route::get('/conversations',                            [ChatController::class, 'getConversations']);
         Route::post('/conversations',                           [ChatController::class, 'startConversation']);
@@ -192,7 +227,8 @@ Route::middleware('jwt')->group(function () {
         Route::delete('/messages/{messageId}',                  [ChatController::class, 'deleteMessage']);
     });
 
-    // Notifications
+    // ── Notifications ─────────────────────────────────────────────────────────
+
     Route::prefix('notifications')->group(function () {
         Route::get('/',             [NotificationController::class, 'index']);
         Route::get('/unread-count', [NotificationController::class, 'getUnreadCount']);
@@ -204,7 +240,8 @@ Route::middleware('jwt')->group(function () {
         Route::delete('/{id}',      [NotificationController::class, 'destroy']);
     });
 
-    // Wallet
+    // ── Wallet ────────────────────────────────────────────────────────────────
+
     Route::prefix('wallet')->group(function () {
         Route::get('/balance',            [WalletController::class, 'getBalance']);
         Route::post('/initiate',          [WalletController::class, 'initiateWalletCreation']);
@@ -215,19 +252,22 @@ Route::middleware('jwt')->group(function () {
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
         Route::post('/requests',          [WalletRequestController::class, 'store']);
         Route::get('/requests/{id}',      [WalletRequestController::class, 'show']);
-        Route::post('/create-direct', [WalletController::class, 'createDirect']);
+        Route::post('/create-direct',     [WalletController::class, 'createDirect']);
         Route::delete('/requests/{id}',   [WalletRequestController::class, 'destroy']);
     });
 
-    // Complaints
+    // ── Complaints ────────────────────────────────────────────────────────────
+
     Route::prefix('complaints')->group(function () {
         Route::get('/',     [ComplaintController::class, 'index']);
         Route::post('/',    [ComplaintController::class, 'store']);
         Route::get('/{id}', [ComplaintController::class, 'show']);
     });
 
-    // Contact
+    // ── Contact ───────────────────────────────────────────────────────────────
+
     Route::post('/contact', ContactController::class);
+
 });
 
 // ========================================
@@ -236,14 +276,16 @@ Route::middleware('jwt')->group(function () {
 
 Route::prefix('admin')->group(function () {
 
-    // Public: login + refresh only
-    Route::post('/login',   [AdminDashboardController::class, 'login']);
-    Route::post('/refresh', [AdminDashboardController::class, 'refresh']);
+    // Public: login + refresh [throttle:auth]
+    Route::middleware('throttle:auth')->group(function () {
+        Route::post('/login',   [AdminDashboardController::class, 'login']);
+        Route::post('/refresh', [AdminDashboardController::class, 'refresh']);
+    });
 
-    // Everything else: admin + system_admin roles only
-    Route::middleware('staff:admin,system_admin')->group(function () {
+    // Everything else: admin + system_admin roles [throttle:admin]
+    Route::middleware(['staff:admin,system_admin', 'throttle:admin'])->group(function () {
 
-        // ── Driver routes (moved inside — were previously unprotected) ──
+        // ── Driver routes ──────────────────────────────────────────────────
         Route::get('users',                                    [AdminUserController::class,   'index']);
         Route::get('drivers/verification-efficiency',          [AdminDriverController::class, 'verificationEfficiency']);
         Route::get('drivers/dashboard',                        [AdminDriverController::class, 'dashboard']);
@@ -253,11 +295,11 @@ Route::prefix('admin')->group(function () {
         Route::get('drivers/{driverId}/profile',               [AdminDriverController::class, 'driverProfile']);
         Route::get('drivers/{driverId}/dashboard',             [AdminDriverController::class, 'driverDashboard']);
 
-        // ── Session ───────────────────────────────────────────────────────
+        // ── Session ────────────────────────────────────────────────────────
         Route::post('/logout', [AdminDashboardController::class, 'logout']);
         Route::post('/photo',  [AdminDashboardController::class, 'uploadAdminPhoto']);
 
-        // ── Dashboard ─────────────────────────────────────────────────────
+        // ── Dashboard ──────────────────────────────────────────────────────
         Route::prefix('dashboard')->group(function () {
             Route::get('/',       [AdminDashboardController::class, 'dashboard']);
             Route::get('/stats',  [AdminDashboardController::class, 'dashboardStats']);
@@ -266,7 +308,7 @@ Route::prefix('admin')->group(function () {
             Route::get('/recent', [AdminDashboardController::class, 'dashboardRecent']);
         });
 
-        // ── Trips ─────────────────────────────────────────────────────────
+        // ── Trips ──────────────────────────────────────────────────────────
         Route::prefix('trips')->group(function () {
             Route::get('/live', [AdminTripController::class, 'live']);
             Route::get('/',     [AdminTripController::class, 'index']);
@@ -274,42 +316,35 @@ Route::prefix('admin')->group(function () {
         Route::get('/routes/popular', [AdminTripController::class, 'popularRoutes']);
         Route::get('/drivers/top',    [AdminTripController::class, 'topDrivers']);
 
-        // ── Wallet ────────────────────────────────────────────────────────
+        // ── Wallet ─────────────────────────────────────────────────────────
         Route::prefix('wallet')->group(function () {
-            Route::get('/',                        [AdminDashboardController::class,    'getAdminWallet']);
-            Route::get('/{walletId}/transactions', [AdminDashboardController::class,    'showWalletTransactions']);
-
+            Route::get('/',                        [AdminDashboardController::class,     'getAdminWallet']);
+            Route::get('/{walletId}/transactions', [AdminDashboardController::class,     'showWalletTransactions']);
             Route::get('/requests',                [AdminWalletRequestController::class, 'index']);
             Route::post('/requests/{id}/approve',  [AdminWalletRequestController::class, 'approve']);
             Route::post('/requests/{id}/reject',   [AdminWalletRequestController::class, 'reject']);
         });
         Route::get('/wallets', [AdminDashboardController::class, 'getAdminWallets']);
 
-        // ── UC-ADM-12: Ban / Unban ────────────────────────────────────────
+        // ── UC-ADM-12: Ban / Unban ─────────────────────────────────────────
         Route::prefix('users')->group(function () {
             Route::get('/{userId}/status',  [AdminBanController::class, 'userStatus']);
             Route::post('/{userId}/ban',    [AdminBanController::class, 'ban']);
             Route::post('/{userId}/unban',  [AdminBanController::class, 'unban']);
         });
 
-        // ── Passenger Profile Dashboard ───────────────────────────────────
+        // ── Passenger Profile Dashboard ────────────────────────────────────
         Route::prefix('passengers')->group(function () {
-
-            // BFF: returns full page in one call
             Route::get('/{userId}/full-profile',   [PassengerProfileController::class, 'fullProfile']);
-
-            // Individual section refresh
             Route::get('/{userId}/stats',          [PassengerProfileController::class, 'stats']);
             Route::get('/{userId}/monthly-trips',  [PassengerProfileController::class, 'monthlyTrips']);
             Route::get('/{userId}/recent-trips',   [PassengerProfileController::class, 'recentTrips']);
             Route::get('/{userId}/complaints',     [PassengerProfileController::class, 'complaints']);
             Route::get('/{userId}/wallet-charges', [PassengerProfileController::class, 'walletCharges']);
-
-            // Action
             Route::post('/{userId}/charge-wallet', [PassengerProfileController::class, 'chargeWallet']);
         });
 
-        // ── System Admin only ─────────────────────────────────────────────
+        // ── System Admin only ──────────────────────────────────────────────
         Route::middleware('staff:system_admin')->group(function () {
 
             Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
@@ -321,8 +356,11 @@ Route::prefix('admin')->group(function () {
                 Route::post('/{userId}/approve', [AdminDashboardController::class, 'approveVerification']);
                 Route::post('/{userId}/reject',  [AdminDashboardController::class, 'rejectVerification']);
             });
+
         });
+
     });
+
 });
 
 // ========================================
@@ -331,10 +369,14 @@ Route::prefix('admin')->group(function () {
 
 Route::prefix('staff')->name('staff.')->group(function () {
 
-    Route::post('login',   [StaffAuthController::class, 'login'])->name('login');
-    Route::post('refresh', [StaffAuthController::class, 'refresh'])->name('refresh');
+    // Public: login + refresh [throttle:auth]
+    Route::middleware('throttle:auth')->group(function () {
+        Route::post('login',   [StaffAuthController::class, 'login'])->name('login');
+        Route::post('refresh', [StaffAuthController::class, 'refresh'])->name('refresh');
+    });
 
-    Route::middleware('staff')->group(function () {
+    // Protected staff routes [throttle:staff]
+    Route::middleware(['staff', 'throttle:staff'])->group(function () {
 
         Route::post('logout', [StaffAuthController::class, 'logout'])->name('logout');
         Route::get('me',      [StaffAuthController::class, 'me'])->name('me');
@@ -375,15 +417,18 @@ Route::prefix('staff')->name('staff.')->group(function () {
                 Route::get('/',               [StaffAdminController::class, 'escalatedComplaints'])->name('index');
                 Route::patch('/{id}/resolve', [StaffAdminController::class, 'resolveEscalated'])->name('resolve');
             });
+
         });
+
     });
+
 });
 
 // ========================================
-// EMPLOYEE MANAGEMENT — system_admin only
+// EMPLOYEE MANAGEMENT — system_admin only [throttle:admin]
 // ========================================
 
-Route::prefix('employees')->middleware('staff:system_admin')->group(function () {
+Route::prefix('employees')->middleware(['staff:system_admin', 'throttle:admin'])->group(function () {
     Route::get('/',                      [EmployeeManagementController::class, 'index']);
     Route::post('/',                     [EmployeeManagementController::class, 'store']);
     Route::get('/{id}',                  [EmployeeManagementController::class, 'show']);
