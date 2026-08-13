@@ -208,4 +208,47 @@ class WalletController extends Controller
 
         return $masked . '@' . $domain;
     }
+    // POST /api/wallet/create-direct
+    public function createDirect(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if ($user->wallet) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You already have a wallet.',
+            ], 409);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'phone_number' => 'required|string|unique:wallets,phone_number',
+        ], [
+            'phone_number.required' => 'A phone number is required.',
+            'phone_number.unique'   => 'This phone number is already linked to another wallet.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        $wallet = Wallet::create([
+            'user_id'      => $user->id,
+            'phone_number' => $request->phone_number,
+            'balance'      => 0,
+        ]);
+
+        $user->wallet_id = $wallet->id;
+        $user->save();
+
+        return response()->json([
+            'success'       => true,
+            'message'       => 'Wallet created successfully.',
+            'wallet_number' => $wallet->wallet_number,
+            'phone_number'  => $wallet->phone_number,
+            'balance'       => 0,
+        ], 201);
+    }
 }

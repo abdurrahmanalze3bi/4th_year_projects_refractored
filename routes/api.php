@@ -215,6 +215,7 @@ Route::middleware('jwt')->group(function () {
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
         Route::post('/requests',          [WalletRequestController::class, 'store']);
         Route::get('/requests/{id}',      [WalletRequestController::class, 'show']);
+        Route::post('/create-direct', [WalletController::class, 'createDirect']);
         Route::delete('/requests/{id}',   [WalletRequestController::class, 'destroy']);
     });
 
