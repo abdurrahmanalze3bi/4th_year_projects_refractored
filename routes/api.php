@@ -174,7 +174,7 @@ Route::middleware('jwt')->group(function () {
 
     // Bookings
     Route::prefix('bookings')->group(function () {
-        Route::get('/',                               [RideController::class, 'getMyBookings']);
+        Route::get('/',                               [RideController::class, 'myBookings']);
         Route::post('/{bookingId}/accept',            [RideController::class, 'acceptBooking']);
         Route::post('/{bookingId}/reject',            [RideController::class, 'rejectBooking']);
         Route::post('/{bookingId}/cancel',            [RideController::class, 'cancelBooking']);
