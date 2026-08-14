@@ -15,6 +15,7 @@ use App\Services\NotificationService;
  * User-facing endpoints for submitting and viewing wallet requests.
  *
  * Routes (all behind `jwt` middleware):
+ *   POST   /api/wallet/requests          → store()
  *   POST   /api/wallet/request-charge    → requestCharge()
  *   POST   /api/wallet/request-withdraw  → requestWithdraw()
  *   GET    /api/wallet/requests          → myRequests()
@@ -26,6 +27,32 @@ class WalletRequestController extends Controller
     public function __construct(
         private readonly NotificationService $notificationService,
     ) {}
+
+    // ── POST /api/wallet/requests ────────────────────────────────────────────
+
+    /**
+     * Unified entry point: dispatches to requestCharge() or requestWithdraw()
+     * based on `type`. request-charge / request-withdraw remain available as
+     * direct routes for callers that already target them.
+     */
+    public function store(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'type' => 'required|in:charge,withdraw',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        return $request->input('type') === 'charge'
+            ? $this->requestCharge($request)
+            : $this->requestWithdraw($request);
+    }
+
     // ── POST /api/wallet/request-charge ──────────────────────────────────────
 
     /**

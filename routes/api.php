@@ -269,6 +269,7 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
 
         Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
+        Route::post('/requests',          [WalletRequestController::class, 'store']);
         Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
         Route::get('/requests/{id}',      [WalletRequestController::class, 'show']);
