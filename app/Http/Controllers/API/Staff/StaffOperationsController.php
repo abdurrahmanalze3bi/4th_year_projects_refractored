@@ -315,11 +315,13 @@ final class StaffOperationsController extends Controller
             if ($request->filled('ride_id')) {
                 $countsQuery->where('ride_id', $request->integer('ride_id'));
             }
-            $counts = (clone $countsQuery)
+            $countsByStatus = (clone $countsQuery)
                 ->selectRaw('status, COUNT(*) as total')
                 ->groupBy('status')
                 ->pluck('total', 'status');
-            $counts = $counts->put('all', $countsQuery->count());
+            $counts = collect(['pending', 'confirmed', 'cancelled', 'completed', 'no_show'])
+                ->mapWithKeys(fn (string $s) => [$s => $countsByStatus[$s] ?? 0])
+                ->put('all', $countsQuery->count());
 
             $paginator = $query
                 ->orderByDesc('created_at')
