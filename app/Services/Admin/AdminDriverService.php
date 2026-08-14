@@ -87,7 +87,13 @@ final class AdminDriverService
             ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card']))
             ->count();
 
-        $suspendedDrivers = 0; // not implemented yet
+        $suspendedDrivers = User::where(function ($q) {
+            $q->where('is_verified_driver', true)
+                ->orWhere(function ($q2) {
+                    $q2->whereIn('verification_status', ['pending', 'rejected'])
+                        ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card']));
+                });
+        })->whereIn('status', [-1, 0])->count();
 
         $avgRating = UserRating::whereHas(
             'ratedUser',
@@ -137,7 +143,9 @@ final class AdminDriverService
             'verified'  => $query->where('is_verified_driver', true),
             'pending'   => $query->where('verification_status', 'pending')
                 ->whereHas('photos', fn($p) => $p->whereIn('type', ['license', 'mechanic_card'])),
-            'suspended' => $query->where('status', 0),
+            // 'suspended' covers both banned (-1) and logged-out (0) accounts —
+            // i.e. every driver who currently cannot use the app.
+            'suspended' => $query->whereIn('status', [-1, 0]),
             default     => null,
         };
 
@@ -187,6 +195,7 @@ final class AdminDriverService
             'phone'               => $this->resolveDriverPhone($driver->id),
             'vehicle'             => $vehicleLabel,
             'status'              => $this->resolveDriverStatus($driver),
+            'is_banned'           => $driver->status == -1,
             'avg_rating'          => isset($driver->avg_rating) && $driver->avg_rating !== null
                 ? round((float) $driver->avg_rating, 1)
                 : null,
@@ -618,7 +627,8 @@ final class AdminDriverService
 
     private function resolveDriverStatus(User $driver): string
     {
-        if ($driver->status == 0)                        return 'suspended';
+        if ($driver->status == -1)                       return 'banned';
+        if ($driver->status == 0)                        return 'logged_out';
         if ($driver->is_verified_driver)                 return 'verified';
         if ($driver->verification_status === 'pending')  return 'pending';
         if ($driver->verification_status === 'rejected') return 'rejected';

@@ -15,9 +15,11 @@ use App\Services\NotificationService;
  * User-facing endpoints for submitting and viewing wallet requests.
  *
  * Routes (all behind `jwt` middleware):
- *   POST /api/wallet/request-charge    → requestCharge()
- *   POST /api/wallet/request-withdraw  → requestWithdraw()
- *   GET  /api/wallet/requests          → myRequests()
+ *   POST   /api/wallet/request-charge    → requestCharge()
+ *   POST   /api/wallet/request-withdraw  → requestWithdraw()
+ *   GET    /api/wallet/requests          → myRequests()
+ *   GET    /api/wallet/requests/{id}     → show()
+ *   DELETE /api/wallet/requests/{id}     → destroy()
  */
 class WalletRequestController extends Controller
 {
@@ -202,6 +204,57 @@ class WalletRequestController extends Controller
         return response()->json([
             'success' => true,
             'data'    => $data,
+        ]);
+    }
+
+    // ── GET /api/wallet/requests/{id} ────────────────────────────────────────
+
+    /**
+     * A single wallet request belonging to the authenticated user.
+     */
+    public function show(int $id, Request $request): JsonResponse
+    {
+        $walletRequest = WalletRequest::where('user_id', $request->user()->id)->find($id);
+
+        if (!$walletRequest) {
+            return response()->json(['success' => false, 'message' => 'Wallet request not found.'], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data'    => $this->formatRequest($walletRequest),
+        ]);
+    }
+
+    // ── DELETE /api/wallet/requests/{id} ─────────────────────────────────────
+
+    /**
+     * Cancels the authenticated user's own request — only while it is still
+     * pending; once an admin has approved/rejected it, it is immutable.
+     */
+    public function destroy(int $id, Request $request): JsonResponse
+    {
+        $user          = $request->user();
+        $walletRequest = WalletRequest::where('user_id', $user->id)->find($id);
+
+        if (!$walletRequest) {
+            return response()->json(['success' => false, 'message' => 'Wallet request not found.'], 404);
+        }
+
+        if ($walletRequest->status !== 'pending') {
+            return response()->json([
+                'success' => false,
+                'message' => "This request has already been {$walletRequest->status} and can no longer be cancelled.",
+            ], 422);
+        }
+
+        $walletRequest->delete();
+
+        Cache::forget("wallet.requests.{$user->id}");
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Wallet request cancelled.',
         ]);
     }
 

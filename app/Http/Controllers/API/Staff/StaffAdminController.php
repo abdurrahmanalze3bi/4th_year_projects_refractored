@@ -348,10 +348,15 @@ final class StaffAdminController extends Controller
         // 3 COUNT queries on every admin complaint page open.
         // Busted by resolveEscalated(); self-heals within 1 min for cross-controller escalations.
         return Cache::remember('staff.escalated-counts', now()->addMinutes(1), function () {
+            // Scoped to whereNotNull('escalated_at') to match listEscalated() —
+            // otherwise 'resolved'/'closed' would count the platform-wide
+            // totals, not just complaints that passed through escalation (BUG-10).
+            $base = fn () => \App\Models\Complaint::whereNotNull('escalated_at');
+
             return [
-                'escalated' => \App\Models\Complaint::where('status', ComplaintStatus::ESCALATED->value)->count(),
-                'resolved'  => \App\Models\Complaint::where('status', ComplaintStatus::RESOLVED->value)->count(),
-                'closed'    => \App\Models\Complaint::where('status', ComplaintStatus::CLOSED->value)->count(),
+                'escalated' => $base()->where('status', ComplaintStatus::ESCALATED->value)->count(),
+                'resolved'  => $base()->where('status', ComplaintStatus::RESOLVED->value)->count(),
+                'closed'    => $base()->where('status', ComplaintStatus::CLOSED->value)->count(),
             ];
         });
     }

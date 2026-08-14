@@ -60,6 +60,27 @@ use Illuminate\Support\Facades\Route;
 */
 
 // ========================================
+// ROUTE PARAMETER CONSTRAINTS
+// ========================================
+//
+// Every one of these parameter names is always a numeric DB id throughout
+// this file. Without a constraint, a non-numeric segment (e.g. the literal
+// string "metrics" hitting `{id}`) still matches the route, reaches a
+// controller action whose signature type-hints `int`, and blows up with an
+// uncaught TypeError — a 500 with a full stack trace — instead of cleanly
+// 404ing. Registered globally so every route using these names is covered
+// in one place rather than one `->whereNumber()` at a time.
+Route::pattern('id',             '[0-9]+');
+Route::pattern('userId',         '[0-9]+');
+Route::pattern('rideId',         '[0-9]+');
+Route::pattern('bookingId',      '[0-9]+');
+Route::pattern('driverId',       '[0-9]+');
+Route::pattern('walletId',       '[0-9]+');
+Route::pattern('conversationId', '[0-9]+');
+Route::pattern('messageId',      '[0-9]+');
+Route::pattern('commentId',      '[0-9]+');
+
+// ========================================
 // UTILITY / DEBUG — no throttle
 // Remove /test-db before production (exposes DB config)
 // ========================================
@@ -250,7 +271,6 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
         Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
-        Route::post('/requests',          [WalletRequestController::class, 'store']);
         Route::get('/requests/{id}',      [WalletRequestController::class, 'show']);
         Route::post('/create-direct',     [WalletController::class, 'createDirect']);
         Route::delete('/requests/{id}',   [WalletRequestController::class, 'destroy']);
@@ -297,7 +317,11 @@ Route::prefix('admin')->group(function () {
 
         // ── Session ────────────────────────────────────────────────────────
         Route::post('/logout', [AdminDashboardController::class, 'logout']);
-        Route::post('/photo',  [AdminDashboardController::class, 'uploadAdminPhoto']);
+        // NOTE: POST /photo (uploadAdminPhoto) was removed — it was a stub that
+        // reported success without storing anything, employees have no photo
+        // column to store a path in, and no frontend page was ever wired to it
+        // (see BUG-12 in docs/api/backend-issues.md). Re-add only alongside a
+        // real employees.photo column and a genuine implementation.
 
         // ── Dashboard ──────────────────────────────────────────────────────
         Route::prefix('dashboard')->group(function () {

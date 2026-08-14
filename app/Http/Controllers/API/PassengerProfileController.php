@@ -326,7 +326,10 @@ final class PassengerProfileController extends Controller
 
             $amount = (float) $request->input('amount');
 
-            DB::transaction(function () use ($user, $amount, $request) {
+            $previousBalance = null;
+            $transactionId   = null;
+
+            DB::transaction(function () use ($user, $amount, $request, &$previousBalance, &$transactionId) {
                 $wallet = \App\Models\Wallet::lockForUpdate()->findOrFail($user->wallet->id);
 
                 $previousBalance = (float) $wallet->balance;
@@ -334,22 +337,25 @@ final class PassengerProfileController extends Controller
                 $wallet->balance = $newBalance;
                 $wallet->save();
 
+                $transactionId = 'ADM-' . $user->id . '-' . now()->timestamp;
+
                 \App\Models\WalletTransaction::create([
-                    'wallet_id'        => $wallet->id,
-                    'user_id'          => $request->user()?->id,  // the admin
-                    'type'             => 'admin_charge',
+                    'wallet_id'                => $wallet->id,
+                    'user_id'                  => $user->id,  // the wallet owner, matching every other WalletTransaction
+                    'processed_by_employee_id' => $request->attributes->get('staffEmployee')?->id,  // the admin
+                    'type'                     => 'admin_charge',
                     'amount'           => $amount,
                     'previous_balance' => $previousBalance,
                     'new_balance'      => $newBalance,
                     'description'      => $request->input('admin_notes') ?? 'Admin wallet charge',
-                    'transaction_id'   => 'ADM-' . $user->id . '-' . now()->timestamp,
+                    'transaction_id'   => $transactionId,
                     'status'           => 'completed',
                     'reference'        => 'admin_charge:' . $user->id,
                 ]);
 
                 Log::info('Admin charged passenger wallet', [
                     'passenger_id'     => $user->id,
-                    'admin_id'         => $request->user()?->id,
+                    'admin_id'         => $request->attributes->get('staffEmployee')?->id,
                     'amount'           => $amount,
                     'previous_balance' => $previousBalance,
                     'new_balance'      => $newBalance,
@@ -381,9 +387,11 @@ final class PassengerProfileController extends Controller
             $user->wallet->refresh();
 
             return response()->json([
-                'status'      => 'success',
-                'message'     => "Wallet charged successfully. New balance: {$user->wallet->balance} SYP.",
-                'new_balance' => (float) $user->wallet->balance,
+                'status'           => 'success',
+                'message'          => "Wallet charged successfully. New balance: {$user->wallet->balance} SYP.",
+                'previous_balance' => $previousBalance,
+                'new_balance'      => (float) $user->wallet->balance,
+                'transaction_id'   => $transactionId,
             ]);
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
@@ -599,10 +607,9 @@ final class PassengerProfileController extends Controller
 
     private function formatWalletCharge(\App\Models\WalletTransaction $tx): array
     {
-        $admin        = $tx->user;
-        $adminProfile = $admin
-            ? \App\Models\Profile::where('user_id', $admin->id)->first()
-            : null;
+        // The actor is a staff Employee, not a users-table row — resolve via
+        // processed_by_employee_id, not the wallet-owner `user_id` column.
+        $admin = $tx->processedByEmployee;
 
         return [
             'id'                   => $tx->id,
@@ -615,10 +622,9 @@ final class PassengerProfileController extends Controller
             'date'                 => $tx->created_at->toDateString(),
             'created_at'           => $tx->created_at->toIso8601String(),
             'processed_by_id'      => $admin?->id,
-            'processed_by_name'    => $admin
-                ? trim("{$admin->first_name} {$admin->last_name}") : null,
-            'processed_by_photo'   => $adminProfile?->profile_photo
-                ? asset("storage/{$adminProfile->profile_photo}") : null,
+            'processed_by_name'    => $admin?->fullName(),
+            // Employees have no photo column (see BUG-12) — always null.
+            'processed_by_photo'   => null,
         ];
     }
 

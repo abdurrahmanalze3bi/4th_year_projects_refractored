@@ -291,15 +291,28 @@ final class AdminDashboardController extends Controller
         }
     }
 
-    public function showWalletTransactions(int $walletId): JsonResponse
+    public function showWalletTransactions(int $walletId, Request $request): JsonResponse
     {
+        $validator = Validator::make($request->all(), [
+            'per_page' => 'sometimes|integer|min:1|max:50',
+            'page'     => 'sometimes|integer|min:1',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
         try {
-            $result = $this->walletService->getWalletTransactions($walletId);
+            $result = $this->walletService->getWalletTransactions(
+                $walletId,
+                (int) $request->get('per_page', 10)
+            );
 
             return response()->json([
-                'status'       => 'success',
-                'wallet'       => $result['wallet'],
-                'transactions' => $result['transactions'],
+                'status' => 'success',
+                'wallet' => $result['wallet'],
+                'data'   => $result['data'],
+                'meta'   => $result['meta'],
             ]);
         } catch (\Exception) {
             return response()->json([
@@ -307,11 +320,6 @@ final class AdminDashboardController extends Controller
                 'message' => 'Wallet not found',
             ], 404);
         }
-    }
-
-    public function uploadAdminPhoto(Request $request): JsonResponse
-    {
-        return response()->json(['status' => 'success', 'message' => 'Photo uploaded']);
     }
 
     // =========================================================================

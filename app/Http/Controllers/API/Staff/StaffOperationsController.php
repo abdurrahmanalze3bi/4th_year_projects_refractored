@@ -306,6 +306,21 @@ final class StaffOperationsController extends Controller
                 $query->where('ride_id', $request->integer('ride_id'));
             }
 
+            // Counts respect the same user_id/ride_id scoping as the list, but
+            // never the status filter — that's the whole point of the badges.
+            $countsQuery = Booking::query();
+            if ($request->filled('user_id')) {
+                $countsQuery->where('user_id', $request->integer('user_id'));
+            }
+            if ($request->filled('ride_id')) {
+                $countsQuery->where('ride_id', $request->integer('ride_id'));
+            }
+            $counts = (clone $countsQuery)
+                ->selectRaw('status, COUNT(*) as total')
+                ->groupBy('status')
+                ->pluck('total', 'status');
+            $counts = $counts->put('all', $countsQuery->count());
+
             $paginator = $query
                 ->orderByDesc('created_at')
                 ->paginate(
@@ -355,6 +370,7 @@ final class StaffOperationsController extends Controller
                     'total'        => $paginator->total(),
                     'filter'       => $status,
                 ],
+                'counts' => $counts,
             ]);
         } catch (\Exception $e) {
             return $this->serverError();

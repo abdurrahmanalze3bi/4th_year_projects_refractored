@@ -55,8 +55,9 @@ final class AdminWalletRequestController extends Controller
             'wallet:id,wallet_number,phone_number,balance,cash_ride_debt',
         ])->orderByDesc('created_at');
 
-        $status = $request->get('status', 'pending');
-        $query->where('status', $status);
+        if ($request->filled('status')) {
+            $query->where('status', $request->input('status'));
+        }
 
         if ($request->filled('type')) {
             $query->where('type', $request->input('type'));
@@ -258,10 +259,10 @@ final class AdminWalletRequestController extends Controller
             }
 
             $walletRequest->update([
-                'status'       => 'rejected',
-                'admin_notes'  => $request->input('admin_notes'),
-                'processed_by' => $request->user()?->id,
-                'processed_at' => now(),
+                'status'                   => 'rejected',
+                'admin_notes'              => $request->input('admin_notes'),
+                'processed_by_employee_id' => $request->attributes->get('staffEmployee')?->id,
+                'processed_at'             => now(),
             ]);
 
             Log::info('Wallet request rejected', [
