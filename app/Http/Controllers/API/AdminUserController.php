@@ -65,7 +65,7 @@ final class AdminUserController extends Controller
 
         try {
             $data = $this->userService->getPageData(
-                adminUserId:  $request->user()?->id,
+                adminUserId:  $request->attributes->get('staffEmployee')?->id,
                 typeFilter:   $request->get('type',     'all'),
                 statusFilter: $request->get('status',   'all'),
                 dateFilter:   $request->get('date',     'all'),

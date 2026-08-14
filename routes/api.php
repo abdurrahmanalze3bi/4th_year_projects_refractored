@@ -435,4 +435,5 @@ Route::prefix('employees')->middleware(['staff:system_admin', 'throttle:admin'])
     Route::put('/{id}',                  [EmployeeManagementController::class, 'update']);
     Route::patch('/{id}/toggle-active',  [EmployeeManagementController::class, 'toggleActive']);
     Route::patch('/{id}/reset-password', [EmployeeManagementController::class, 'resetPassword']);
+    Route::delete('/{id}',               [EmployeeManagementController::class, 'destroy']);
 });

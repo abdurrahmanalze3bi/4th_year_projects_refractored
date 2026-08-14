@@ -31,7 +31,7 @@ final class EmployeeManagementController extends Controller
         $requester = $request->attributes->get('staffEmployee');
 
         try {
-            $employees = $this->managementService->list($requester);
+            $employees = $this->managementService->getAll($requester);
 
             return response()->json([
                 'status' => 'success',
@@ -199,7 +199,7 @@ final class EmployeeManagementController extends Controller
         }
 
         try {
-            $this->managementService->resetPassword(
+            $this->managementService->rotatePassword(
                 $id,
                 $request->input('new_password'),
                 $request->attributes->get('staffEmployee')
@@ -215,6 +215,30 @@ final class EmployeeManagementController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
         } catch (\Exception $e) {
             Log::error('Password reset failed', ['error' => $e->getMessage()]);
+            return $this->serverError();
+        }
+    }
+
+    // ── DELETE /api/employees/{id} ────────────────────────────────────────────
+
+    public function destroy(int $id, Request $request): JsonResponse
+    {
+        try {
+            $this->managementService->delete(
+                $id,
+                $request->attributes->get('staffEmployee')
+            );
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Employee deleted successfully.',
+            ]);
+        } catch (ModelNotFoundException) {
+            return response()->json(['status' => 'error', 'message' => 'Employee not found.'], 404);
+        } catch (\DomainException $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
+        } catch (\Exception $e) {
+            Log::error('Employee deletion failed', ['error' => $e->getMessage()]);
             return $this->serverError();
         }
     }

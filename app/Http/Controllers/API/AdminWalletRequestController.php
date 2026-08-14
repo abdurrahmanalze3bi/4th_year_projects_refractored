@@ -140,23 +140,24 @@ final class AdminWalletRequestController extends Controller
                 $wallet->save();
 
                 WalletTransaction::create([
-                    'wallet_id'        => $wallet->id,
-                    'user_id'          => $walletRequest->user_id,
-                    'type'             => $transactionType,
-                    'amount'           => $transactionAmount,
-                    'previous_balance' => $previousBalance,
-                    'new_balance'      => $newBalance,
-                    'description'      => $description,
-                    'transaction_id'   => 'WR-' . $walletRequest->id . '-' . now()->timestamp,
-                    'status'           => 'completed',
-                    'reference'        => 'wallet_request:' . $walletRequest->id,
+                    'wallet_id'                => $wallet->id,
+                    'user_id'                  => $walletRequest->user_id,
+                    'processed_by_employee_id' => $request->attributes->get('staffEmployee')?->id,
+                    'type'                     => $transactionType,
+                    'amount'                   => $transactionAmount,
+                    'previous_balance'         => $previousBalance,
+                    'new_balance'              => $newBalance,
+                    'description'              => $description,
+                    'transaction_id'           => 'WR-' . $walletRequest->id . '-' . now()->timestamp,
+                    'status'                   => 'completed',
+                    'reference'                => 'wallet_request:' . $walletRequest->id,
                 ]);
 
                 $walletRequest->update([
-                    'status'       => 'approved',
-                    'admin_notes'  => $request->input('admin_notes'),
-                    'processed_by' => $request->user()?->id,
-                    'processed_at' => now(),
+                    'status'                   => 'approved',
+                    'admin_notes'              => $request->input('admin_notes'),
+                    'processed_by_employee_id' => $request->attributes->get('staffEmployee')?->id,
+                    'processed_at'             => now(),
                 ]);
 
                 Log::info('Wallet request approved', [

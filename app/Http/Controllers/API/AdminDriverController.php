@@ -64,7 +64,7 @@ final class AdminDriverController extends Controller
         try {
             $data = Cache::remember('admin.drivers.dashboard', 300, function () use ($request) {
                 return $this->driverService->getDashboardData(
-                    $request->user()?->id
+                    $request->attributes->get('staffEmployee')?->id
                 );
             });
 
