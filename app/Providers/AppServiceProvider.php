@@ -201,5 +201,10 @@ class AppServiceProvider extends ServiceProvider
                 }
             } catch (\Throwable) {}
         });
+        $scheduledLogPath = storage_path('logs/scheduled');
+
+        if (! is_dir($scheduledLogPath)) {
+            mkdir($scheduledLogPath, 0755, true);
+        }
     }
 }

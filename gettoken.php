@@ -1,0 +1,1 @@
+<?php $u = \App\Models\User::where('is_verified_passenger', 1)->first(); echo app('tymon.jwt.auth')->fromUser($u) . PHP_EOL;

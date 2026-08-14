@@ -246,7 +246,7 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::get('/balance',            [WalletController::class, 'getBalance']);
         Route::post('/initiate',          [WalletController::class, 'initiateWalletCreation']);
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
-
+        Route::get('/transactions', [WalletController::class, 'transactions']);
         Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
         Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);

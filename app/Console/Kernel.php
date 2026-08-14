@@ -9,18 +9,86 @@ class Kernel extends ConsoleKernel
 {
     /**
      * Define the application's command schedule.
+     *
+     * Key scheduling rules applied throughout:
+     *
+     *  onOneServer()         — When you have multiple Octane nodes / workers,
+     *                          this uses a Redis atomic lock so only ONE server
+     *                          runs the command. Requires CACHE_DRIVER=redis.
+     *                          Without this, every node runs it simultaneously.
+     *
+     *  withoutOverlapping()  — If the previous run hasn't finished yet (e.g. a
+     *                          slow DB cleanup), skip this invocation rather than
+     *                          running two instances in parallel. Prevents table locks.
+     *
+     *  runInBackground()     — Forks the command to a child process so the
+     *                          scheduler process itself isn't blocked. Important
+     *                          for commands that take more than a few seconds.
+     *
+     *  appendOutputTo()      — Keeps a rotating log so you can debug failures
+     *                          without diving into Laravel's main log.
      */
     protected function schedule(Schedule $schedule): void
     {
-        $schedule->command('tokens:cleanup')->daily()->onOneServer();
-        $schedule->command('staff-tokens:cleanup')->daily()->onOneServer();
+        // ── TOKEN CLEANUP ────────────────────────────────────────────────────
+        // User JWT refresh tokens — runs daily is fine since these are long-lived.
+        $schedule->command('tokens:cleanup')
+            ->daily()
+            ->at('03:00')              // Low-traffic window (3 AM)
+            ->onOneServer()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->appendOutputTo(storage_path('logs/scheduled/tokens-cleanup.log'));
+
+        // Staff JWT refresh tokens — same cadence, stagger by 15 min to avoid
+        // simultaneous DB pressure.
+        $schedule->command('staff-tokens:cleanup')
+            ->daily()
+            ->at('03:15')
+            ->onOneServer()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->appendOutputTo(storage_path('logs/scheduled/staff-tokens-cleanup.log'));
+
+        // ── OTP CLEANUP ──────────────────────────────────────────────────────
+        // ⚠️  This was missing from your original Kernel.
+        //
+        // OTPs expire after a few minutes (your OTP model has expiry logic),
+        // but the rows stay in the DB forever if never cleaned. In a ride-sharing
+        // app with thousands of daily signups this table grows fast and starts
+        // slowing down OTP verification lookups.
+        //
+        // Every 30 minutes strikes a balance: table stays small, but we're not
+        // hammering the DB with deletes every minute.
+        $schedule->command('otps:cleanup')
+            ->everyThirtyMinutes()
+            ->onOneServer()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->appendOutputTo(storage_path('logs/scheduled/otps-cleanup.log'));
+
+        // ── ADMIN PASSWORD ROTATION ──────────────────────────────────────────
+        // You have RotateAdminPasswordCommand — wire it up if you want
+        // automatic rotation (common security requirement).
+        // Uncomment and adjust frequency to your security policy.
+        //
+        // $schedule->command('admin:rotate-password')
+        //     ->monthly()
+        //     ->onOneServer()
+        //     ->emailOutputOnFailure(config('admin.alert_email'));
     }
+
     /**
      * Register the commands for the application.
+     *
+     * $this->load() auto-discovers every class inside Commands/ that extends
+     * Command, so you do NOT need to manually list individual commands here.
+     * This includes GetLoadTestTokens, CleanupExpiredOtps, etc. — they are all
+     * picked up automatically the moment the file exists in the directory.
      */
     protected function commands(): void
     {
-        $this->load(__DIR__.'/Commands');
+        $this->load(__DIR__ . '/Commands');
 
         require base_path('routes/console.php');
     }

@@ -6,6 +6,7 @@ use App\DTOs\Auth\SendEmailOtpDTO;
 use App\DTOs\Auth\VerifyEmailOtpDTO;
 use App\Domain\ValueObjects\Email;
 use App\Http\Controllers\Controller;
+use App\Http\Resources\WalletTransactionResource;
 use App\Interfaces\EmailOtpServiceInterface;
 use App\Models\Wallet;
 use Illuminate\Http\JsonResponse;
@@ -250,5 +251,40 @@ class WalletController extends Controller
             'phone_number'  => $wallet->phone_number,
             'balance'       => 0,
         ], 201);
+    }
+    public function transactions(Request $request)
+    {
+        $user   = $request->user();
+        $wallet = $user->wallet;
+
+        if (! $wallet) {
+            return response()->json([
+                'message' => 'No wallet found for this user.',
+            ], 404);
+        }
+
+        $request->validate([
+            'type'     => ['nullable', 'string'],
+            'from'     => ['nullable', 'date'],
+            'to'       => ['nullable', 'date', 'after_or_equal:from'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $perPage = min((int) ($request->per_page ?? 15), 100);
+
+        $transactions = $wallet->transactions()
+            ->when($request->filled('type'), fn ($q) => $q->where('type', $request->type))
+            ->when($request->filled('from'), fn ($q) => $q->whereDate('created_at', '>=', $request->from))
+            ->when($request->filled('to'),   fn ($q) => $q->whereDate('created_at', '<=', $request->to))
+            ->latest()
+            ->paginate($perPage);
+
+        return WalletTransactionResource::collection($transactions)
+            ->additional([
+                'meta' => [
+                    'balance'        => number_format((float) $wallet->balance, 2, '.', ''),
+                    'cash_ride_debt' => number_format((float) ($wallet->cash_ride_debt ?? 0), 2, '.', ''),
+                ],
+            ]);
     }
 }
