@@ -179,6 +179,7 @@ class AdminWalletService
         return [
             'wallet' => [
                 'id'            => $wallet->id,
+                'name'          => $wallet->name,
                 'wallet_number' => $wallet->wallet_number,
                 'phone_number'  => $wallet->phone_number,
                 'balance'       => Money::from($wallet->balance)->formatted(),
