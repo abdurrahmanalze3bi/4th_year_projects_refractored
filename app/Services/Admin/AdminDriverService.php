@@ -365,7 +365,7 @@ final class AdminDriverService
                 : null,
 
             'rating' => [
-                'average'       => $ratingStats->average ?? 0,
+                'average'       => $ratingStats->average !== null ? (float) $ratingStats->average : 0.0,
                 'total_ratings' => (int) ($ratingStats->total ?? 0),
             ],
 
