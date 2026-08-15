@@ -168,4 +168,13 @@ class User extends Authenticatable
             default => 'unknown',
         };
     }
+    public function getJWTIdentifier(): mixed
+    {
+        return $this->getKey();
+    }
+
+    public function getJWTCustomClaims(): array
+    {
+        return [];
+    }
 }

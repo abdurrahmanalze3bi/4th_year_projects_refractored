@@ -1,0 +1,5 @@
+[mysqld]
+server-id = 1
+log_bin = mysql-bin
+binlog_format = ROW
+binlog_do_db = 4th_year_project_db
