@@ -186,7 +186,7 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Schema::defaultStringLength(191);
-        User::observe(UserObserver::class);
+
         Event::listen(CacheHit::class, function () {
             try {
                 request()->attributes->set('cache_status', 'HIT');

@@ -22,6 +22,7 @@ services:
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
+            - ./routes:/var/www/html/routes
         command: >
             sh -c "php artisan octane:start
             --server=roadrunner
@@ -54,6 +55,7 @@ services:
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
+            - ./routes:/var/www/html/routes
         command: >
             sh -c "php artisan octane:start
             --server=roadrunner
@@ -86,6 +88,7 @@ services:
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
+            - ./routes:/var/www/html/routes
         command: >
             sh -c "php artisan octane:start
             --server=roadrunner
@@ -98,10 +101,9 @@ services:
                 condition: service_healthy
             redis:
                 condition: service_started
-
     app4:
         image: syride_octane:latest
-        container_name: syride_app4
+        container_name: syride_app3
         restart: unless-stopped
         env_file: .env
         environment:
@@ -118,6 +120,7 @@ services:
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
+            - ./routes:/var/www/html/routes
         command: >
             sh -c "php artisan octane:start
             --server=roadrunner
@@ -133,7 +136,7 @@ services:
 
     app5:
         image: syride_octane:latest
-        container_name: syride_app5
+        container_name: syride_app3
         restart: unless-stopped
         env_file: .env
         environment:
@@ -150,6 +153,7 @@ services:
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
+            - ./routes:/var/www/html/routes
         command: >
             sh -c "php artisan octane:start
             --server=roadrunner
@@ -162,7 +166,6 @@ services:
                 condition: service_healthy
             redis:
                 condition: service_started
-
     nginx:
         image: nginx:alpine
         container_name: syride_nginx
@@ -176,6 +179,7 @@ services:
             - app3
             - app4
             - app5
+
         restart: unless-stopped
 
     redis:

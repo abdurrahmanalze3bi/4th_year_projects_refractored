@@ -15,7 +15,7 @@ return new class extends Migration
             $table->string('password');
             $table->string('first_name', 100);
             $table->string('last_name', 100);
-            $table->enum('role', ['system_admin', 'admin', 'support_agent']);
+            $table->enum('role', ['system_admin', 'admin', 'support_agent', 'sycash']);
             $table->boolean('is_active')->default(true);
             $table->foreignId('created_by')
                 ->nullable()
