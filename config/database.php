@@ -46,18 +46,14 @@ return [
         'mysql' => [
             'driver'    => 'mysql',
             'url'       => env('DATABASE_URL'),
-
-            // ── READ/WRITE SPLIT ──────────────────────────────────────────
-            // All SELECT queries go to the replica.
-            // All INSERT / UPDATE / DELETE go to the primary.
-            'read' => [
-                'host' => ['syride_mysql_replica'],
-            ],
-            'write' => [
-                'host' => ['syride_mysql'],
-            ],
-            // ─────────────────────────────────────────────────────────────
-
+            // No read replica is deployed — production's docker-compose.yml
+            // only runs a single `mysql` service. A prior commit (534fe0e)
+            // pointed reads at a `syride_mysql_replica` host that has never
+            // existed there, which fails DNS resolution on every SELECT
+            // (confirmed against the live container). Re-add a 'read'/'write'
+            // split only once a real replica service is provisioned and
+            // replicating.
+            'host'      => env('DB_HOST', '127.0.0.1'),
             'port'      => env('DB_PORT', '3306'),
             'database'  => env('DB_DATABASE', 'forge'),
             'username'  => env('DB_USERNAME', 'forge'),
