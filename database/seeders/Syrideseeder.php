@@ -19,49 +19,20 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
-/**
- * SyrideSeeder — a snapshot of a live system.
- *
- * Every record created here mirrors what the real service layer would produce:
- *   • Verified drivers have documents, score ≥ 50, and a funded wallet.
- *   • Rides carry the creation-fee transaction trail.
- *   • E-pay bookings move money through escrow (passenger → SyCash → driver).
- *   • Completed rides award +10 score to all parties.
- *   • Nothing is skipped or faked — everything is traceable.
- *
- * New tables seeded (added in this revision):
- *   complaints, complaint_attachments, conversations, conversation_participants,
- *   messages, profile_comments, push_notification_tokens, wallet_requests,
- *   user_ratings, notifications, user_notifications
- *
- * Run:  php artisan db:seed --class=SyrideSeeder
- * Fresh: add --fresh flag to truncate first (preserves employee rows).
- *
- * CHECKLIST before first run — verify these match your actual schema:
- *   1.  Table name: 'photos' is used below — change to 'user_photos' if needed.
- *   2.  StaffRole::SYCASH must exist in App\Enums\StaffRole.
- *   3.  users.wallet_id column must exist (created by the wallets migration).
- *   4.  Profile columns for drivers (type_of_car, color_of_car, number_of_seats,
- *       radio, smoking) must be nullable for passengers.
- *   5.  wallet_transactions.amount stores NEGATIVE values for debits.
- */
 class SyrideSeeder extends Seeder
 {
-    // ─── distribution ────────────────────────────────────────────────────────
     private const VERIFIED_DRIVERS    = 250;
     private const VERIFIED_PASSENGERS = 400;
     private const PENDING_USERS       = 200;
-    private const UNVERIFIED_USERS    = 150;   // 1 000 total
+    private const UNVERIFIED_USERS    = 150;
     private const ADMINS              = 3;
     private const SUPPORT_AGENTS      = 5;
-    private const CONVERSATIONS       = 200;   // driver↔passenger chat threads
+    private const CONVERSATIONS       = 200;
 
-    // ─── runtime state ───────────────────────────────────────────────────────
     private ?Wallet   $sycashWallet   = null;
     private ?Employee $sycashEmployee = null;
     private string    $placeholderDoc = '';
 
-    // ─── Syrian cities (name → [lat, lng]) ──────────────────────────────────
     private array $cities = [
         'دمشق'      => ['lat' => 33.5138, 'lng' => 36.3128],
         'حلب'       => ['lat' => 36.2021, 'lng' => 37.1343],
@@ -79,7 +50,6 @@ class SyrideSeeder extends Seeder
         'الحسكة'    => ['lat' => 36.4949, 'lng' => 40.7400],
     ];
 
-    // ─── name fixtures ───────────────────────────────────────────────────────
     private array $driverFirstNames = [
         'أحمد','محمد','علي','حسن','يوسف','عمر','خالد','طارق',
         'سامر','نادر','باسل','وائل','رامي','فادي','زياد','مهند',
@@ -107,27 +77,28 @@ class SyrideSeeder extends Seeder
         'أبيض','أسود','فضي','رمادي','أزرق','أحمر','بيج','بني','أخضر غامق',
     ];
 
-    // ─── complaint content fixtures ──────────────────────────────────────────
+    // FIX: complaint types and statuses now match the ComplaintType / ComplaintStatus enums
     private array $complaintTypes = [
-        'driver_behavior', 'passenger_behavior', 'payment_issue', 'app_issue', 'other',
+        'driver_behavior', 'passenger_behavior', 'financial_issue',
+        'technical_issue', 'other',
     ];
     private array $complaintTitles = [
         'driver_behavior'    => 'شكوى على سلوك السائق',
         'passenger_behavior' => 'شكوى على سلوك الراكب',
-        'payment_issue'      => 'مشكلة في عملية الدفع',
-        'app_issue'          => 'خلل تقني في التطبيق',
+        'financial_issue'    => 'مشكلة في عملية الدفع',
+        'technical_issue'    => 'خلل تقني في التطبيق',
         'other'              => 'شكوى عامة',
     ];
     private array $complaintDescriptions = [
         'driver_behavior'    => 'السائق لم يكن محترماً خلال الرحلة وتصرف بطريقة غير لائقة تجاه الركاب.',
         'passenger_behavior' => 'الراكب تصرف بشكل غير لائق وأزعج بقية المسافرين طوال الرحلة.',
-        'payment_issue'      => 'تم خصم المبلغ من محفظتي الإلكترونية لكن الرحلة لم تُسجَّل كمكتملة.',
-        'app_issue'          => 'التطبيق يتوقف عن العمل بشكل متكرر عند محاولة تأكيد الحجز.',
+        'financial_issue'    => 'تم خصم المبلغ من محفظتي الإلكترونية لكن الرحلة لم تُسجَّل كمكتملة.',
+        'technical_issue'    => 'التطبيق يتوقف عن العمل بشكل متكرر عند محاولة تأكيد الحجز.',
         'other'              => 'لديّ استفسار عام أود مناقشته مع فريق الدعم الفني.',
     ];
-    private array $complaintStatuses = ['open', 'in_progress', 'resolved', 'closed'];
+    // FIX: statuses now match ComplaintStatus enum values (pending / in_review / escalated / resolved / closed)
+    private array $complaintStatuses = ['pending', 'in_review', 'resolved', 'closed'];
 
-    // ─── conversation / message fixtures ─────────────────────────────────────
     private array $messageTemplates = [
         'مرحباً، هل الرحلة لا تزال متاحة؟',
         'نعم، الرحلة متاحة. هل تريد الحجز؟',
@@ -151,7 +122,6 @@ class SyrideSeeder extends Seeder
         'نعم، المكيف يعمل بشكل ممتاز طوال الرحلة.',
     ];
 
-    // ─── profile comment fixtures ─────────────────────────────────────────────
     private array $profileCommentTemplates = [
         'سائق محترف وملتزم بالمواعيد دائماً، أنصح به.',
         'تجربة ممتازة، أنصح بالتعامل معه بشدة.',
@@ -165,13 +135,12 @@ class SyrideSeeder extends Seeder
         'سيارة نظيفة وسائق أمين ومحترم، ممتاز.',
     ];
 
-    // ─── notification fixtures ────────────────────────────────────────────────
     private array $notificationTemplates = [
         ['title' => 'مرحباً بك في سيرايد',     'message' => 'تم تفعيل حسابك بنجاح. ابدأ رحلتك الأولى الآن!',                             'type' => 'general'],
         ['title' => 'تم قبول طلب التحقق',       'message' => 'تهانينا! تم قبول وثائقك والتحقق من هويتك بنجاح.',                           'type' => 'general'],
         ['title' => 'تم تأكيد حجزك',            'message' => 'تم تأكيد حجزك بنجاح. نتمنى لك رحلة آمنة وممتعة.',                           'type' => 'general'],
         ['title' => 'رحلة جديدة مضافة',          'message' => 'تمت إضافة رحلة جديدة تتطابق مع تفضيلاتك. تحقق الآن!',                      'type' => 'general'],
-        ['title' => 'عرض خاص لك',               'message' => 'احصل على خصم 10% على رحلتك القادمة باستخدام رمز SYRIDE10.',                  'type' => 'promotional'],
+        ['title' => 'عرض خاص لك',               'message' => 'احصل على خصم 10% على رحلتك القادمة باستخدام رمز SYRIDE10.',                  'type' => 'general'],
         ['title' => 'تحديث سياسة الاستخدام',     'message' => 'تم تحديث سياسة الاستخدام والخصوصية. يرجى الاطلاع عليها قبل الاستمرار.',     'type' => 'system'],
         ['title' => 'تنبيه: رسوم معلقة',         'message' => 'لديك رسوم رحلات نقدية معلقة، يرجى تسويتها في أقرب وقت ممكن.',              'type' => 'general'],
         ['title' => 'تحديث التطبيق متاح',        'message' => 'إصدار جديد من التطبيق متاح الآن. قم بالتحديث للاستمتاع بمزايا جديدة.',      'type' => 'system'],
@@ -183,6 +152,9 @@ class SyrideSeeder extends Seeder
 
     public function run(): void
     {
+        config(['database.connections.mysql.read' => config('database.connections.mysql.write')]);
+        \Illuminate\Support\Facades\DB::purge('mysql');
+        \Illuminate\Support\Facades\DB::reconnect('mysql');
         $this->command->info('🚀  SyRide System Seeder');
         $this->command->line('────────────────────────────────────────────');
 
@@ -198,8 +170,8 @@ class SyrideSeeder extends Seeder
         [$drivers, $passengers] = $this->seedUsers();
 
         $this->seedRidesAndBookings($drivers, $passengers);
+        $this->seedCancellationPenalties();
 
-        // ── new tables ────────────────────────────────────────────────────────
         $this->seedPushTokens($drivers, $passengers);
         $this->seedWalletRequests($drivers, $passengers);
         $this->seedComplaints($drivers, $passengers);
@@ -229,7 +201,6 @@ class SyrideSeeder extends Seeder
         $this->command->info('Truncating tables (preserving employees)…');
         DB::statement('SET FOREIGN_KEY_CHECKS=0;');
         foreach ([
-                     // new tables first (referencing users/profiles)
                      'user_notifications', 'notifications',
                      'user_ratings',
                      'wallet_requests',
@@ -237,7 +208,6 @@ class SyrideSeeder extends Seeder
                      'profile_comments',
                      'messages', 'conversation_participants', 'conversations',
                      'complaint_attachments', 'complaints',
-                     // original tables
                      'wallet_transactions', 'wallets', 'bookings', 'rides',
                      'score_transactions', 'user_scores', 'photos', 'profiles', 'users',
                  ] as $table) {
@@ -382,9 +352,13 @@ class SyrideSeeder extends Seeder
             'email_verified_at'     => now()->subDays(rand(10, 365)),
         ]);
 
+        // FIX: delete observer-created profile(s) then create one complete row
+        Profile::where('user_id', $user->id)->delete();
+
         Profile::create([
             'user_id'         => $user->id,
-            'profile_photo'   => null,
+            'full_name'       => $user->first_name . ' ' . $user->last_name,
+            'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             'description'     => "سائق محترف من {$city} — خبرة أكثر من " . rand(1, 10) . " سنوات",
             'type_of_car'     => $this->carTypes[$idx % count($this->carTypes)],
             'color_of_car'    => $this->carColors[$idx % count($this->carColors)],
@@ -426,9 +400,13 @@ class SyrideSeeder extends Seeder
             'email_verified_at'     => now()->subDays(rand(5, 300)),
         ]);
 
+        // FIX: delete observer-created profile(s) then create one complete row
+        Profile::where('user_id', $user->id)->delete();
+
         Profile::create([
             'user_id'         => $user->id,
-            'profile_photo'   => null,
+            'full_name'       => $user->first_name . ' ' . $user->last_name,
+            'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             'description'     => null,
             'number_of_rides' => 0,
             'gender'          => $idx % 3 === 0 ? 'F' : 'M',
@@ -465,8 +443,13 @@ class SyrideSeeder extends Seeder
             'email_verified_at'     => now()->subDays(rand(1, 30)),
         ]);
 
+        // FIX: delete observer-created profile(s) then create one complete row
+        Profile::where('user_id', $user->id)->delete();
+
         Profile::create([
             'user_id'         => $user->id,
+            'full_name'       => $user->first_name . ' ' . $user->last_name,
+            'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             'number_of_rides' => 0,
             'gender'          => 'M',
             'address'         => $city,
@@ -500,8 +483,13 @@ class SyrideSeeder extends Seeder
             'email_verified_at'     => now()->subDays(rand(1, 10)),
         ]);
 
+        // FIX: delete observer-created profile(s) then create one complete row
+        Profile::where('user_id', $user->id)->delete();
+
         Profile::create([
             'user_id'         => $user->id,
+            'full_name'       => $user->first_name . ' ' . $user->last_name,
+            'profile_photo'   => 'profiles/profile_photo/default-profile-photo.jpg',
             'number_of_rides' => 0,
             'gender'          => 'M',
             'address'         => $city,
@@ -549,7 +537,9 @@ class SyrideSeeder extends Seeder
                 if (empty($rides)) break;
                 $ride = $rides[rand(0, count($rides) - 1)];
 
-                $currentSeats = DB::table('rides')
+                $currentSeats = DB::connection('mysql')
+                    ->table('rides')
+                    ->useWritePdo()                            // ← force primary read
                     ->where('id', $ride['id'])
                     ->value('available_seats');
                 if ($currentSeats < 1) continue;
@@ -743,6 +733,7 @@ class SyrideSeeder extends Seeder
 
         DB::table('rides')
             ->where('id', $ride['id'])
+            ->where('available_seats', '>=', $seats)   // ← guard
             ->decrement('available_seats', $seats);
 
         if (
@@ -807,8 +798,6 @@ class SyrideSeeder extends Seeder
     // NEW TABLE SEEDERS
     // =========================================================================
 
-    // ── push_notification_tokens ──────────────────────────────────────────────
-
     private function seedPushTokens(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding push notification tokens…');
@@ -821,7 +810,7 @@ class SyrideSeeder extends Seeder
                     'user_id'     => $user->id,
                     'token'       => Str::random(64),
                     'device_type' => rand(0, 1) ? 'android' : 'ios',
-                    'is_active'   => rand(0, 4) > 0,   // 80 % active
+                    'is_active'   => rand(0, 4) > 0,
                     'created_at'  => now()->subDays(rand(1, 180))->toDateTimeString(),
                     'updated_at'  => now()->subDays(rand(0, 30))->toDateTimeString(),
                 ];
@@ -835,8 +824,6 @@ class SyrideSeeder extends Seeder
         $this->command->info('  ✓ ' . count($rows) . ' push tokens inserted');
     }
 
-    // ── wallet_requests ───────────────────────────────────────────────────────
-
     private function seedWalletRequests(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding wallet requests…');
@@ -846,10 +833,9 @@ class SyrideSeeder extends Seeder
 
         $rows = [];
         foreach (array_merge($drivers, $passengers) as $user) {
-            // Each verified user makes 0–3 requests
             $count = rand(0, 3);
             for ($i = 0; $i < $count; $i++) {
-                $type   = rand(0, 1) ? 'charge' : 'withdraw';   // ← matches ENUM('charge','withdraw')
+                $type   = rand(0, 1) ? 'charge' : 'withdraw';
                 $status = ['pending', 'approved', 'rejected'][rand(0, 2)];
 
                 $processedBy = (! empty($processorIds) && in_array($status, ['approved', 'rejected']))
@@ -886,8 +872,6 @@ class SyrideSeeder extends Seeder
         $this->command->info('  ✓ ' . count($rows) . ' wallet requests inserted');
     }
 
-    // ── complaints + complaint_attachments ────────────────────────────────────
-
     private function seedComplaints(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding complaints…');
@@ -899,7 +883,6 @@ class SyrideSeeder extends Seeder
         $complaintCount = 0;
 
         foreach (array_merge($drivers, $passengers) as $user) {
-            // ~25 % of users file at least one complaint
             if (rand(0, 3) !== 0) continue;
 
             $type   = $this->complaintTypes[array_rand($this->complaintTypes)];
@@ -909,8 +892,8 @@ class SyrideSeeder extends Seeder
                 ? $agentIds[array_rand($agentIds)]
                 : null;
 
-            $isResolved    = in_array($status, ['resolved', 'closed']);
-            $resolvedAt    = $isResolved ? now()->subDays(rand(1, 30))->toDateTimeString() : null;
+            $isResolved      = in_array($status, ['resolved', 'closed']);
+            $resolvedAt      = $isResolved ? now()->subDays(rand(1, 30))->toDateTimeString() : null;
             $resolutionNotes = $isResolved
                 ? 'تم حل الشكوى بنجاح من قبل الفريق المختص وإبلاغ المستخدم بالنتيجة.'
                 : null;
@@ -928,7 +911,6 @@ class SyrideSeeder extends Seeder
                 'updated_at'       => now()->subDays(rand(0, 30))->toDateTimeString(),
             ]);
 
-            // ~30 % of complaints have an attachment
             if (rand(0, 2) === 0) {
                 $this->createComplaintAttachment($complaintId, $user->id);
             }
@@ -955,13 +937,10 @@ class SyrideSeeder extends Seeder
         ]);
     }
 
-    // ── conversations + conversation_participants + messages ───────────────────
-
     private function seedConversations(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding conversations & messages…');
 
-        // Work on shuffled copies so the original arrays stay ordered
         $driverPool    = $drivers;
         $passengerPool = $passengers;
         shuffle($driverPool);
@@ -986,7 +965,6 @@ class SyrideSeeder extends Seeder
                 'updated_at' => $createdAt->copy()->addDays(rand(0, 10))->toDateTimeString(),
             ]);
 
-            // Participants: driver + passenger
             foreach ([$driver->id, $passenger->id] as $uid) {
                 DB::table('conversation_participants')->insert([
                     'conversation_id' => $convId,
@@ -1001,7 +979,6 @@ class SyrideSeeder extends Seeder
                 ]);
             }
 
-            // Messages — alternating sender
             $msgBatch  = rand(3, 12);
             $senders   = [$driver->id, $passenger->id];
             $msgOffset = $createdAt->copy();
@@ -1012,13 +989,11 @@ class SyrideSeeder extends Seeder
                     'conversation_id' => $convId,
                     'sender_id'       => $senders[$m % 2],
                     'type'            => 'text',
-                    'content'         => $this->messageTemplates[
-                    array_rand($this->messageTemplates)
-                    ],
-                    'metadata'  => null,
-                    'is_edited' => 0,
-                    'edited_at' => null,
-                    'read_at'   => rand(0, 1)
+                    'content'         => $this->messageTemplates[array_rand($this->messageTemplates)],
+                    'metadata'        => null,
+                    'is_edited'       => 0,
+                    'edited_at'       => null,
+                    'read_at'         => rand(0, 1)
                         ? $msgOffset->copy()->addMinutes(rand(1, 30))->toDateTimeString()
                         : null,
                     'created_at' => $msgOffset->toDateTimeString(),
@@ -1033,13 +1008,10 @@ class SyrideSeeder extends Seeder
         $this->command->info("  ✓ {$convCount} conversations, {$msgCount} messages inserted");
     }
 
-    // ── profile_comments ──────────────────────────────────────────────────────
-
     private function seedProfileComments(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding profile comments…');
 
-        // Pre-load profile ids for all drivers: [user_id => profile_id]
         $driverIds  = array_map(fn ($u) => $u->id, $drivers);
         $profileMap = DB::table('profiles')
             ->whereIn('user_id', $driverIds)
@@ -1048,7 +1020,6 @@ class SyrideSeeder extends Seeder
 
         $rows = [];
         foreach ($passengers as $passenger) {
-            // ~33 % of passengers leave at least one comment
             if (rand(0, 2) !== 0) continue;
 
             $driver    = $drivers[array_rand($drivers)];
@@ -1058,9 +1029,7 @@ class SyrideSeeder extends Seeder
             $rows[] = [
                 'profile_id' => $profileId,
                 'user_id'    => $passenger->id,
-                'comment'    => $this->profileCommentTemplates[
-                array_rand($this->profileCommentTemplates)
-                ],
+                'comment'    => $this->profileCommentTemplates[array_rand($this->profileCommentTemplates)],
                 'created_at' => now()->subDays(rand(1, 90))->toDateTimeString(),
                 'updated_at' => now()->subDays(rand(0, 30))->toDateTimeString(),
             ];
@@ -1073,32 +1042,28 @@ class SyrideSeeder extends Seeder
         $this->command->info('  ✓ ' . count($rows) . ' profile comments inserted');
     }
 
-    // ── user_ratings ──────────────────────────────────────────────────────────
-
     private function seedRatings(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding user ratings…');
 
-        // Track (rater_id, rated_user_id) pairs to avoid duplicates
         $seen = [];
         $rows = [];
 
         foreach ($passengers as $passenger) {
-            // ~55 % of passengers rate at least one driver
             if (rand(0, 9) < 5) continue;
 
-            $driver = $drivers[array_rand($drivers)];
+            $driver  = $drivers[array_rand($drivers)];
             $pairKey = "{$passenger->id}:{$driver->id}";
             if (isset($seen[$pairKey])) continue;
             $seen[$pairKey] = true;
 
+            // FIX: 'rater_id' key was missing — bare $passenger->id was an unnamed element
             $rows[] = [
                 'rated_user_id' => $driver->id,
-                // 15 % anonymous ratings
-                'rater_id'   => rand(0, 19) < 3 ? null : $passenger->id,
-                'rating'     => rand(3, 5),
-                'created_at' => now()->subDays(rand(1, 120))->toDateTimeString(),
-                'updated_at' => now()->subDays(rand(0, 30))->toDateTimeString(),
+                'rater_id'      => $passenger->id,
+                'rating'        => rand(3, 5),
+                'created_at'    => now()->subDays(rand(1, 120))->toDateTimeString(),
+                'updated_at'    => now()->subDays(rand(0, 30))->toDateTimeString(),
             ];
         }
 
@@ -1109,13 +1074,10 @@ class SyrideSeeder extends Seeder
         $this->command->info('  ✓ ' . count($rows) . ' ratings inserted');
     }
 
-    // ── notifications + user_notifications ───────────────────────────────────
-
     private function seedNotifications(array $drivers, array $passengers): void
     {
         $this->command->info('Seeding notifications…');
 
-        // 1. Insert the notification catalogue
         $notificationIds = [];
         foreach ($this->notificationTemplates as $tpl) {
             $notificationIds[] = DB::table('notifications')->insertGetId([
@@ -1123,7 +1085,7 @@ class SyrideSeeder extends Seeder
                 'message'    => $tpl['message'],
                 'type'       => $tpl['type'],
                 'data'       => null,
-                'user_id'    => null,   // broadcast — no single actor
+                'user_id'    => null,
                 'sent_at'    => now()->subDays(rand(1, 60))->toDateTimeString(),
                 'created_at' => now()->subDays(rand(1, 60))->toDateTimeString(),
                 'updated_at' => now()->subDays(rand(0, 20))->toDateTimeString(),
@@ -1132,11 +1094,10 @@ class SyrideSeeder extends Seeder
 
         $this->command->info('  ✓ ' . count($notificationIds) . ' notifications created');
 
-        // 2. Distribute to ~67 % of verified users, track (user, notif) pairs
         $rows = [];
         foreach (array_merge($drivers, $passengers) as $user) {
             foreach ($notificationIds as $notifId) {
-                if (rand(0, 2) === 0) continue;   // skip ~33 %
+                if (rand(0, 2) === 0) continue;
 
                 $rows[] = [
                     'user_id'         => $user->id,
@@ -1150,7 +1111,6 @@ class SyrideSeeder extends Seeder
             }
         }
 
-        // Deduplicate on (user_id, notification_id) before inserting
         $deduped = [];
         foreach ($rows as $row) {
             $key = "{$row['user_id']}:{$row['notification_id']}";
@@ -1273,14 +1233,15 @@ class SyrideSeeder extends Seeder
     private function createScore(int $userId, int $score, int $totalRides): void
     {
         $cancelCount = $totalRides > 0 ? (int) ($totalRides * rand(0, 10) / 100) : 0;
-
-        UserScore::create([
-            'user_id'             => $userId,
-            'score'               => $score,
-            'total_rides'         => $totalRides,
-            'total_cancellations' => $cancelCount,
-            'total_no_shows'      => 0,
-        ]);
+        UserScore::updateOrCreate(
+            ['user_id' => $userId],
+            [
+                'score'               => $score,
+                'total_rides'         => $totalRides,
+                'total_cancellations' => $cancelCount,
+                'total_no_shows'      => 0,
+            ]
+        );
     }
 
     private function applyScore(int $userId, string $action, int $points, string $reason): void
@@ -1304,32 +1265,95 @@ class SyrideSeeder extends Seeder
                 'reference_id'             => null,
                 'created_at'               => now(),
             ]);
-        } catch (\Throwable) {
-            // score_transactions is optional
-        }
+        } catch (\Throwable) {}
 
         $score->score        = $new;
         $score->total_rides += 1;
         $score->save();
     }
 
-    private function scoreTier(int $score): string
+    private function applyPenalty(int $userId, string $action, int $points, string $reason): void
     {
-        return match (true) {
-            $score >= 80 => 'gold',
-            $score >= 60 => 'silver',
-            $score >= 40 => 'bronze',
-            default      => 'at_risk',
-        };
+        if ($points === 0) return;
+
+        $score = UserScore::where('user_id', $userId)->first();
+        if (! $score) return;
+
+        $prev = $score->score;
+        $new  = max(0, min(100, $prev + $points));
+
+        try {
+            DB::table('score_transactions')->insert([
+                'user_id'                  => $userId,
+                'action'                   => $action,
+                'points'                   => $points,
+                'previous_score'           => $prev,
+                'new_score'                => $new,
+                'reason'                   => $reason,
+                'high_cancel_rate_applied' => false,
+                'reference_type'           => null,
+                'reference_id'             => null,
+                'created_at'               => now()->subDays(rand(1, 30)),
+            ]);
+        } catch (\Throwable) {}
+
+        $score->score               = $new;
+        $score->total_cancellations += 1;
+        $score->save();
+    }
+
+    private function seedCancellationPenalties(): void
+    {
+        $this->command->info('Seeding cancellation score penalties…');
+        $count = 0;
+
+        // Driver penalty for every cancelled ride
+        $cancelledRides = DB::table('rides')
+            ->where('status', RideStatus::CANCELLED->value)
+            ->get(['id', 'driver_id']);
+
+        foreach ($cancelledRides as $ride) {
+            $pct = rand(20, 95);
+            [$points, $action] = match (true) {
+                $pct < 30 => [0,   'driver_cancel_ride_early'],
+                $pct < 50 => [-7,  'driver_cancel_ride_mid'],
+                default   => [-12, 'driver_cancel_ride_late'],
+            };
+            $this->applyPenalty(
+                $ride->driver_id, $action, $points,
+                "إلغاء رحلة #{$ride->id} ({$pct}% من الوقت مضى)"
+            );
+            if ($points !== 0) $count++;
+        }
+
+        // Passenger penalties — simulate ~100 late cancellations on active bookings
+        $bookings = DB::table('bookings')
+            ->whereIn('status', [BookingStatus::CONFIRMED->value, BookingStatus::PENDING->value])
+            ->inRandomOrder()
+            ->limit(100)
+            ->get(['id', 'user_id']);
+
+        foreach ($bookings as $booking) {
+            $pct = rand(10, 90);
+            [$points, $action] = match (true) {
+                $pct < 30 => [-3, 'passenger_cancel_early'],
+                $pct < 60 => [-5, 'passenger_cancel_mid'],
+                default   => [-8, 'passenger_cancel_late'],
+            };
+            $this->applyPenalty(
+                $booking->user_id, $action, $points,
+                "إلغاء حجز #{$booking->id} ({$pct}% من الوقت مضى)"
+            );
+            $count++;
+        }
+
+        $this->command->info("  ✓ {$count} cancellation penalties seeded");
     }
 
     // =========================================================================
     // DOCUMENTS
     // =========================================================================
 
-    /**
-     * ⚠ If your table is named 'user_photos', change 'photos' below.
-     */
     private function createDocuments(int $userId, array $types): void
     {
         foreach ($types as $type) {
@@ -1390,8 +1414,8 @@ class SyrideSeeder extends Seeder
             ['SyCash escrow balance',       number_format($this->sycashWallet?->fresh()->balance ?? 0) . ' SYP'],
             ['──────────────────', '────'],
             ['Complaints',                  DB::table('complaints')->count()],
-            ['  Open',                      DB::table('complaints')->where('status', 'open')->count()],
-            ['  In Progress',               DB::table('complaints')->where('status', 'in_progress')->count()],
+            ['  Pending',                   DB::table('complaints')->where('status', 'pending')->count()],
+            ['  In Review',                 DB::table('complaints')->where('status', 'in_review')->count()],
             ['  Resolved / Closed',         DB::table('complaints')->whereIn('status', ['resolved', 'closed'])->count()],
             ['Complaint attachments',       DB::table('complaint_attachments')->count()],
             ['──────────────────', '────'],

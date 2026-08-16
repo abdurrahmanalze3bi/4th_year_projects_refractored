@@ -9,15 +9,35 @@ use Illuminate\Database\Eloquent\Collection;
 
 interface ChatRepositoryInterface
 {
-    public function createConversation(array $participants, string $type = 'private', ?string $title = null): Conversation;
+    /**
+     * @param array        $participants  flat array of user IDs
+     * @param string       $type          'private' | 'support' | 'group'
+     * @param string|null  $title         for group chats
+     * @param array        $roles         [userId => role]  — omitted keys default to 'member'
+     */
+    public function createConversation(
+        array   $participants,
+        string  $type  = 'private',
+        ?string $title = null,
+        array   $roles = [],
+    ): Conversation;
 
     public function findConversation(int $conversationId): ?Conversation;
 
     public function findPrivateConversation(User $user1, User $user2): ?Conversation;
 
+    /** Find an existing support conversation between a customer and an agent. */
+    public function findSupportConversation(User $user, User $agent): ?Conversation;
+
     public function getUserConversations(User $user): Collection;
 
-    public function sendMessage(int $conversationId, int $senderId, string $content, string $type = 'text', ?array $metadata = null): Message;
+    public function sendMessage(
+        int     $conversationId,
+        int     $senderId,
+        string  $content,
+        string  $type     = 'text',
+        ?array  $metadata = null,
+    ): Message;
 
     public function getMessages(int $conversationId, int $limit = 50, int $offset = 0): Collection;
 
