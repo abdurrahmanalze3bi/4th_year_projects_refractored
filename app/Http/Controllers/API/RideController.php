@@ -61,7 +61,7 @@ class RideController extends Controller
      * try scope, and returned 201 even on failure. Now uses a single clean
      * try/catch with \Throwable to also catch PHP Errors.
      */
-    public function create(CreateRideRequest $request): JsonResponse
+    public function createRide(CreateRideRequest $request): JsonResponse
     {
         try {
             $dto   = CreateRideDTO::fromRequest($request->validated(), $request->user()->id);
