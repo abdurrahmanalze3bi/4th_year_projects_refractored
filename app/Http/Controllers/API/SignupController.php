@@ -6,28 +6,28 @@ use App\DTOs\Auth\SendEmailOtpDTO;
 use App\Http\Controllers\Controller;
 use App\Interfaces\EmailOtpServiceInterface;
 use App\Interfaces\UserRepositoryInterface;
-use App\Models\User;
-use App\Services\JwtService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
 
 class SignupController extends Controller
 {
     public function __construct(
         private readonly UserRepositoryInterface  $userRepository,
-        private readonly JwtService               $jwtService,
         private readonly EmailOtpServiceInterface $emailOtpService,
+        // JwtService removed — was injected but never used
     ) {}
 
-    public function register(Request $request)
+    public function register(Request $request): JsonResponse
     {
+        // ── Validation ────────────────────────────────────────────────────────
         $validator = Validator::make($request->all(), [
             'first_name' => 'required|string|max:255',
             'last_name'  => 'required|string|max:255',
-            'email'      => 'required|email|max:255',        // ← removed unique here, handled manually below
+            'email'      => 'required|email|max:255',
             'password'   => 'required|string|confirmed|min:8',
             'gender'     => 'required|in:M,F',
             'address'    => 'required|in:دمشق,درعا,القنيطرة,السويداء,ريف دمشق,حمص,حماة,اللاذقية,طرطوس,حلب,ادلب,الحسكة,الرقة,دير الزور',
@@ -43,11 +43,22 @@ class SignupController extends Controller
             ], 422);
         }
 
-        // ── Check if email already exists ────────────────────────────────
-        $existingUser = $this->userRepository->findByEmail($request->email);
+        // ── Check for existing account ────────────────────────────────────────
+        try {
+            $existingUser = $this->userRepository->findByEmail($request->email);
+        } catch (\Throwable $e) {
+            Log::error('Signup: DB lookup failed', [
+                'email' => $request->email,
+                'error' => $e->getMessage(),
+                'class' => get_class($e),
+            ]);
+            return $this->serverError($e);
+        }
 
+        // ── PATH A: email exists ──────────────────────────────────────────────
         if ($existingUser) {
-            // Already verified → hard stop
+
+            // Already fully verified → reject
             if ($existingUser->email_verified_at !== null) {
                 return response()->json([
                     'status'  => 'error',
@@ -55,41 +66,53 @@ class SignupController extends Controller
                 ], 409);
             }
 
-            // Exists but NOT verified → resend OTP, don't create a new account
-            // Update their password in case they're retrying with a new one
-            $existingUser->password = Hash::make($request->password);
-            $existingUser->save();
+            // Unverified → update password and resend OTP
+            // FIX: was missing try/catch entirely — any throw here escaped to RoadRunner → silent 500
+            try {
+                $existingUser->password = Hash::make($request->password);
+                $existingUser->save();
 
-            $dto       = SendEmailOtpDTO::fromUser($existingUser);
-            $otpResult = $this->emailOtpService->sendOtp($dto);
+                $dto       = SendEmailOtpDTO::fromUser($existingUser);
+                $otpResult = $this->emailOtpService->sendOtp($dto);
 
-            if (!$otpResult['success']) {
-                return response()->json([
-                    'status'  => 'error',
-                    'message' => 'Could not send verification email. Please try again.',
-                ], 500);
+                if (!$otpResult['success']) {
+                    return response()->json([
+                        'status'  => 'error',
+                        'message' => 'Could not send verification email. Please try again.',
+                    ], 500);
+                }
+
+                $response = [
+                    'status'  => 'success',
+                    'message' => 'A new verification code has been sent to your email.',
+                    'user'    => [
+                        'id'         => $existingUser->id,
+                        'first_name' => $existingUser->first_name,
+                        'email'      => $existingUser->email,
+                    ],
+                ];
+
+                if (isset($otpResult['otp_code'])) {
+                    $response['otp_code'] = $otpResult['otp_code'];
+                }
+
+                return response()->json($response, 200);
+
+            } catch (\Throwable $e) {
+                Log::error('Signup: resend OTP failed (Path A)', [
+                    'user_id' => $existingUser->id,
+                    'email'   => $existingUser->email,
+                    'error'   => $e->getMessage(),
+                    'class'   => get_class($e),
+                    'file'    => $e->getFile(),
+                    'line'    => $e->getLine(),
+                ]);
+                return $this->serverError($e);
             }
-
-            $response = [
-                'status'  => 'success',
-                'message' => 'A new verification code has been sent to your email. Your previous code had expired.',
-                'user'    => [
-                    'id'         => $existingUser->id,
-                    'first_name' => $existingUser->first_name,
-                    'email'      => $existingUser->email,
-                ],
-            ];
-
-            if (isset($otpResult['otp_code'])) {
-                $response['otp_code'] = $otpResult['otp_code'];
-            }
-
-            return response()->json($response, 200);
         }
 
-        // ── New user — create account and send OTP ───────────────────────
+        // ── PATH B: new user ──────────────────────────────────────────────────
         DB::beginTransaction();
-
         try {
             $user = $this->userRepository->createUser([
                 'first_name' => $request->first_name,
@@ -130,15 +153,26 @@ class SignupController extends Controller
 
             return response()->json($response, 201);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            // FIX: was catch (\Exception) — missed TypeError, ArgumentCountError, etc.
             DB::rollBack();
-            Log::error('Registration failed: ' . $e->getMessage());
-
-            return response()->json([
-                'status'  => 'error',
-                'message' => 'Registration failed',
-                'error'   => config('app.debug') ? $e->getMessage() : 'An error occurred',
-            ], 500);
+            Log::error('Registration failed (Path B)', [
+                'email' => $request->email,
+                'error' => $e->getMessage(),
+                'class' => get_class($e),
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+            ]);
+            return $this->serverError($e);
         }
+    }
+
+    private function serverError(\Throwable $e): JsonResponse
+    {
+        return response()->json([
+            'status'  => 'error',
+            'message' => 'Registration failed',
+            'error'   => config('app.debug') ? $e->getMessage() : 'An error occurred',
+        ], 500);
     }
 }

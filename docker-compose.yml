@@ -103,7 +103,7 @@ services:
                 condition: service_started
     app4:
         image: syride_octane:latest
-        container_name: syride_app3
+        container_name: syride_app4
         restart: unless-stopped
         env_file: .env
         environment:
@@ -136,7 +136,7 @@ services:
 
     app5:
         image: syride_octane:latest
-        container_name: syride_app3
+        container_name: syride_app5
         restart: unless-stopped
         env_file: .env
         environment:
@@ -206,16 +206,19 @@ services:
     mysql_replica:
         image: mysql:8.0
         container_name: syride_mysql_replica
+        command: >
+            --server-id=2
+            --relay-log=relay-bin
+            --read-only=1
+            --skip-slave-start=OFF
         environment:
             MYSQL_ROOT_PASSWORD: "secret"
         volumes:
             - mysql_replica_data:/var/lib/mysql
-            - ./docker/mysql/replica.cnf:/etc/mysql/conf.d/replica.cnf
         depends_on:
             mysql:
                 condition: service_healthy
         restart: unless-stopped
-
     phpmyadmin:
         image: phpmyadmin/phpmyadmin
         container_name: syride_phpmyadmin

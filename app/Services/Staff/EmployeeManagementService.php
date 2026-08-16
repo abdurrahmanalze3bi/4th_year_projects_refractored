@@ -4,21 +4,43 @@ namespace App\Services\Staff;
 
 use App\Enums\StaffRole;
 use App\Models\Employee;
+use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 /**
  * EmployeeManagementService
  *
  * All CRUD for Employee accounts lives here — never in the controller.
  *
+ * Shadow User Bridge
+ * ──────────────────
+ * The chat system stores conversations against the `users` table, not the
+ * `employees` table.  ContactController and StaffChatController bridge the
+ * two by matching Employee::email → User::email.
+ *
+ * To make this permanent and automatic:
+ *   • create()  auto-creates a shadow User when a support_agent is created.
+ *   • delete()  removes the shadow User when the employee is deleted
+ *               (only if the User was never verified as a driver/passenger).
+ *   • The shadow User is only used for chat — agents never log in via the
+ *     user-facing app.  Its password is a random unguessable string.
+ *
  * Invariants enforced unconditionally:
  *   1. system_admin and sycash (restricted roles) can never be created,
- *      deactivated, or deleted via the API. They are seeded once at
- *      deployment by SpecialAccountSeeder. Password rotation goes through
- *      `php artisan admin:rotate-password {role}`.
+ *      deactivated, or deleted via the API.
  *   2. A requester can only manage roles that StaffRole::canManage() permits
  *      for their own role tier.
+ *
+ * Public method surface (what the controller calls):
+ *   getAll()         — list all employees visible to requester
+ *   getById()        — single employee with visibility check
+ *   create()         — create a new employee account
+ *   update()         — update mutable profile fields
+ *   rotatePassword() — rotate password + invalidate all sessions
+ *   toggleActive()   — flip is_active + revoke tokens on deactivation
+ *   delete()         — permanently delete + revoke tokens
  */
 class EmployeeManagementService
 {
@@ -34,7 +56,7 @@ class EmployeeManagementService
      * All employees visible to the requester.
      *
      * system_admin → everyone
-     * admin        → admin + support_agent  (restricted rows hidden)
+     * admin        → admin + support_agent (restricted rows hidden)
      * others       → caller should gate before reaching here
      */
     public function getAll(Employee $requester): Collection
@@ -82,7 +104,12 @@ class EmployeeManagementService
      *   1. Target role must not be restricted (system_admin / sycash).
      *   2. Requester's role must be permitted to manage the target role.
      *   3. Username must be unique across the employees table.
-     *   4. Email (optional) must be unique across the employees table.
+     *   4. Email (optional for most roles) must be unique if provided.
+     *   5. Support agents must supply an email — required for the chat bridge.
+     *
+     * After creation, support agents automatically get a shadow User account
+     * so ContactController and StaffChatController can find them immediately
+     * without any manual setup.
      *
      * @throws \DomainException
      */
@@ -112,7 +139,7 @@ class EmployeeManagementService
             throw new \DomainException("Username '{$data['username']}' is already taken.");
         }
 
-        // ── Guard 4: unique email (field is optional) ─────────────────────────
+        // ── Guard 4: unique email (if provided) ───────────────────────────────
         if (
             !empty($data['email'])
             && Employee::where('email', $data['email'])->exists()
@@ -120,7 +147,17 @@ class EmployeeManagementService
             throw new \DomainException("Email '{$data['email']}' is already in use.");
         }
 
-        return Employee::create([
+        // ── Guard 5: support agents must have an email ────────────────────────
+        // The chat bridge matches Employee::email → User::email.
+        // Without an email there is no bridge, and ContactController returns 503.
+        if ($role === StaffRole::SUPPORT_AGENT && empty($data['email'])) {
+            throw new \DomainException(
+                "Support agents must have an email address. " .
+                "It is used to link the employee to the chat system."
+            );
+        }
+
+        $employee = Employee::create([
             'username'   => $data['username'],
             'email'      => $data['email'] ?? null,
             'password'   => Hash::make($data['password']),
@@ -128,7 +165,18 @@ class EmployeeManagementService
             'last_name'  => $data['last_name'],
             'role'       => $role->value,
             'is_active'  => true,
+            'created_by' => $requester->id,   // ← was missing; always track who created whom
         ]);
+
+        // ── Auto-create shadow User for the chat bridge ───────────────────────
+        // This runs for support_agent (and admin, who may also participate in
+        // chat via StaffChatController).  system_admin / sycash are restricted
+        // roles and are already blocked above.
+        if ($employee->email) {
+            $this->ensureShadowUser($employee);
+        }
+
+        return $employee;
     }
 
     // =========================================================================
@@ -189,12 +237,30 @@ class EmployeeManagementService
             throw new \DomainException("Email '{$data['email']}' is already in use.");
         }
 
+        $oldEmail = $employee->email;
+
         $employee->fill(
             array_intersect_key($data, array_flip([
                 'username', 'email', 'first_name', 'last_name', 'role',
             ]))
         );
         $employee->save();
+
+        // Keep shadow User email in sync when the employee's email changes
+        if (
+            isset($data['email'])
+            && $data['email'] !== $oldEmail
+            && $oldEmail !== null
+        ) {
+            User::where('email', $oldEmail)
+                ->where('is_verified_driver', 0)
+                ->where('is_verified_passenger', 0)
+                ->update([
+                    'email'      => $data['email'],
+                    'first_name' => $data['first_name'] ?? $employee->first_name,
+                    'last_name'  => $data['last_name']  ?? $employee->last_name,
+                ]);
+        }
 
         return $employee;
     }
@@ -208,6 +274,8 @@ class EmployeeManagementService
      *
      * Restricted accounts (system_admin / sycash) must use the Artisan command
      * instead — this method throws for them so the API can never touch them.
+     *
+     * Called by the controller as: $this->managementService->rotatePassword(...)
      *
      * @throws \DomainException
      */
@@ -245,7 +313,6 @@ class EmployeeManagementService
     {
         $employee = $this->getById($id, $requester);
 
-        // Restricted accounts cannot be deactivated via the API
         if ($employee->role->isRestricted()) {
             throw new \DomainException(
                 "The '{$employee->role->label()}' account cannot be deactivated via the API."
@@ -269,6 +336,7 @@ class EmployeeManagementService
     /**
      * Permanently delete an employee account.
      * Tokens are revoked first so any in-flight requests are rejected cleanly.
+     * The shadow User is removed if it was never independently verified.
      *
      * @throws \DomainException
      */
@@ -276,7 +344,6 @@ class EmployeeManagementService
     {
         $employee = $this->getById($id, $requester);
 
-        // Restricted accounts cannot be deleted via the API
         if ($employee->role->isRestricted()) {
             throw new \DomainException(
                 "The '{$employee->role->label()}' account cannot be deleted via the API."
@@ -291,6 +358,51 @@ class EmployeeManagementService
         }
 
         $this->staffJwtService->revokeAllTokens($employee->id);
+
+        // Clean up shadow User — but only if the User was never independently
+        // verified as a driver or passenger (i.e. it is purely a chat bridge).
+        if ($employee->email) {
+            User::where('email', $employee->email)
+                ->where('is_verified_driver', 0)
+                ->where('is_verified_passenger', 0)
+                ->delete();
+        }
+
         $employee->delete();
+    }
+
+    // =========================================================================
+    // PRIVATE — SHADOW USER BRIDGE
+    // =========================================================================
+
+    /**
+     * Ensure a User record exists for this employee so the chat bridge works.
+     *
+     * Called automatically on create().
+     * Also called by ContactController as a self-healing fallback for employees
+     * created before this fix was deployed.
+     *
+     * The shadow User's password is a random unguessable string — agents
+     * never log in via the user app.  The account exists solely so the chat
+     * system can find them.
+     */
+    public function ensureShadowUser(Employee $employee): User
+    {
+        $existing = User::where('email', $employee->email)->first();
+
+        if ($existing) {
+            return $existing;
+        }
+
+        return User::create([
+            'first_name'        => $employee->first_name,
+            'last_name'         => $employee->last_name,
+            'email'             => $employee->email,
+            'password'          => Str::random(64), // never used — agent logs in via staff portal
+            'gender'            => 'M',
+            'address'           => 'دمشق',
+            'status'            => 1,
+            'email_verified_at' => now(),
+        ]);
     }
 }

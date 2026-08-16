@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Repositories;
 
 use App\Interfaces\ChatRepositoryInterface;
@@ -11,21 +12,30 @@ use Illuminate\Support\Facades\Log;
 
 class ChatRepository implements ChatRepositoryInterface
 {
-    public function createConversation(array $participants, string $type = 'private', ?string $title = null): Conversation
-    {
-        return DB::transaction(function () use ($participants, $type, $title) {
+    public function createConversation(
+        array   $participants,
+        string  $type  = 'private',
+        ?string $title = null,
+        array   $roles = [],        // [userId => role]  — omitted keys → 'member'
+    ): Conversation {
+        return DB::transaction(function () use ($participants, $type, $title, $roles) {
             $conversation = Conversation::create([
-                'type' => $type,
-                'title' => $title
+                'type'  => $type,
+                'title' => $title,
             ]);
 
             foreach ($participants as $userId) {
                 $conversation->participants()->attach($userId, [
-                    'joined_at' => now()
+                    'role'      => $roles[$userId] ?? 'member',
+                    'joined_at' => now(),
                 ]);
             }
 
-            Log::info('Conversation created', ['conversation_id' => $conversation->id]);
+            Log::info('Conversation created', [
+                'conversation_id' => $conversation->id,
+                'type'            => $type,
+            ]);
+
             return $conversation->load('participants');
         });
     }
@@ -38,12 +48,20 @@ class ChatRepository implements ChatRepositoryInterface
     public function findPrivateConversation(User $user1, User $user2): ?Conversation
     {
         return Conversation::where('type', 'private')
-            ->whereHas('participants', function ($query) use ($user1) {
-                $query->where('user_id', $user1->id);
-            })
-            ->whereHas('participants', function ($query) use ($user2) {
-                $query->where('user_id', $user2->id);
-            })
+            ->whereHas('participants', fn ($q) => $q->where('user_id', $user1->id))
+            ->whereHas('participants', fn ($q) => $q->where('user_id', $user2->id))
+            ->first();
+    }
+
+    /**
+     * Find an existing support conversation between a customer and an agent.
+     * Looks for type = 'support' so it is never confused with private chats.
+     */
+    public function findSupportConversation(User $user, User $agent): ?Conversation
+    {
+        return Conversation::where('type', 'support')
+            ->whereHas('participants', fn ($q) => $q->where('user_id', $user->id))
+            ->whereHas('participants', fn ($q) => $q->where('user_id', $agent->id))
             ->first();
     }
 
@@ -55,20 +73,25 @@ class ChatRepository implements ChatRepositoryInterface
             ->get();
     }
 
-    public function sendMessage(int $conversationId, int $senderId, string $content, string $type = 'text', ?array $metadata = null): Message
-    {
+    public function sendMessage(
+        int    $conversationId,
+        int    $senderId,
+        string $content,
+        string $type     = 'text',
+        ?array $metadata = null,
+    ): Message {
         $message = Message::create([
             'conversation_id' => $conversationId,
-            'sender_id' => $senderId,
-            'type' => $type,
-            'content' => $content,
-            'metadata' => $metadata
+            'sender_id'       => $senderId,
+            'type'            => $type,
+            'content'         => $content,
+            'metadata'        => $metadata,
         ]);
 
-        // Update conversation timestamp
         Conversation::where('id', $conversationId)->touch();
 
         Log::info('Message sent', ['message_id' => $message->id]);
+
         return $message->load('sender', 'conversation');
     }
 

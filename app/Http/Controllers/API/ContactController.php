@@ -5,22 +5,36 @@ namespace App\Http\Controllers\API;
 use App\Http\Controllers\Controller;
 use App\Interfaces\ChatRepositoryInterface;
 use App\Models\Employee;
-use App\Models\User;
+use App\Services\Staff\EmployeeManagementService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 final class ContactController extends Controller
 {
     public function __construct(
-        private readonly ChatRepositoryInterface $chatRepository,
+        private readonly ChatRepositoryInterface   $chatRepository,
+        private readonly EmployeeManagementService $managementService,
     ) {}
 
     // POST /api/contact
     public function __invoke(Request $request): JsonResponse
     {
-        // Find first active support agent
+        // Pick the least-loaded active support agent.
+        //
+        // "Least-loaded" = fewest open support conversations.
+        // The subquery joins through the shadow User account (matched by email)
+        // so we never need a direct Employee → Conversation relationship.
         $agent = Employee::where('role', 'support_agent')
             ->where('is_active', true)
+            ->whereNotNull('email')
+            ->orderByRaw('(
+                SELECT COUNT(*)
+                FROM conversation_participants cp
+                INNER JOIN users u ON u.id = cp.user_id
+                INNER JOIN conversations c ON c.id = cp.conversation_id
+                WHERE u.email = employees.email
+                  AND c.type  = "support"
+            ) ASC')
             ->first();
 
         if (!$agent) {
@@ -30,19 +44,11 @@ final class ContactController extends Controller
             ], 503);
         }
 
-        // Find the agent's User account by email
-        $agentUser = User::where('email', $agent->email)->first();
-
-        if (!$agentUser) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => 'Support is currently unavailable.',
-            ], 503);
-        }
-
+        // Ensure the agent's shadow User account exists (permanent self-heal).
+        $agentUser   = $this->managementService->ensureShadowUser($agent);
         $currentUser = $request->user();
 
-        // Prevent chatting with yourself
+        // Edge case: authenticated user IS the agent.
         if ($currentUser->id === $agentUser->id) {
             return response()->json([
                 'status'  => 'error',
@@ -50,8 +56,8 @@ final class ContactController extends Controller
             ], 422);
         }
 
-        // Find existing conversation or create new one
-        $existing = $this->chatRepository->findPrivateConversation($currentUser, $agentUser);
+        // Return existing support conversation if one already exists.
+        $existing = $this->chatRepository->findSupportConversation($currentUser, $agentUser);
 
         if ($existing) {
             return response()->json([
@@ -64,9 +70,15 @@ final class ContactController extends Controller
             ]);
         }
 
+        // Create a new support conversation with correct type and per-role.
         $conversation = $this->chatRepository->createConversation(
-            [$currentUser->id, $agentUser->id],
-            'private'
+            participants: [$currentUser->id, $agentUser->id],
+            type:         'support',
+            title:        null,
+            roles:        [
+                $currentUser->id => 'customer',
+                $agentUser->id   => 'agent',
+            ],
         );
 
         return response()->json([

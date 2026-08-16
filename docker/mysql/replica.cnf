@@ -1,5 +1,5 @@
-[mysqld]
-server-id = 2
-relay_log = relay-bin
-read_only = ON
-log_slave_updates = ON
+﻿[mysqld]
+server-id=2
+relay-log=relay-bin
+read-only=1
+skip-slave-start=OFF

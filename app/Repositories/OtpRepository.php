@@ -5,6 +5,7 @@ namespace App\Repositories;
 use App\Interfaces\OtpRepositoryInterface;
 use App\Models\Otp;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class OtpRepository implements OtpRepositoryInterface
 {
@@ -28,11 +29,13 @@ class OtpRepository implements OtpRepositoryInterface
      */
     public function findByPhoneAndCode(string $phoneNumber, string $code): ?Otp
     {
-        return $this->model
-            ->where('phone_number', $phoneNumber)
-            ->where('otp_code', $code)
-            ->active()
-            ->first();
+        return DB::transaction(function () use ($phoneNumber, $code) {
+            return $this->model
+                ->where('phone_number', $phoneNumber)
+                ->where('otp_code', $code)
+                ->active()
+                ->first();
+        });
     }
 
     /**

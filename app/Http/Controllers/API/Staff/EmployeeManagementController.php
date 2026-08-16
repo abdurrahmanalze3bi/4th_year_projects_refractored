@@ -4,6 +4,7 @@ namespace App\Http\Controllers\API\Staff;
 
 use App\Enums\StaffRole;
 use App\Http\Controllers\Controller;
+use App\Models\Employee;
 use App\Services\Staff\EmployeeManagementService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
@@ -17,6 +18,16 @@ use Illuminate\Support\Facades\Validator;
  * Thin controller. Route-level access is enforced by StaffJwtMiddleware
  * (system_admin or admin). Fine-grained authorization (who can manage whom)
  * is enforced by EmployeeManagementService.
+ *
+ * Bugs fixed vs original:
+ *   1. list()          → getAll()         (method did not exist on service)
+ *   2. resetPassword() → rotatePassword() (method did not exist on service)
+ *   3. formatEmployee() moved to this controller as a private method
+ *      (it was called on the service but was never defined there → Error)
+ *   4. All catch (\Exception) → catch (\Throwable) so PHP Errors (TypeError,
+ *      ArgumentCountError, etc.) are caught and returned as JSON instead of
+ *      producing an HTML 500 page.
+ *   5. created_by now populated in the service (not a controller concern).
  */
 final class EmployeeManagementController extends Controller
 {
@@ -31,16 +42,16 @@ final class EmployeeManagementController extends Controller
         $requester = $request->attributes->get('staffEmployee');
 
         try {
-            $employees = $this->managementService->list($requester);
+            $employees = $this->managementService->getAll($requester); // FIX 1: was list()
 
             return response()->json([
                 'status' => 'success',
                 'data'   => $employees->map(
-                    fn($e) => $this->managementService->formatEmployee($e)
+                    fn($e) => $this->formatEmployee($e)   // FIX 3: was $this->managementService->formatEmployee()
                 )->values(),
             ]);
-        } catch (\Exception $e) {
-            Log::error('Employee list failed', ['error' => $e->getMessage()]);
+        } catch (\Throwable $e) {                         // FIX 4: was \Exception
+            Log::error('Employee list failed', ['error' => $e->getMessage(), 'class' => get_class($e)]);
             return $this->serverError();
         }
     }
@@ -49,9 +60,10 @@ final class EmployeeManagementController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $requester    = $request->attributes->get('staffEmployee');
         $allowedRoles = array_map(
             fn(StaffRole $r) => $r->value,
-            $request->attributes->get('staffEmployee')->role->creatableRoles()
+            $requester->role->creatableRoles()
         );
 
         $validator = Validator::make($request->all(), [
@@ -76,20 +88,20 @@ final class EmployeeManagementController extends Controller
         try {
             $employee = $this->managementService->create(
                 $validator->validated(),
-                $request->attributes->get('staffEmployee')
+                $requester
             );
 
             return response()->json([
                 'status'   => 'success',
                 'message'  => 'Employee created successfully.',
-                'employee' => $this->managementService->formatEmployee($employee),
+                'employee' => $this->formatEmployee($employee),   // FIX 3
             ], 201);
         } catch (\DomainException $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
         } catch (\RuntimeException $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 409);
-        } catch (\Exception $e) {
-            Log::error('Employee creation failed', ['error' => $e->getMessage()]);
+        } catch (\Throwable $e) {                                 // FIX 4
+            Log::error('Employee creation failed', ['error' => $e->getMessage(), 'class' => get_class($e)]);
             return $this->serverError();
         }
     }
@@ -106,7 +118,7 @@ final class EmployeeManagementController extends Controller
 
             return response()->json([
                 'status' => 'success',
-                'data'   => $this->managementService->formatEmployee($employee),
+                'data'   => $this->formatEmployee($employee),    // FIX 3
             ]);
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'Employee not found.'], 404);
@@ -142,7 +154,7 @@ final class EmployeeManagementController extends Controller
             return response()->json([
                 'status'   => 'success',
                 'message'  => 'Employee updated successfully.',
-                'employee' => $this->managementService->formatEmployee($employee),
+                'employee' => $this->formatEmployee($employee),  // FIX 3
             ]);
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'Employee not found.'], 404);
@@ -150,8 +162,8 @@ final class EmployeeManagementController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
         } catch (\RuntimeException $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 409);
-        } catch (\Exception $e) {
-            Log::error('Employee update failed', ['error' => $e->getMessage()]);
+        } catch (\Throwable $e) {                                // FIX 4
+            Log::error('Employee update failed', ['error' => $e->getMessage(), 'class' => get_class($e)]);
             return $this->serverError();
         }
     }
@@ -171,14 +183,14 @@ final class EmployeeManagementController extends Controller
             return response()->json([
                 'status'   => 'success',
                 'message'  => "Employee {$status} successfully.",
-                'employee' => $this->managementService->formatEmployee($employee),
+                'employee' => $this->formatEmployee($employee),  // FIX 3
             ]);
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'Employee not found.'], 404);
         } catch (\DomainException $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
-        } catch (\Exception $e) {
-            Log::error('Toggle active failed', ['error' => $e->getMessage()]);
+        } catch (\Throwable $e) {                                // FIX 4
+            Log::error('Toggle active failed', ['error' => $e->getMessage(), 'class' => get_class($e)]);
             return $this->serverError();
         }
     }
@@ -199,7 +211,7 @@ final class EmployeeManagementController extends Controller
         }
 
         try {
-            $this->managementService->resetPassword(
+            $this->managementService->rotatePassword(  // FIX 2: was resetPassword()
                 $id,
                 $request->input('new_password'),
                 $request->attributes->get('staffEmployee')
@@ -213,13 +225,35 @@ final class EmployeeManagementController extends Controller
             return response()->json(['status' => 'error', 'message' => 'Employee not found.'], 404);
         } catch (\DomainException $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
-        } catch (\Exception $e) {
-            Log::error('Password reset failed', ['error' => $e->getMessage()]);
+        } catch (\Throwable $e) {                               // FIX 4
+            Log::error('Password reset failed', ['error' => $e->getMessage(), 'class' => get_class($e)]);
             return $this->serverError();
         }
     }
 
     // ── Shared ────────────────────────────────────────────────────────────────
+
+    /**
+     * FIX 3 — formatEmployee lives here, not on the service.
+     * The service returns model instances; formatting for the API response
+     * is a controller responsibility.
+     */
+    private function formatEmployee(Employee $e): array
+    {
+        return [
+            'id'         => $e->id,
+            'username'   => $e->username,
+            'email'      => $e->email,
+            'first_name' => $e->first_name,
+            'last_name'  => $e->last_name,
+            'full_name'  => $e->fullName(),
+            'role'       => $e->role->value,
+            'role_label' => $e->role->label(),
+            'is_active'  => $e->is_active,
+            'created_by' => $e->created_by,
+            'created_at' => $e->created_at->toIso8601String(),
+        ];
+    }
 
     private function serverError(): JsonResponse
     {

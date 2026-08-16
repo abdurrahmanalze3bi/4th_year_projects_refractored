@@ -29,6 +29,7 @@ use App\Http\Controllers\API\ScoreController;
 use App\Http\Controllers\API\SignupController;
 use App\Http\Controllers\API\Staff\EmployeeManagementController;
 use App\Http\Controllers\API\Staff\StaffAuthController;
+use App\Http\Controllers\API\Staff\StaffChatController;      // ← NEW
 use App\Http\Controllers\API\Staff\StaffOperationsController;
 use App\Http\Controllers\API\Staff\StaffReviewController;
 use App\Http\Controllers\API\TextMeOtpController;
@@ -246,7 +247,7 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::get('/balance',            [WalletController::class, 'getBalance']);
         Route::post('/initiate',          [WalletController::class, 'initiateWalletCreation']);
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
-        Route::get('/transactions', [WalletController::class, 'transactions']);
+        Route::get('/transactions',       [WalletController::class, 'transactions']);
         Route::get('/requests',           [WalletRequestController::class, 'myRequests']);
         Route::post('/request-charge',    [WalletRequestController::class, 'requestCharge']);
         Route::post('/request-withdraw',  [WalletRequestController::class, 'requestWithdraw']);
@@ -264,7 +265,7 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::get('/{id}', [ComplaintController::class, 'show']);
     });
 
-    // ── Contact ───────────────────────────────────────────────────────────────
+    // ── Contact (opens support chat) ──────────────────────────────────────────
 
     Route::post('/contact', ContactController::class);
 
@@ -403,6 +404,15 @@ Route::prefix('staff')->name('staff.')->group(function () {
 
         Route::post('trips/{rideId}/cancel',      [StaffOperationsController::class, 'cancelTrip'])->name('trips.cancel');
         Route::post('bookings/{bookingId}/cancel', [StaffOperationsController::class, 'cancelBooking'])->name('bookings.cancel');
+
+        // ── Support Chat (support_agent, admin, system_admin) ─────────────
+        // All active staff roles can read and reply to support conversations.
+        // The agent's User account (matched by email) is the chat participant.
+        Route::prefix('chat')->name('chat.')->group(function () {
+            Route::get('conversations',                    [StaffChatController::class, 'conversations'])->name('conversations');
+            Route::get('conversations/{id}/messages',      [StaffChatController::class, 'messages'])->name('messages');
+            Route::post('conversations/{id}/messages',     [StaffChatController::class, 'sendMessage'])->name('send');
+        });
 
         // Admin + System Admin only
         Route::middleware('staff:admin,system_admin')->group(function () {
