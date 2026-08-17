@@ -213,6 +213,9 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
             Route::post('/route-options', [RideController::class, 'getRouteOptions']);
         });
 
+        // Trips leaving from / arriving at the user's own city (paginated)
+        Route::get('/city-trips', [RideController::class, 'cityTrips']);
+
         Route::post('/create-with-route', [RideController::class, 'createRideWithRoute']);
 
         Route::get('/',  [RideController::class, 'getRides']);
