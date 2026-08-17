@@ -197,13 +197,75 @@ class RideController extends Controller
      * NOT cached — seat counts and booking list change with every booking.
      * Returns the full ride data PLUS all bookings with passenger details.
      */
+    // =========================================================================
+// SHOW — PUBLIC (passenger browsing a ride)
+// =========================================================================
+
+    /**
+     * GET /rides/{rideId}
+     *
+     * Public endpoint. Returns ride details + seat counts ONLY.
+     * NO passenger names, NO communication numbers, NO booking list.
+     * Any authenticated user may call this.
+     */
     public function show(int $rideId): JsonResponse
     {
         try {
             $ride = $this->rideService->getRideById($rideId);
 
-            // Eager-load every booking with the passenger's name + avatar.
-            // Column-limited selects prevent accidentally leaking sensitive fields.
+            // Only aggregate seat totals — no booking rows, no passenger data
+            $seatsByStatus = $ride->bookings()
+                ->selectRaw('status, COALESCE(SUM(seats), 0) as total')
+                ->groupBy('status')
+                ->pluck('total', 'status');
+
+            $confirmedSeats = (int) ($seatsByStatus['confirmed'] ?? 0);
+            $pendingSeats   = (int) ($seatsByStatus['pending']   ?? 0);
+
+            return response()->json([
+                'success'      => true,
+                'data'         => new RideResource($ride),
+                'seat_summary' => [
+                    'total_capacity' => $ride->available_seats + $confirmedSeats + $pendingSeats,
+                    'available'      => $ride->available_seats,
+                    'confirmed'      => $confirmedSeats,
+                    'pending'        => $pendingSeats,
+                ],
+                // !! NO 'bookings' key — passenger data never leaves this endpoint !!
+            ]);
+
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Ride not found',
+            ], 404);
+        }
+    }
+
+// =========================================================================
+// DRIVER VIEW — PRIVATE (only the ride's own driver)
+// =========================================================================
+
+    /**
+     * GET /rides/{rideId}/driver-view
+     *
+     * Returns the full booking list with passenger details and communication
+     * numbers. Returns 403 for any user who is NOT the driver of this ride.
+     */
+    public function driverView(int $rideId, Request $request): JsonResponse
+    {
+        try {
+            $ride = $this->rideService->getRideById($rideId);
+
+            // ── Hard authorization check ──────────────────────────────────────
+            if ($request->user()->id !== (int) $ride->driver_id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Access denied. Only the driver of this ride can view passenger details.',
+                ], 403);
+            }
+
+            // ── Eager-load bookings with passenger profile ────────────────────
             $ride->load([
                 'bookings' => fn ($q) => $q
                     ->with([
@@ -213,26 +275,19 @@ class RideController extends Controller
                     ->orderBy('created_at'),
             ]);
 
-            // Keep the existing loadCount so RideResource still has total_booked_seats.
-            $ride->loadCount(['bookings as total_booked_seats' => function ($query) {
-                $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
-            }]);
+            $ride->loadCount(['bookings as total_booked_seats' => fn ($q) =>
+            $q->select(DB::raw('COALESCE(SUM(seats), 0)'))
+            ]);
 
-            // ── Seat summary per status ──────────────────────────────────────
-            $seatsByStatus = $ride->bookings
+            // ── Seat summary (in-memory, bookings already loaded) ─────────────
+            $seatsByStatus  = $ride->bookings
                 ->groupBy('status')
                 ->map(fn ($group) => (int) $group->sum('seats'));
 
-            $confirmedSeats = $seatsByStatus['confirmed']  ?? 0;
-            $pendingSeats   = $seatsByStatus['pending']    ?? 0;
-            $cancelledSeats = $seatsByStatus['cancelled']  ?? 0;
-            $completedSeats = $seatsByStatus['completed']  ?? 0;
+            $confirmedSeats = $seatsByStatus['confirmed'] ?? 0;
+            $pendingSeats   = $seatsByStatus['pending']   ?? 0;
 
-            // "Total capacity" = whatever is still free + every seat ever assigned
-            // (available_seats is already decremented on booking).
-            $totalCapacity = $ride->available_seats + $confirmedSeats + $pendingSeats;
-
-            // ── Build the per-booking list ───────────────────────────────────
+            // ── Build passenger list ──────────────────────────────────────────
             $bookingList = $ride->bookings->map(function ($booking) {
                 $avatar = $booking->user?->profile?->profile_photo
                     ? asset('storage/' . $booking->user->profile->profile_photo)
@@ -242,7 +297,7 @@ class RideController extends Controller
                     'id'                   => $booking->id,
                     'status'               => $booking->status,
                     'seats'                => $booking->seats,
-                    'communication_number' => $booking->communication_number,
+                    'communication_number' => $booking->communication_number, // safe: driver only
                     'booked_at'            => $booking->created_at->toIso8601String(),
                     'passenger'            => $booking->user ? [
                         'id'     => $booking->user->id,
@@ -253,17 +308,17 @@ class RideController extends Controller
             })->values();
 
             return response()->json([
-                'success' => true,
-                'data'    => new RideResource($ride),
+                'success'  => true,
+                'data'     => new RideResource($ride),
                 'bookings' => [
                     'total_bookings' => $ride->bookings->count(),
                     'seat_summary'   => [
-                        'total_capacity' => $totalCapacity,
+                        'total_capacity' => $ride->available_seats + $confirmedSeats + $pendingSeats,
                         'available'      => $ride->available_seats,
                         'confirmed'      => $confirmedSeats,
                         'pending'        => $pendingSeats,
-                        'cancelled'      => $cancelledSeats,
-                        'completed'      => $completedSeats,
+                        'cancelled'      => $seatsByStatus['cancelled'] ?? 0,
+                        'completed'      => $seatsByStatus['completed'] ?? 0,
                     ],
                     'list' => $bookingList,
                 ],
@@ -303,74 +358,6 @@ class RideController extends Controller
         }
     }
 
-    public function getRideDetails(int $rideId): JsonResponse
-    {
-        try {
-            $ride = $this->rideService->getRideById($rideId);
-
-            $ride->load([
-                'bookings' => fn ($q) => $q
-                    ->with([
-                        'user:id,first_name,last_name',
-                        'user.profile:user_id,profile_photo',
-                    ])
-                    ->orderBy('created_at'),
-            ]);
-
-            $ride->loadCount(['bookings as total_booked_seats' => function ($query) {
-                $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
-            }]);
-
-            $seatsByStatus  = $ride->bookings
-                ->groupBy('status')
-                ->map(fn ($g) => (int) $g->sum('seats'));
-
-            $confirmedSeats = $seatsByStatus['confirmed']  ?? 0;
-            $pendingSeats   = $seatsByStatus['pending']    ?? 0;
-
-            $bookingList = $ride->bookings->map(function ($booking) {
-                $avatar = $booking->user?->profile?->profile_photo
-                    ? asset('storage/' . $booking->user->profile->profile_photo)
-                    : null;
-
-                return [
-                    'id'                   => $booking->id,
-                    'status'               => $booking->status,
-                    'seats'                => $booking->seats,
-                    'communication_number' => $booking->communication_number,
-                    'booked_at'            => $booking->created_at->toIso8601String(),
-                    'passenger'            => $booking->user ? [
-                        'id'     => $booking->user->id,
-                        'name'   => trim("{$booking->user->first_name} {$booking->user->last_name}"),
-                        'avatar' => $avatar,
-                    ] : null,
-                ];
-            })->values();
-
-            return response()->json([
-                'success' => true,
-                'data'    => new RideResource($ride),
-                'bookings' => [
-                    'total_bookings' => $ride->bookings->count(),
-                    'seat_summary'   => [
-                        'total_capacity' => $ride->available_seats + $confirmedSeats + $pendingSeats,
-                        'available'      => $ride->available_seats,
-                        'confirmed'      => $confirmedSeats,
-                        'pending'        => $pendingSeats,
-                        'cancelled'      => $seatsByStatus['cancelled'] ?? 0,
-                        'completed'      => $seatsByStatus['completed'] ?? 0,
-                    ],
-                    'list' => $bookingList,
-                ],
-            ]);
-
-        } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Ride not found: ' . $e->getMessage(),
-            ], 404);
-        }
-    }
 
     // =========================================================================
     // SEARCH

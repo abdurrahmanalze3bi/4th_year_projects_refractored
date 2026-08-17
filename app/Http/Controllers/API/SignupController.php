@@ -18,7 +18,6 @@ class SignupController extends Controller
     public function __construct(
         private readonly UserRepositoryInterface  $userRepository,
         private readonly EmailOtpServiceInterface $emailOtpService,
-        // JwtService removed — was injected but never used
     ) {}
 
     public function register(Request $request): JsonResponse
@@ -67,7 +66,6 @@ class SignupController extends Controller
             }
 
             // Unverified → update password and resend OTP
-            // FIX: was missing try/catch entirely — any throw here escaped to RoadRunner → silent 500
             try {
                 $existingUser->password = Hash::make($request->password);
                 $existingUser->save();
@@ -121,7 +119,10 @@ class SignupController extends Controller
                 'password'   => Hash::make($request->password),
                 'gender'     => $request->gender,
                 'address'    => $request->address,
-                'status'     => 1,
+                // FIX: was 1 (active) — user must verify email before they can
+                // log in. LoginController now enforces email_verified_at, but
+                // starting at 0 adds a second layer of defence.
+                'status'     => 0,
             ]);
 
             $dto       = SendEmailOtpDTO::fromUser($user);
@@ -154,7 +155,6 @@ class SignupController extends Controller
             return response()->json($response, 201);
 
         } catch (\Throwable $e) {
-            // FIX: was catch (\Exception) — missed TypeError, ArgumentCountError, etc.
             DB::rollBack();
             Log::error('Registration failed (Path B)', [
                 'email' => $request->email,
