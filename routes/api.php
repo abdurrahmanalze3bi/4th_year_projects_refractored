@@ -218,7 +218,8 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::get('/',  [RideController::class, 'getRides']);
         Route::post('/', [RideController::class, 'createRide']);
 
-        Route::get('/{rideId}',                 [RideController::class, 'getRideDetails']);
+        Route::get('/{rideId}',              [RideController::class, 'show']);
+        Route::get('/{rideId}/passengers', [RideController::class, 'driverView']);
         Route::patch('/{rideId}/cancel',        [RideController::class, 'cancelRide']);
         Route::post('/{rideId}/book',           [RideController::class, 'bookRide']);
         Route::post('/{rideId}/finish',         [RideController::class, 'finishRide']);

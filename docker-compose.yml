@@ -24,6 +24,7 @@ services:
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
             - ./routes:/var/www/html/routes
+            - ./phpunit.xml:/var/www/html/phpunit.xml
         command: >
             sh -c "php artisan octane:start
             --server=roadrunner
