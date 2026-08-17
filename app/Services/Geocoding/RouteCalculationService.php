@@ -135,7 +135,7 @@ final class RouteCalculationService
         return [
             'distance' => (float) $route['summary']['distance'], // meters
             'duration' => (float) $route['summary']['duration'], // seconds
-            'geometry' => $route['geometry']['coordinates'] ?? [],
+            'geometry' => $this->decodeGeometry($route['geometry'] ?? null),
         ];
     }
 
@@ -179,12 +179,81 @@ final class RouteCalculationService
             $routes[] = [
                 'distance' => (float) $route['summary']['distance'],
                 'duration' => (float) $route['summary']['duration'],
-                'geometry' => $route['geometry']['coordinates'] ?? [],
+                'geometry' => $this->decodeGeometry($route['geometry'] ?? null),
                 'route_index' => $index,
             ];
         }
 
         return $routes;
+    }
+
+    /**
+     * Normalise the `geometry` field of an OpenRouteService route.
+     *
+     * The /v2/directions/{profile}/json endpoint returns geometry as a Google
+     * *encoded polyline string*, not GeoJSON. The previous code read
+     * $route['geometry']['coordinates'], which is null for a string — so every
+     * route came back with an empty geometry and the app had no line to draw.
+     *
+     * Accepts either shape and always returns [[lng, lat], …], matching the
+     * GeoJSON axis order used by calculateFallbackRoute().
+     */
+    private function decodeGeometry(mixed $geometry): array
+    {
+        if (is_array($geometry)) {
+            // Already GeoJSON-shaped (e.g. if the /geojson endpoint is ever used).
+            return $geometry['coordinates'] ?? $geometry;
+        }
+
+        if (!is_string($geometry) || $geometry === '') {
+            return [];
+        }
+
+        return $this->decodePolyline($geometry);
+    }
+
+    /**
+     * Decode a precision-5 encoded polyline into [[lng, lat], …].
+     *
+     * ORS emits (lat, lng) deltas like Google's algorithm; we flip each pair on
+     * output so callers get GeoJSON order.
+     */
+    private function decodePolyline(string $encoded): array
+    {
+        $points = [];
+        $index  = 0;
+        $length = strlen($encoded);
+        $lat    = 0;
+        $lng    = 0;
+
+        while ($index < $length) {
+            foreach (['lat', 'lng'] as $axis) {
+                $shift  = 0;
+                $result = 0;
+
+                do {
+                    if ($index >= $length) {
+                        return $points; // truncated payload — return what we have
+                    }
+
+                    $byte    = ord($encoded[$index++]) - 63;
+                    $result |= ($byte & 0x1f) << $shift;
+                    $shift  += 5;
+                } while ($byte >= 0x20);
+
+                $delta = ($result & 1) ? ~($result >> 1) : ($result >> 1);
+
+                if ($axis === 'lat') {
+                    $lat += $delta;
+                } else {
+                    $lng += $delta;
+                }
+            }
+
+            $points[] = [$lng * 1e-5, $lat * 1e-5];
+        }
+
+        return $points;
     }
 
     /**
