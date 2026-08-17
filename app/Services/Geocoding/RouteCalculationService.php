@@ -90,11 +90,23 @@ final class RouteCalculationService
             try {
                 return $this->fetchAlternatives($origin, $destination, $maxAlternatives);
             } catch (\Throwable $e) {
-                Log::warning('Alternative routes failed, using fallback', [
+                Log::warning('Alternative routes failed, trying single route', [
                     'error' => $e->getMessage()
                 ]);
 
-                return [$this->calculateFallbackRoute($origin, $destination)];
+                // ORS refuses the alternative-routes algorithm above ~100 km
+                // (error 2004), which is common for intercity trips here. A single
+                // real road route is far better than a straight line, so only fall
+                // back to haversine if the plain directions call fails too.
+                try {
+                    return [$this->fetchRoute($origin, $destination) + ['route_index' => 0]];
+                } catch (\Throwable $inner) {
+                    Log::warning('Single route also failed, using fallback', [
+                        'error' => $inner->getMessage()
+                    ]);
+
+                    return [$this->calculateFallbackRoute($origin, $destination)];
+                }
             }
         });
     }
