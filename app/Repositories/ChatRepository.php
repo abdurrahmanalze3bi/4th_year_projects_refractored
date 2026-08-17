@@ -65,6 +65,27 @@ class ChatRepository implements ChatRepositoryInterface
             ->first();
     }
 
+    /**
+     * Find the user's existing support conversation, whichever agent is on it.
+     *
+     * The customer never picks their agent, so the agent must NOT be part of
+     * the lookup: assignment is load-balanced and shifts as other customers
+     * open chats, so keying on "user + currently least-loaded agent" misses the
+     * thread the user already has and opens a fresh one on every page load.
+     *
+     * Conversations where this user sits on the 'agent' side are excluded —
+     * those are the support agent's own inbox, not their customer chat.
+     */
+    public function findSupportConversationForUser(User $user): ?Conversation
+    {
+        return Conversation::where('type', 'support')
+            ->whereHas('participants', fn ($q) => $q
+                ->where('user_id', $user->id)
+                ->where('conversation_participants.role', '!=', 'agent'))
+            ->orderBy('created_at', 'asc')
+            ->first();
+    }
+
     public function getUserConversations(User $user): Collection
     {
         return $user->conversations()
