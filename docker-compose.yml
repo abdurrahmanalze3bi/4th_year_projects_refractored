@@ -120,6 +120,7 @@ services:
             SESSION_DRIVER: redis
         volumes:
             - ./storage/logs:/var/www/html/storage/logs
+            - ./storage/app/public:/var/www/html/storage/app/public
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
@@ -153,6 +154,7 @@ services:
             SESSION_DRIVER: redis
         volumes:
             - ./storage/logs:/var/www/html/storage/logs
+            - ./storage/app/public:/var/www/html/storage/app/public
             - ./app:/var/www/html/app
             - ./database:/var/www/html/database
             - ./config:/var/www/html/config
@@ -176,6 +178,7 @@ services:
             - "127.0.0.1:8089:80"
         volumes:
             - ./nginx-docker.conf:/etc/nginx/nginx.conf:ro
+            - ./storage/app/public:/var/www/html/storage/app/public:ro
         depends_on:
             - app1
             - app2
