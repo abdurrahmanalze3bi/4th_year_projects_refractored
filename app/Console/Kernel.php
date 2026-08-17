@@ -60,7 +60,7 @@ class Kernel extends ConsoleKernel
         //
         // Every 30 minutes strikes a balance: table stays small, but we're not
         // hammering the DB with deletes every minute.
-        $schedule->command('otps:cleanup')
+        $schedule->command('otp:cleanup')
             ->everyThirtyMinutes()
             ->onOneServer()
             ->withoutOverlapping()

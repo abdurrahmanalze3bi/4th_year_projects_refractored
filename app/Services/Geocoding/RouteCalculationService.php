@@ -21,15 +21,26 @@ final class RouteCalculationService
     private string $baseUrl = 'https://api.openrouteservice.org/';
     private int $cacheTtl = 3600;
 
+    /**
+     * NOTE: a missing OPENROUTE_API_KEY must never throw here. This service is
+     * constructor-injected into RideController and RideRepository, so throwing
+     * took down every ride/booking endpoint — including the ones that do no
+     * routing at all — with a 500 before any controller code could run.
+     *
+     * Without a key we degrade to the straight-line fallback below instead.
+     */
     public function __construct()
     {
-        $this->apiKey = config('services.openroute.api_key');
+        $this->apiKey = (string) config('services.openroute.api_key', '');
+    }
 
-        if (empty($this->apiKey)) {
-            throw new \InvalidArgumentException(
-                'OpenRouteService API key is required. Please set OPENROUTE_API_KEY in your .env file.'
-            );
-        }
+    /**
+     * Whether the remote routing API is usable. When false, callers silently
+     * receive fallback estimates (marked with is_fallback => true).
+     */
+    private function hasApiKey(): bool
+    {
+        return $this->apiKey !== '';
     }
 
     /**
@@ -40,12 +51,18 @@ final class RouteCalculationService
         $this->validateCoordinates($origin, 'Origin');
         $this->validateCoordinates($destination, 'Destination');
 
+        // No key: skip the guaranteed-401 round trip, and don't cache the
+        // degraded result so routing recovers immediately once a key is set.
+        if (!$this->hasApiKey()) {
+            return $this->calculateFallbackRoute($origin, $destination);
+        }
+
         $cacheKey = "route:v2:" . md5(json_encode([$origin, $destination]));
 
         return Cache::remember($cacheKey, $this->cacheTtl, function () use ($origin, $destination) {
             try {
                 return $this->fetchRoute($origin, $destination);
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 Log::warning('Route calculation failed, using fallback', [
                     'error' => $e->getMessage()
                 ]);
@@ -63,12 +80,16 @@ final class RouteCalculationService
         $this->validateCoordinates($origin, 'Origin');
         $this->validateCoordinates($destination, 'Destination');
 
+        if (!$this->hasApiKey()) {
+            return [$this->calculateFallbackRoute($origin, $destination)];
+        }
+
         $cacheKey = "routes:v2:" . md5(json_encode([$origin, $destination, $maxAlternatives]));
 
         return Cache::remember($cacheKey, $this->cacheTtl, function () use ($origin, $destination, $maxAlternatives) {
             try {
                 return $this->fetchAlternatives($origin, $destination, $maxAlternatives);
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 Log::warning('Alternative routes failed, using fallback', [
                     'error' => $e->getMessage()
                 ]);
