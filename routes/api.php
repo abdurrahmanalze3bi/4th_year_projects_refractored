@@ -174,6 +174,7 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
     Route::prefix('score')->group(function () {
         Route::get('/',        [ScoreController::class, 'show']);
         Route::get('/history', [ScoreController::class, 'history']);
+        Route::get('/transactions', [ScoreController::class, 'transactions']);
     });
 
     // Autocomplete [+throttle:search — effective cap: 30/min]
