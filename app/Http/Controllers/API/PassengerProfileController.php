@@ -261,7 +261,8 @@ final class PassengerProfileController extends Controller
         }
 
         $paginator = \App\Models\WalletTransaction::with([
-            'user:id,first_name,last_name',   // the admin who processed it
+            'user:id,first_name,last_name',
+            'user.profile:user_id,profile_photo',
         ])
             ->where('wallet_id', $user->wallet->id)
             ->where('type', 'admin_charge')
@@ -525,7 +526,8 @@ final class PassengerProfileController extends Controller
         if (!$user?->wallet) return [];
 
         return \App\Models\WalletTransaction::with([
-            'user:id,first_name,last_name',  // admin who did the charge
+            'user:id,first_name,last_name',
+            'user.profile:user_id,profile_photo',
         ])
             ->where('wallet_id', $user->wallet->id)
             ->where('type', 'admin_charge')
@@ -599,26 +601,25 @@ final class PassengerProfileController extends Controller
 
     private function formatWalletCharge(\App\Models\WalletTransaction $tx): array
     {
-        $admin        = $tx->user;
-        $adminProfile = $admin
-            ? \App\Models\Profile::where('user_id', $admin->id)->first()
-            : null;
+        $admin = $tx->user;
 
         return [
-            'id'                   => $tx->id,
-            'transaction_id'       => $tx->transaction_id,
-            'amount'               => (float) $tx->amount,
-            'previous_balance'     => (float) $tx->previous_balance,
-            'new_balance'          => (float) $tx->new_balance,
-            'status'               => $tx->status,
-            'notes'                => $tx->description,
-            'date'                 => $tx->created_at->toDateString(),
-            'created_at'           => $tx->created_at->toIso8601String(),
-            'processed_by_id'      => $admin?->id,
-            'processed_by_name'    => $admin
-                ? trim("{$admin->first_name} {$admin->last_name}") : null,
-            'processed_by_photo'   => $adminProfile?->profile_photo
-                ? asset("storage/{$adminProfile->profile_photo}") : null,
+            'id'                 => $tx->id,
+            'transaction_id'     => $tx->transaction_id,
+            'amount'             => (float) $tx->amount,
+            'previous_balance'   => (float) $tx->previous_balance,
+            'new_balance'        => (float) $tx->new_balance,
+            'status'             => $tx->status,
+            'notes'              => $tx->description,
+            'date'               => $tx->created_at->toDateString(),
+            'created_at'         => $tx->created_at->toIso8601String(),
+            'processed_by_id'    => $admin?->id,
+            'processed_by_name'  => $admin
+                ? trim("{$admin->first_name} {$admin->last_name}")
+                : null,
+            'processed_by_photo' => $admin?->profile?->profile_photo
+                ? asset('storage/' . $admin->profile->profile_photo)
+                : null,
         ];
     }
 

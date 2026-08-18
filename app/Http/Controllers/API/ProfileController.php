@@ -12,7 +12,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use App\Http\Controllers\API\ScoreController;
-
+use App\Interfaces\PhotoRepositoryInterface;
+use App\Services\Score\ScoreService;
 /**
  * Profile Controller (REFACTORED)
  *
@@ -50,7 +51,9 @@ class ProfileController extends Controller
     public function __construct(
         private readonly ProfileRepositoryInterface $profileRepo,
         private readonly ProfileUpdateService       $updateService,
-        private readonly ProfileInteractionService  $interactionService
+        private readonly ProfileInteractionService  $interactionService,
+        private readonly PhotoRepositoryInterface   $photoRepo,
+        private readonly ScoreService               $scoreService,
     ) {}
 
     // =========================================================================
@@ -68,8 +71,10 @@ class ProfileController extends Controller
             $isOwner = $request->user()->id === $userId;
 
             if ($isOwner) {
-                $profile = $this->profileRepo->getProfileWithUser($userId);
-                $data    = $this->formatProfileData($profile, $profile->user, true);
+                $data = Cache::remember("profile.user.owner.{$userId}", 60, function () use ($userId) {
+                    $profile = $this->profileRepo->getProfileWithUser($userId);
+                    return $this->formatProfileData($profile, $profile->user, true);
+                });
             } else {
                 $data = Cache::remember("profile.user.{$userId}", 180, function () use ($userId) {
                     $profile = $this->profileRepo->getProfileWithUser($userId);
@@ -205,7 +210,9 @@ class ProfileController extends Controller
             });
 
             // ── Cache busting ─────────────────────────────────────────────────
+            // ── Cache busting ─────────────────────────────────────────────────
             Cache::forget("profile.user.{$user->id}");
+            Cache::forget("profile.user.owner.{$user->id}");
             Cache::forget("admin.driver.profile.{$user->id}");
             Cache::forget("admin.driver.dashboard.{$user->id}");
             Cache::forget("admin.passenger.full-profile.{$user->id}");
@@ -337,32 +344,38 @@ class ProfileController extends Controller
         $ratingStats = $this->interactionService->getRatingStats($user->id);
 
         // ── Documents ─────────────────────────────────────────────────────────
-        $photoRepo = app(\App\Interfaces\PhotoRepositoryInterface::class);
-        $docs = $photoRepo->getUserDocumentsByType(
+        $docs = $this->photoRepo->getUserDocumentsByType(
             $user->id,
             ['face_id', 'back_id', 'license', 'mechanic_card']
         )->mapWithKeys(fn($d) => ["{$d->type}_pic" => asset("storage/{$d->path}")])->toArray();
 
         // ── Score ─────────────────────────────────────────────────────────────
-        $scoreService = app(\App\Services\Score\ScoreService::class);
-        $userScore    = $scoreService->getScore($user);
+        $userScore = $this->scoreService->getScore($user);
 
-        // ── Ride history: as driver (counts only) ─────────────────────────────
-        $driverBase = \App\Models\Ride::where('driver_id', $user->id);
+        // ── Ride history: as driver — 1 query instead of 4 ───────────────────
+        $driverStats = \App\Models\Ride::where('driver_id', $user->id)
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status');
+
         $asDriver = [
-            'total_created' => (clone $driverBase)->count(),
-            'completed'     => (clone $driverBase)->where('status', 'finished')->count(),
-            'cancelled'     => (clone $driverBase)->where('status', 'cancelled')->count(),
-            'no_show'       => (clone $driverBase)->where('status', 'awaiting_confirmation')->count(),
+            'total_created' => $driverStats->sum(),
+            'completed'     => $driverStats->get('finished', 0),
+            'cancelled'     => $driverStats->get('cancelled', 0),
+            'no_show'       => $driverStats->get('awaiting_confirmation', 0),
         ];
 
-        // ── Ride history: as passenger (counts only) ──────────────────────────
-        $passengerBase = \App\Models\Booking::where('user_id', $user->id);
+        // ── Ride history: as passenger — 1 query instead of 4 ────────────────
+        $passengerStats = \App\Models\Booking::where('user_id', $user->id)
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status');
+
         $asPassenger = [
-            'total_booked' => (clone $passengerBase)->count(),
-            'completed'    => (clone $passengerBase)->where('status', 'completed')->count(),
-            'cancelled'    => (clone $passengerBase)->where('status', 'cancelled')->count(),
-            'no_show'      => (clone $passengerBase)->where('status', 'no_show')->count(),
+            'total_booked' => $passengerStats->sum(),
+            'completed'    => $passengerStats->get('completed', 0),
+            'cancelled'    => $passengerStats->get('cancelled', 0),
+            'no_show'      => $passengerStats->get('no_show', 0),
         ];
 
         // ── Assemble ──────────────────────────────────────────────────────────

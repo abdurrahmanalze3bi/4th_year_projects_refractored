@@ -106,9 +106,6 @@ final class StaffOperationsController extends Controller
     public function userProfile(int $userId): JsonResponse
     {
         try {
-            // 9+ DB hits per investigation (profile + comments + score + rating + 6 ride/booking counts).
-            // Key is clean and per-user; TTL self-heals score/rating drift.
-            // Busted explicitly by StaffAdminController::approveVerification / rejectVerification.
             $data = Cache::remember("staff.user-profile.{$userId}", now()->addMinutes(2), function () use ($userId) {
                 $profile = Profile::with([
                     'user',
@@ -117,31 +114,39 @@ final class StaffOperationsController extends Controller
 
                 $user = $profile->user;
 
-                // ── Score ──────────────────────────────────────────────────
+                // ── Score ──────────────────────────────────────────────────────────
                 $userScore = $this->scoreService->getScore($user);
 
-                // ── Rating stats ───────────────────────────────────────────
+                // ── Rating stats ───────────────────────────────────────────────────
                 $ratingStats = UserRating::where('rated_user_id', $userId)
                     ->selectRaw('COUNT(*) as total, ROUND(AVG(rating), 2) as average')
                     ->first();
 
-                // ── Ride history counts ────────────────────────────────────
-                $driverBase    = \App\Models\Ride::where('driver_id', $userId);
-                $passengerBase = Booking::where('user_id', $userId);
+                // ── Ride history: as driver — 1 query instead of 3 ────────────────
+                $driverStats = \App\Models\Ride::where('driver_id', $userId)
+                    ->selectRaw('status, COUNT(*) as count')
+                    ->groupBy('status')
+                    ->pluck('count', 'status');
 
                 $asDriver = [
-                    'total'     => (clone $driverBase)->count(),
-                    'completed' => (clone $driverBase)->where('status', 'finished')->count(),
-                    'cancelled' => (clone $driverBase)->where('status', 'cancelled')->count(),
+                    'total'     => $driverStats->sum(),
+                    'completed' => $driverStats->get('finished', 0),
+                    'cancelled' => $driverStats->get('cancelled', 0),
                 ];
+
+                // ── Ride history: as passenger — 1 query instead of 3 ─────────────
+                $passengerStats = Booking::where('user_id', $userId)
+                    ->selectRaw('status, COUNT(*) as count')
+                    ->groupBy('status')
+                    ->pluck('count', 'status');
 
                 $asPassenger = [
-                    'total'     => (clone $passengerBase)->count(),
-                    'completed' => (clone $passengerBase)->where('status', 'completed')->count(),
-                    'cancelled' => (clone $passengerBase)->where('status', 'cancelled')->count(),
+                    'total'     => $passengerStats->sum(),
+                    'completed' => $passengerStats->get('completed', 0),
+                    'cancelled' => $passengerStats->get('cancelled', 0),
                 ];
 
-                // ── Comments received ──────────────────────────────────────
+                // ── Comments received ──────────────────────────────────────────────
                 $comments = $profile->comments->map(fn ($c) => [
                     'id'         => $c->id,
                     'comment'    => $c->comment,

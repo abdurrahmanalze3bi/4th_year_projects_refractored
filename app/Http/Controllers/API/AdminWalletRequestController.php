@@ -69,10 +69,15 @@ final class AdminWalletRequestController extends Controller
             (int) $request->get('page', 1)
         );
 
+        // 1 GROUP BY query instead of 3 separate COUNTs
+        $countRows = WalletRequest::selectRaw('status, COUNT(*) as total')
+            ->groupBy('status')
+            ->pluck('total', 'status');
+
         $counts = [
-            'pending'  => WalletRequest::where('status', 'pending')->count(),
-            'approved' => WalletRequest::where('status', 'approved')->count(),
-            'rejected' => WalletRequest::where('status', 'rejected')->count(),
+            'pending'  => (int) ($countRows['pending']  ?? 0),
+            'approved' => (int) ($countRows['approved'] ?? 0),
+            'rejected' => (int) ($countRows['rejected'] ?? 0),
         ];
 
         return response()->json([

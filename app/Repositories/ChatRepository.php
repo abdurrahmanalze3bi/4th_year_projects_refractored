@@ -16,7 +16,7 @@ class ChatRepository implements ChatRepositoryInterface
         array   $participants,
         string  $type  = 'private',
         ?string $title = null,
-        array   $roles = [],        // [userId => role]  — omitted keys → 'member'
+        array   $roles = [],
     ): Conversation {
         return DB::transaction(function () use ($participants, $type, $title, $roles) {
             $conversation = Conversation::create([
@@ -40,9 +40,21 @@ class ChatRepository implements ChatRepositoryInterface
         });
     }
 
+    /**
+     * Find a conversation with participants only.
+     *
+     * OPTIMIZED: Previously loaded ['participants', 'messages.sender'] —
+     * meaning ALL messages + ALL their senders were fetched and stored in Redis
+     * on every cache miss. A conversation with 100 messages was loading 100+
+     * records just to check if someone is a participant.
+     *
+     * Now loads only participants — the only relationship needed for
+     * isParticipant() checks. The cached object is tiny and fast to
+     * serialize/deserialize from Redis.
+     */
     public function findConversation(int $conversationId): ?Conversation
     {
-        return Conversation::with(['participants', 'messages.sender'])->find($conversationId);
+        return Conversation::with('participants')->find($conversationId);
     }
 
     public function findPrivateConversation(User $user1, User $user2): ?Conversation
@@ -53,10 +65,6 @@ class ChatRepository implements ChatRepositoryInterface
             ->first();
     }
 
-    /**
-     * Find an existing support conversation between a customer and an agent.
-     * Looks for type = 'support' so it is never confused with private chats.
-     */
     public function findSupportConversation(User $user, User $agent): ?Conversation
     {
         return Conversation::where('type', 'support')
@@ -67,12 +75,25 @@ class ChatRepository implements ChatRepositoryInterface
 
     public function getUserConversations(User $user): Collection
     {
-        return $user->conversations()
-            ->with(['participants', 'lastMessage.sender'])
-            ->orderBy('updated_at', 'desc')
+        return Conversation::whereHas('participants', fn($q) => $q->where('user_id', $user->id))
+            ->with([
+                'participants.profile',
+                'latestMessage.sender',
+            ])
+            ->latest('updated_at')
             ->get();
     }
-
+    /**
+     * Save a message and return it.
+     *
+     * OPTIMIZED: Previously called $message->load('sender', 'conversation')
+     * after every save — 2 extra DB queries. ChatMessageHandler immediately
+     * overwrites sender via setRelation() anyway, making those queries wasted.
+     * Conversation is not needed in the formatted response at all.
+     *
+     * Returning the bare message lets the handler attach the already-in-memory
+     * sender object (with profile) without touching the DB.
+     */
     public function sendMessage(
         int    $conversationId,
         int    $senderId,
@@ -92,7 +113,7 @@ class ChatRepository implements ChatRepositoryInterface
 
         Log::info('Message sent', ['message_id' => $message->id]);
 
-        return $message->load('sender', 'conversation');
+        return $message;
     }
 
     public function getMessages(int $conversationId, int $limit = 50, int $offset = 0): Collection
