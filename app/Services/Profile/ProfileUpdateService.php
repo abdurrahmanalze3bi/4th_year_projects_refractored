@@ -57,6 +57,9 @@ final class ProfileUpdateService
         private readonly FileUploadService $fileUploadService
     ) {}
 
+    // Fields that live on the users table, not the profiles table.
+    private const USER_MODEL_FIELDS = ['first_name', 'last_name', 'gender'];
+
     /**
      * Update user profile
      *
@@ -68,6 +71,20 @@ final class ProfileUpdateService
         if ($user->verification_status === 'pending') {
             $this->validateCriticalFieldsNotChanged($data);
         }
+
+        // ── Save User-model fields to the users table ─────────────────────
+        // first_name, last_name, and gender live on User, not Profile.
+        // Passing them to profileRepo would write to the wrong table.
+        $userFields = array_filter(
+            array_intersect_key($data, array_flip(self::USER_MODEL_FIELDS)),
+            fn ($v) => $v !== null
+        );
+        if (!empty($userFields)) {
+            $user->update($userFields);
+        }
+
+        // Strip User-model fields so profileRepo only receives Profile columns.
+        $data = array_diff_key($data, array_flip(self::USER_MODEL_FIELDS));
 
         // Process file uploads
         $fileData = $this->processFileUploads($user, $data);

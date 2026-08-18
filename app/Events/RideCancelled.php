@@ -17,7 +17,7 @@ use Illuminate\Queue\SerializesModels;
  *
  * FIXED: Explicit data arrays
  */
-class RideCancelled implements  ShouldBroadcastNow
+class RideCancelled implements  ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 

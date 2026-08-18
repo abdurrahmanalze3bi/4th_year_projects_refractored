@@ -21,7 +21,7 @@ use Illuminate\Support\Facades\DB;
 use App\Services\Payment\CashRideFeeService;
 use Illuminate\Support\Facades\Log;
 
-final class RideService
+final class  RideService
 {
     public function __construct(
         private readonly RideRepositoryInterface  $rideRepository,
