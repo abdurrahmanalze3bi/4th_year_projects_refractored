@@ -40,7 +40,11 @@ final class RideSearchService
         return $query
             ->with([
                 'driver' => function ($query) {
-                    $query->select('id', 'first_name', 'last_name', 'driver_rating');
+                    // There is no driver_rating column on users — ratings live in
+                    // user_ratings, so the average is aggregated into the alias
+                    // RideResource reads. One extra sub-select, no N+1.
+                    $query->select('id', 'first_name', 'last_name', 'avatar')
+                        ->withAvg('receivedRatings as driver_rating', 'rating');
                 },
                 'driver.profile' => function ($query) {
                     $query->select('user_id', 'profile_photo');
@@ -144,7 +148,10 @@ final class RideSearchService
                 "ST_Distance_Sphere(pickup_location, ST_GeomFromText(?, 4326)) <= ?",
                 [$pointWkt, $radiusMeters]
             )
-            ->with(['driver', 'driver.profile'])
+            ->with([
+                'driver' => fn ($query) => $query->withAvg('receivedRatings as driver_rating', 'rating'),
+                'driver.profile',
+            ])
             ->orderBy('departure_time', 'asc')
             ->get();
     }

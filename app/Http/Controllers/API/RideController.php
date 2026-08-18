@@ -542,7 +542,10 @@ class RideController extends Controller
     public function index(Request $request): JsonResponse
     {
         $rides = $this->rideService->getUserRides($request->user()->id);
-        $rides->load(['driver', 'driver.profile'])
+        $rides->load([
+            'driver' => fn ($query) => $query->withAvg('receivedRatings as driver_rating', 'rating'),
+            'driver.profile',
+        ])
             ->loadCount(['bookings as total_booked_seats' => function ($query) {
                 $query->select(DB::raw('COALESCE(SUM(seats), 0)'));
             }]);
