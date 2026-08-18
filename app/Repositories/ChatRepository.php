@@ -104,6 +104,25 @@ class ChatRepository implements ChatRepositoryInterface
             ->latest('updated_at')
             ->get();
     }
+
+    /**
+     * All support conversations, regardless of which agent is assigned.
+     *
+     * Support conversations are assigned to a single least-loaded agent at
+     * creation time (see ContactController), but any active staff member is
+     * meant to be able to read and reply to any of them from the staff
+     * dashboard — this is the shared-inbox listing behind that.
+     */
+    public function getAllSupportConversations(): Collection
+    {
+        return Conversation::where('type', 'support')
+            ->with([
+                'participants.profile',
+                'latestMessage.sender',
+            ])
+            ->latest('updated_at')
+            ->get();
+    }
     /**
      * Save a message and return it.
      *

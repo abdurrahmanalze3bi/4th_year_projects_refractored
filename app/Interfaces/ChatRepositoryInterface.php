@@ -34,6 +34,9 @@ interface ChatRepositoryInterface
 
     public function getUserConversations(User $user): Collection;
 
+    /** All support conversations, regardless of which agent is assigned — the staff shared inbox. */
+    public function getAllSupportConversations(): Collection;
+
     public function sendMessage(
         int     $conversationId,
         int     $senderId,

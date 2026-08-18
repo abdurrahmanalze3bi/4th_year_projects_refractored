@@ -20,6 +20,7 @@ use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\OtpController;
 use App\Http\Controllers\API\PassengerProfileController;
+use App\Http\Controllers\API\PolicyController;
 use App\Http\Controllers\API\ProfileController;
 use App\Http\Controllers\API\PushNotificationController;
 use App\Http\Controllers\API\RefreshTokenController;
@@ -28,6 +29,7 @@ use App\Http\Controllers\API\RideController;
 use App\Http\Controllers\API\ScoreController;
 use App\Http\Controllers\API\SignupController;
 use App\Http\Controllers\API\Staff\EmployeeManagementController;
+use App\Http\Controllers\API\Staff\PolicyManagementController;
 use App\Http\Controllers\API\Staff\StaffAuthController;
 use App\Http\Controllers\API\Staff\StaffChatController;      // ← NEW
 use App\Http\Controllers\API\Staff\StaffOperationsController;
@@ -307,6 +309,12 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
 });
 
 // ========================================
+// PUBLIC — POLICIES (privacy / cancellation text, shown before login too)
+// ========================================
+
+Route::get('/policies', [PolicyController::class, 'index']);
+
+// ========================================
 // ADMIN ROUTES
 // ========================================
 
@@ -395,6 +403,13 @@ Route::prefix('admin')->group(function () {
                 Route::get('/',                  [AdminDashboardController::class, 'pendingVerifications']);
                 Route::post('/{userId}/approve', [AdminDashboardController::class, 'approveVerification']);
                 Route::post('/{userId}/reject',  [AdminDashboardController::class, 'rejectVerification']);
+            });
+
+            // Privacy / cancellation policy text — Settings page.
+            Route::prefix('policies')->group(function () {
+                Route::get('/',         [PolicyManagementController::class, 'index']);
+                Route::put('/settings', [PolicyManagementController::class, 'updateSettings']);
+                Route::put('/{type}',   [PolicyManagementController::class, 'update']);
             });
 
         });
