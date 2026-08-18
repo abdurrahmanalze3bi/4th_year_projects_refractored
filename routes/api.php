@@ -267,6 +267,15 @@ Route::middleware(['jwt', 'throttle:api'])->group(function () {
         Route::delete('/{id}',      [NotificationController::class, 'destroy']);
     });
 
+    // ── Push notification tokens (FCM) ────────────────────────────────────────
+
+    Route::prefix('push-tokens')->group(function () {
+        Route::get('/',      [PushNotificationController::class, 'getUserTokens']);
+        Route::post('/',     [PushNotificationController::class, 'registerToken']);
+        Route::delete('/',   [PushNotificationController::class, 'removeToken']);
+        Route::post('/test', [PushNotificationController::class, 'testNotification']);
+    });
+
     // ── Wallet ────────────────────────────────────────────────────────────────
 
     Route::prefix('wallet')->group(function () {
