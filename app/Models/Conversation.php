@@ -1,10 +1,12 @@
 <?php
+
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Conversation extends Model
 {
@@ -37,8 +39,19 @@ class Conversation extends Model
         return $this->hasMany(Message::class)->latest();
     }
 
+    /**
+     * Check if a user is a participant in this conversation.
+     *
+     * OPTIMIZED: When participants are already eager loaded (e.g. from cache),
+     * this checks the in-memory collection — zero DB queries.
+     * Falls back to a DB exists() only when the relationship wasn't loaded.
+     */
     public function isParticipant(User $user): bool
     {
+        if ($this->relationLoaded('participants')) {
+            return $this->participants->contains('id', $user->id);
+        }
+
         return $this->participants()->where('user_id', $user->id)->exists();
     }
 
@@ -62,5 +75,9 @@ class Conversation extends Model
         return $this->participants()
             ->where('user_id', '!=', $currentUser->id)
             ->first();
+    }
+    public function latestMessage(): HasOne
+    {
+        return $this->hasOne(Message::class)->latestOfMany();
     }
 }

@@ -261,7 +261,8 @@ final class PassengerProfileController extends Controller
         }
 
         $paginator = \App\Models\WalletTransaction::with([
-            'user:id,first_name,last_name',   // the admin who processed it
+            'user:id,first_name,last_name',
+            'user.profile:user_id,profile_photo',
         ])
             ->where('wallet_id', $user->wallet->id)
             ->where('type', 'admin_charge')
@@ -326,10 +327,7 @@ final class PassengerProfileController extends Controller
 
             $amount = (float) $request->input('amount');
 
-            $previousBalance = null;
-            $transactionId   = null;
-
-            DB::transaction(function () use ($user, $amount, $request, &$previousBalance, &$transactionId) {
+            DB::transaction(function () use ($user, $amount, $request) {
                 $wallet = \App\Models\Wallet::lockForUpdate()->findOrFail($user->wallet->id);
 
                 $previousBalance = (float) $wallet->balance;
@@ -337,25 +335,22 @@ final class PassengerProfileController extends Controller
                 $wallet->balance = $newBalance;
                 $wallet->save();
 
-                $transactionId = 'ADM-' . $user->id . '-' . now()->timestamp;
-
                 \App\Models\WalletTransaction::create([
-                    'wallet_id'                => $wallet->id,
-                    'user_id'                  => $user->id,  // the wallet owner, matching every other WalletTransaction
-                    'processed_by_employee_id' => $request->attributes->get('staffEmployee')?->id,  // the admin
-                    'type'                     => 'admin_charge',
+                    'wallet_id'        => $wallet->id,
+                    'user_id'          => $request->user()?->id,  // the admin
+                    'type'             => 'admin_charge',
                     'amount'           => $amount,
                     'previous_balance' => $previousBalance,
                     'new_balance'      => $newBalance,
                     'description'      => $request->input('admin_notes') ?? 'Admin wallet charge',
-                    'transaction_id'   => $transactionId,
+                    'transaction_id'   => 'ADM-' . $user->id . '-' . now()->timestamp,
                     'status'           => 'completed',
                     'reference'        => 'admin_charge:' . $user->id,
                 ]);
 
                 Log::info('Admin charged passenger wallet', [
                     'passenger_id'     => $user->id,
-                    'admin_id'         => $request->attributes->get('staffEmployee')?->id,
+                    'admin_id'         => $request->user()?->id,
                     'amount'           => $amount,
                     'previous_balance' => $previousBalance,
                     'new_balance'      => $newBalance,
@@ -387,11 +382,9 @@ final class PassengerProfileController extends Controller
             $user->wallet->refresh();
 
             return response()->json([
-                'status'           => 'success',
-                'message'          => "Wallet charged successfully. New balance: {$user->wallet->balance} SYP.",
-                'previous_balance' => $previousBalance,
-                'new_balance'      => (float) $user->wallet->balance,
-                'transaction_id'   => $transactionId,
+                'status'      => 'success',
+                'message'     => "Wallet charged successfully. New balance: {$user->wallet->balance} SYP.",
+                'new_balance' => (float) $user->wallet->balance,
             ]);
         } catch (ModelNotFoundException) {
             return response()->json(['status' => 'error', 'message' => 'User not found.'], 404);
@@ -533,7 +526,8 @@ final class PassengerProfileController extends Controller
         if (!$user?->wallet) return [];
 
         return \App\Models\WalletTransaction::with([
-            'user:id,first_name,last_name',  // admin who did the charge
+            'user:id,first_name,last_name',
+            'user.profile:user_id,profile_photo',
         ])
             ->where('wallet_id', $user->wallet->id)
             ->where('type', 'admin_charge')

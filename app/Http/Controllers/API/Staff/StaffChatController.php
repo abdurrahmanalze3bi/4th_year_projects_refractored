@@ -237,16 +237,17 @@ final class StaffChatController extends Controller
      */
     private function formatConversation($conversation, User $agentUser): array
     {
-        $otherUser   = $conversation->getOtherParticipant($agentUser);
-        $lastMessage = $conversation->lastMessage->first();
+        // Zero DB queries — uses the already eager-loaded participants collection
+        $otherUser = $conversation->participants
+            ->firstWhere('id', '!=', $agentUser->id);
 
-        $profilePhoto = null;
-        if ($otherUser) {
-            $profile = Profile::where('user_id', $otherUser->id)->first();
-            if ($profile?->profile_photo) {
-                $profilePhoto = asset('storage/' . $profile->profile_photo);
-            }
-        }
+        // Zero DB queries — uses the already eager-loaded latestMessage relation
+        $lastMessage = $conversation->latestMessage;
+
+        // Zero DB queries — profile already loaded via participants.profile
+        $profilePhoto = $otherUser?->profile?->profile_photo
+            ? asset('storage/' . $otherUser->profile->profile_photo)
+            : null;
 
         return [
             'id'   => $conversation->id,
@@ -268,7 +269,7 @@ final class StaffChatController extends Controller
                 'content'        => $lastMessage->type === 'image'
                     ? asset('storage/' . $lastMessage->content)
                     : $lastMessage->content,
-                'sender_name'    => $lastMessage->sender?->first_name,
+                'sender_name'    => $lastMessage->sender?->first_name, // already eager-loaded
                 'sent_by_agent'  => $lastMessage->sender?->id === $agentUser->id,
                 'created_at'     => $lastMessage->created_at->diffForHumans(),
                 'created_at_iso' => $lastMessage->created_at->toIso8601String(),

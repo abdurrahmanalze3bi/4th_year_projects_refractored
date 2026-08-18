@@ -213,37 +213,37 @@ class ChatController extends Controller
      */
     private function formatConversation($conversation, $currentUser): array
     {
-        $otherParticipant = $conversation->getOtherParticipant($currentUser);
-        $lastMessage = $conversation->lastMessage->first();
+        // Zero DB queries — uses the already eager-loaded participants collection
+        $otherParticipant = $conversation->participants
+            ->firstWhere('id', '!=', $currentUser->id);
 
-        // Get profile photo for other participant
-        $profilePhoto = null;
-        if ($otherParticipant) {
-            $profile = \App\Models\Profile::where('user_id', $otherParticipant->id)->first();
-            if ($profile && $profile->profile_photo) {
-                if (\Illuminate\Support\Facades\Storage::disk('public')->exists($profile->profile_photo)) {
-                    $profilePhoto = asset('storage/' . $profile->profile_photo);
-                }
-            }
-        }
+        // Zero DB queries — uses the already eager-loaded latestMessage relation
+        $lastMessage = $conversation->latestMessage;
+
+        // Zero DB queries — profile already loaded via participants.profile
+        // Storage::exists() removed — return URL directly, let client handle missing image
+        $profilePhoto = $otherParticipant?->profile?->profile_photo
+            ? asset('storage/' . $otherParticipant->profile->profile_photo)
+            : null;
 
         return [
-            'id' => $conversation->id,
-            'type' => $conversation->type,
-            'title' => $conversation->title,
+            'id'                => $conversation->id,
+            'type'              => $conversation->type,
+            'title'             => $conversation->title,
             'other_participant' => $otherParticipant ? [
-                'id' => $otherParticipant->id,
-                'name' => $otherParticipant->first_name . ' ' . $otherParticipant->last_name,
+                'id'            => $otherParticipant->id,
+                'name'          => $otherParticipant->first_name . ' ' . $otherParticipant->last_name,
                 'profile_photo' => $profilePhoto,
             ] : null,
             'last_message' => $lastMessage ? [
-                'content' => $lastMessage->type === 'image'
+                'content'     => $lastMessage->type === 'image'
                     ? asset('storage/' . $lastMessage->content)
                     : $lastMessage->content,
-                'sender_name' => $lastMessage->sender->first_name,
-                'created_at' => $lastMessage->created_at->diffForHumans(),
+                'sender_name' => $lastMessage->sender->first_name, // already eager-loaded
+                'created_at'  => $lastMessage->created_at->diffForHumans(),
             ] : null,
             'updated_at' => $conversation->updated_at->toIso8601String(),
         ];
     }
+
 }

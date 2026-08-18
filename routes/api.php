@@ -85,7 +85,7 @@ Route::pattern('commentId',      '[0-9]+');
 // UTILITY / DEBUG — no throttle
 // Remove /test-db before production (exposes DB config)
 // ========================================
-
+Route::get('/ping', fn() => response()->json(['ok' => true]));
 Route::get('/test', fn () => response()->json([
     'message'   => 'API is working!',
     'timestamp' => now(),
