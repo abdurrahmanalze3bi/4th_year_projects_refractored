@@ -99,6 +99,11 @@ final class RideSearchService
 
     /**
      * Match rides where route passes near search points
+     *
+     * The corridor is measured with a planar ST_Distance on SRID 0 geometries rather
+     * than ST_Contains(ST_Buffer(...)): MySQL cannot buffer a LINESTRING in a geographic
+     * SRS (error 3618), and forcing both operands to SRID 0 also keeps the GeoJSON
+     * lon/lat axis order aligned with the POINT(lng lat) WKT built above.
      */
     private function applyRouteMatching(Builder $query, string $srcWkt, string $dstWkt): void
     {
@@ -109,25 +114,19 @@ final class RideSearchService
             ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates')) = 'ARRAY'")
             // Check if source point is near route
             ->whereRaw(
-                "ST_Contains(
-                    ST_Buffer(
-                        ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry)),
-                        ?
-                    ),
-                    ST_GeomFromText(?, 4326)
-                )",
-                [self::ROUTE_BUFFER_DEGREES, $srcWkt]
+                "ST_Distance(
+                    ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry), 1, 0),
+                    ST_GeomFromText(?, 0)
+                ) <= ?",
+                [$srcWkt, self::ROUTE_BUFFER_DEGREES]
             )
             // Check if destination point is near route
             ->whereRaw(
-                "ST_Contains(
-                    ST_Buffer(
-                        ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry)),
-                        ?
-                    ),
-                    ST_GeomFromText(?, 4326)
-                )",
-                [self::ROUTE_BUFFER_DEGREES, $dstWkt]
+                "ST_Distance(
+                    ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry), 1, 0),
+                    ST_GeomFromText(?, 0)
+                ) <= ?",
+                [$dstWkt, self::ROUTE_BUFFER_DEGREES]
             );
     }
 

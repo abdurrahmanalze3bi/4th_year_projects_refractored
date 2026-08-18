@@ -147,7 +147,8 @@ final class RouteCalculationService
         return [
             'distance' => (float) $route['summary']['distance'], // meters
             'duration' => (float) $route['summary']['duration'], // seconds
-            'geometry' => $this->decodeGeometry($route['geometry'] ?? null),
+            'geometry' => $route['geometry']['coordinates'] ?? [],
+//             'geometry' => $this->decodeGeometry($route['geometry'] ?? null),
         ];
     }
 
