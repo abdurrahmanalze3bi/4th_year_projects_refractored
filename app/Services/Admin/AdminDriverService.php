@@ -2,6 +2,7 @@
 
 namespace App\Services\Admin;
 
+use App\Interfaces\PolicyRepositoryInterface;
 use App\Models\Booking;
 use App\Models\Photo;
 use App\Models\Profile;
@@ -43,6 +44,10 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
  */
 final class AdminDriverService
 {
+    public function __construct(
+        private readonly PolicyRepositoryInterface $policySettings,
+    ) {}
+
     // =========================================================================
     // BFF – full dashboard in one call
     // =========================================================================
@@ -319,11 +324,12 @@ final class AdminDriverService
             ? round(($cancelledRides / $totalRides) * 100, 1)
             : 0.0;
 
-        // Earnings = SUM(seats × price_per_seat × 0.95) across completed bookings
+        // Earnings = SUM(seats × price_per_seat × driver share) across completed bookings
+        $driverSharePct = (100 - $this->policySettings->getPlatformProfitPercentage()) / 100;
         $totalEarnings = Booking::join('rides', 'bookings.ride_id', '=', 'rides.id')
             ->where('rides.driver_id', $driverId)
             ->where('bookings.status', 'completed')
-            ->selectRaw('SUM(bookings.seats * rides.price_per_seat * 0.95) as total')
+            ->selectRaw('SUM(bookings.seats * rides.price_per_seat * ?) as total', [$driverSharePct])
             ->value('total') ?? 0.0;
 
         // ── Recent rides ──────────────────────────────────────────────────────
@@ -374,7 +380,7 @@ final class AdminDriverService
                 'completed_rides' => $completedRides,
                 'cancelled_rides' => $cancelledRides,
                 'cancel_rate'     => $cancelRate,                        // e.g. 2.4 (%)
-                'total_earnings'  => round((float) $totalEarnings, 2),  // after 5% commission
+                'total_earnings'  => round((float) $totalEarnings, 2),  // after platform commission
             ],
 
             'vehicle' => [

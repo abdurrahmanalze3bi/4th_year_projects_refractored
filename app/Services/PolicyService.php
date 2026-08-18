@@ -102,6 +102,7 @@ class PolicyService
             'contact_phone' => $settings->contact_phone,
             'contact_address' => $settings->contact_address,
             'consent_label' => $settings->consent_label,
+            'platform_profit_percentage' => (float) $settings->platform_profit_percentage,
         ];
     }
 }

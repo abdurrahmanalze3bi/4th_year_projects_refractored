@@ -18,6 +18,7 @@ class PolicySetting extends Model
         'contact_phone',
         'contact_address',
         'consent_label',
+        'platform_profit_percentage',
         'updated_by',
     ];
 

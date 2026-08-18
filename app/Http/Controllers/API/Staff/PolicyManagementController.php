@@ -129,6 +129,7 @@ final class PolicyManagementController extends Controller
             'contact_phone' => 'required|string|max:50',
             'contact_address' => 'required|string|max:255',
             'consent_label' => 'required|string|max:255',
+            'platform_profit_percentage' => 'required|numeric|min:0|max:100',
         ]);
 
         if ($validator->fails()) {

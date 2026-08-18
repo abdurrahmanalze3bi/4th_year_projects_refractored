@@ -18,4 +18,6 @@ interface PolicyRepositoryInterface
     public function getSettings(): PolicySetting;
 
     public function updateSettings(array $data): PolicySetting;
+
+    public function getPlatformProfitPercentage(): float;
 }

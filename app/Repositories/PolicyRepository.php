@@ -36,4 +36,9 @@ class PolicyRepository implements PolicyRepositoryInterface
 
         return $settings->fresh();
     }
+
+    public function getPlatformProfitPercentage(): float
+    {
+        return (float) $this->getSettings()->platform_profit_percentage;
+    }
 }
