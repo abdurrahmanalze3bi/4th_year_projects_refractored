@@ -9,32 +9,47 @@ use App\Models\User;
 /**
  * Payment Strategy Interface
  *
- * Defines the contract for all payment methods.
- * Each payment method (cash, e-pay, etc.) implements this interface.
- *
- * PaymentResult and RefundResult are now in their own files:
- *   - App\Domain\Payment\Strategies\PaymentResult
- *   - App\Domain\Payment\Strategies\RefundResult
+ * Three operations:
+ *   processBookingPayment  – called when passenger books (escrow / hold)
+ *   processRideCompletion  – called when THAT passenger confirms (release to driver)
+ *   processRefund          – called when a booking is cancelled
  */
 interface PaymentStrategy
 {
     /**
-     * Process payment for a booking
+     * Charge the passenger at booking time.
+     * For e-pay: deduct from passenger wallet → platform escrow.
+     * For cash:  no-op (payment will be collected offline).
      */
-    public function processBookingPayment(Booking $booking, Ride $ride, User $passenger): PaymentResult;
+    public function processBookingPayment(
+        Booking $booking,
+        Ride    $ride,
+        User    $passenger,
+    ): PaymentResult;
 
     /**
-     * Process refund for a cancelled booking
+     * Release payment to the driver when a specific passenger confirms.
+     *
+     * Called ONCE PER BOOKING, not once per ride.
+     * For e-pay: release this passenger's escrow share → driver wallet.
+     * For cash:  no-op (driver already collected cash in person).
      */
-    public function processRefund(Booking $booking, Ride $ride, User $passenger): RefundResult;
+    public function processRideCompletionPayment(
+        Booking $booking,
+        Ride    $ride,
+        User    $driver,
+    ): PaymentResult;
 
     /**
-     * Check if this strategy can process the given payment method
+     * Refund a cancelled booking.
      */
+    public function processRefund(
+        Booking $booking,
+        Ride    $ride,
+        User    $passenger,
+    ): RefundResult;
+
     public function canProcess(string $paymentMethod): bool;
 
-    /**
-     * Get the payment method identifier
-     */
     public function getPaymentMethod(): string;
 }

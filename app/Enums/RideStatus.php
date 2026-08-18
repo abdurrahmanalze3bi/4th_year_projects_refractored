@@ -5,68 +5,74 @@ namespace App\Enums;
 /**
  * Ride Status Enum
  *
- * Eliminates magic strings throughout the codebase
- * Provides type safety and IDE autocomplete
+ * Life-cycle:
+ *   active  →  (departure time passes)  →  launched  →  finished
+ *              ↑ lazy flip on first                ↑ when last non-cancelled
+ *                passenger confirm                   booking reaches terminal state
+ *
+ * LAUNCHED replaces the old awaiting_confirmation value.
+ * The old DB value is kept in the enum for backward-compat with any
+ * existing rows; new rides will only ever use 'launched'.
  */
 enum RideStatus: string
 {
-    case ACTIVE = 'active';
-    case FULL = 'full';
-    case CANCELLED = 'cancelled';
-    case FINISHED = 'finished';
+    case ACTIVE                = 'active';
+    case FULL                  = 'full';
+    case CANCELLED             = 'cancelled';
+    case FINISHED              = 'finished';
+
+    /** Ride has departed; passengers can now confirm. Replaces awaiting_confirmation. */
+    case LAUNCHED              = 'launched';
+
+    /** @deprecated – kept so old DB rows still deserialize correctly. Use LAUNCHED. */
     case AWAITING_CONFIRMATION = 'awaiting_confirmation';
 
-    /**
-     * Get human-readable label
-     */
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
     public function label(): string
     {
-        return match($this) {
-            self::ACTIVE => 'Active',
-            self::FULL => 'Full',
-            self::CANCELLED => 'Cancelled',
-            self::FINISHED => 'Finished',
+        return match ($this) {
+            self::ACTIVE                => 'Active',
+            self::FULL                  => 'Full',
+            self::CANCELLED             => 'Cancelled',
+            self::FINISHED              => 'Finished',
+            self::LAUNCHED              => 'Launched',
             self::AWAITING_CONFIRMATION => 'Awaiting Confirmation',
         };
     }
 
-    /**
-     * Check if ride can accept new bookings
-     */
     public function canBeBooked(): bool
     {
         return in_array($this, [self::ACTIVE, self::FULL]);
     }
 
-    /**
-     * Check if ride is in a terminal state
-     */
     public function isTerminal(): bool
     {
         return in_array($this, [self::CANCELLED, self::FINISHED]);
     }
 
     /**
-     * Get all bookable statuses
+     * Is the ride in a state where passengers can confirm completion?
+     * Covers both the new 'launched' and the legacy 'awaiting_confirmation'.
      */
-    public static function bookableStatuses(): array
+    public function isConfirmable(): bool
     {
-        return [
-            self::ACTIVE->value,
-            self::FULL->value,
-        ];
+        return in_array($this, [self::LAUNCHED, self::AWAITING_CONFIRMATION]);
     }
 
-    /**
-     * Get color for UI display
-     */
+    public static function bookableStatuses(): array
+    {
+        return [self::ACTIVE->value, self::FULL->value];
+    }
+
     public function color(): string
     {
-        return match($this) {
-            self::ACTIVE => 'green',
-            self::FULL => 'orange',
-            self::CANCELLED => 'red',
-            self::FINISHED => 'blue',
+        return match ($this) {
+            self::ACTIVE                => 'green',
+            self::FULL                  => 'orange',
+            self::CANCELLED             => 'red',
+            self::FINISHED              => 'blue',
+            self::LAUNCHED              => 'purple',
             self::AWAITING_CONFIRMATION => 'yellow',
         };
     }

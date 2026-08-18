@@ -2,11 +2,13 @@
 
 namespace App\Services\Ride;
 
+use App\Domain\Payment\Strategies\PaymentStrategyFactory;
 use App\DTOs\Ride\BookRideDTO;
 use App\Enums\BookingStatus;
 use App\Enums\BookingType;
 use App\Enums\PaymentMethod;
 use App\Enums\RideStatus;
+use App\Enums\ScoreAction;
 use App\Events\RideBooked;
 use App\Interfaces\RideRepositoryInterface;
 use App\Models\Booking;
@@ -29,7 +31,9 @@ final class BookingService
         private readonly NotificationService      $notificationService,
         private readonly RideValidationService    $validationService,
         private readonly ScoreService             $scoreService,
+        private readonly PaymentStrategyFactory   $paymentFactory,   // ← NEW
     ) {}
+
 
     // =========================================================================
     // BOOK RIDE
@@ -493,39 +497,117 @@ final class BookingService
      * Once the driver AND all confirmed passengers have confirmed,
      * RideService::checkAndCompleteRide() releases payment and records scores.
      */
+
     public function passengerConfirmCompletion(int $bookingId, User $passenger): array
     {
-        $booking = Booking::with('ride')->findOrFail($bookingId);
-        $ride    = $booking->ride;
+        return DB::transaction(function () use ($bookingId, $passenger) {
 
-        if ($booking->user_id !== $passenger->id) {
-            throw new \InvalidArgumentException('Only the booking passenger can confirm completion');
-        }
-        if ($ride->status !== RideStatus::AWAITING_CONFIRMATION->value) {
-            throw new \InvalidArgumentException('Ride is not awaiting confirmation');
-        }
-        if ($booking->status !== BookingStatus::CONFIRMED->value) {
-            throw new \InvalidArgumentException('Only confirmed bookings can be confirmed for completion');
-        }
-        if ($booking->passenger_confirmed_at) {
-            throw new \InvalidArgumentException('You have already confirmed this ride');
-        }
+            // ── Lock booking to prevent concurrent double-confirm ──────────────
+            $booking = Booking::lockForUpdate()->findOrFail($bookingId);
 
-        DB::transaction(function () use ($booking) {
-            $booking->passenger_confirmed_at = now();
-            $booking->save();
+            // ── Authorization ─────────────────────────────────────────────────
+            if ((int) $booking->user_id !== (int) $passenger->id) {
+                throw new \InvalidArgumentException('You can only confirm your own bookings.');
+            }
+
+            // ── State check ───────────────────────────────────────────────────
+            if ($booking->status !== BookingStatus::CONFIRMED->value) {
+                $msg = match ($booking->status) {
+                    BookingStatus::COMPLETED->value => 'You have already confirmed this ride.',
+                    BookingStatus::CANCELLED->value => 'This booking has been cancelled.',
+                    'no_show'                       => 'This booking was marked as a no-show.',
+                    default                         => 'This booking cannot be confirmed in its current state.',
+                };
+                throw new \InvalidArgumentException($msg);
+            }
+
+            // ── Lock the ride row too ─────────────────────────────────────────
+            $ride = Ride::lockForUpdate()->findOrFail($booking->ride_id);
+
+            // ── DEPARTURE TIME GATE ───────────────────────────────────────────
+            // Replaces the old driver "finish" button entirely.
+            // Passengers can confirm only after the scheduled departure time.
+            if (now()->lt($ride->departure_time)) {
+                throw new \InvalidArgumentException(
+                    'The ride has not departed yet. Confirmation opens after the departure time.'
+                );
+            }
+
+            // ── LAZY TRANSITION: active / full → launched ─────────────────────
+            // The first passenger to confirm after departure flips the ride status.
+            // Subsequent confirmations find it already in 'launched' and proceed.
+            if (in_array($ride->status, [RideStatus::ACTIVE->value, RideStatus::FULL->value])) {
+                $ride->status = RideStatus::LAUNCHED->value;
+                $ride->save();
+            } elseif ($ride->status !== RideStatus::LAUNCHED->value) {
+                throw new \InvalidArgumentException(
+                    "This ride cannot be confirmed (current status: {$ride->status})."
+                );
+            }
+
+            // ── Mark this booking as completed ────────────────────────────────
+            $booking->update([
+                'status'       => BookingStatus::COMPLETED->value,
+                'completed_at' => now(),
+            ]);
+
+            // ── Release payment to driver for THIS passenger's share ──────────
+            // FIX: $this->paymentFactory  (NOT $this->paymentStrategyFactory)
+            $strategy      = $this->paymentFactory->make($ride->payment_method);
+            $paymentResult = $strategy->processRideCompletionPayment($booking, $ride, $passenger);
+
+            if (!$paymentResult->success) {
+                throw new \RuntimeException(
+                    'Payment release failed: ' . $paymentResult->message
+                );
+            }
+
+            // ── Award passenger +10 score immediately ─────────────────────────
+            // Passenger gets their score right now, independent of all others.
+            // FIX: applyAction()  (method that actually exists in ScoreService)
+            $this->scoreService->applyAction(
+                user:      $passenger,
+                action:    ScoreAction::RIDE_COMPLETED,
+                reference: $booking,
+            );
+
+            // ── Check if the ride is fully done ───────────────────────────────
+            // Terminal booking states: completed, cancelled, no_show.
+            // Ride finishes only when EVERY booking has reached one of those.
+            $unresolvedCount = Booking::where('ride_id', $ride->id)
+                ->whereNotIn('status', [
+                    BookingStatus::COMPLETED->value,
+                    BookingStatus::CANCELLED->value,
+                    'no_show',
+                ])
+                ->count();
+
+            $rideNowFinished = ($unresolvedCount === 0);
+
+            if ($rideNowFinished) {
+                $ride->status = RideStatus::FINISHED->value;
+                $ride->save();
+
+                // Award driver +10 score once the whole ride finishes.
+                $driver = User::find($ride->driver_id);
+                if ($driver) {
+                    $this->scoreService->applyAction(
+                        user:      $driver,
+                        action:    ScoreAction::RIDE_COMPLETED,
+                        reference: $ride,
+                    );
+                }
+            }
+
+            return [
+                'message'       => $rideNowFinished
+                    ? 'Confirmed. All passengers done — ride is now finished.'
+                    : 'Confirmed successfully.',
+                'ride_finished' => $rideNowFinished,
+            ];
         });
-
-        Log::info('Passenger confirmed ride completion', [
-            'booking_id'   => $booking->id,
-            'passenger_id' => $passenger->id,
-        ]);
-
-        // Trigger check — completes ride if all parties have now confirmed
-        app(RideService::class)->checkAndCompleteRide($ride->fresh());
-
-        return ['message' => 'Confirmation received. Waiting for all parties to confirm.'];
     }
+
 
     // =========================================================================
     // GETTERS

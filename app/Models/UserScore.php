@@ -103,4 +103,14 @@ class UserScore extends Model
     {
         $this->increment('total_cancellations');
     }
+
+    public function setCancelRateAttribute(mixed $value): void
+    {
+        // computed from total_cancellations / total_rides — never stored
+    }
+
+    public function setTierAttribute(mixed $value): void
+    {
+        // computed from score — never stored
+    }
 }

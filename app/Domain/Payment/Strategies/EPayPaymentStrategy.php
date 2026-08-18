@@ -9,33 +9,61 @@ use App\Services\Payment\WalletTransactionService;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 
 /**
- * E-Pay Payment Strategy
+ * E-Pay Payment Strategy  (wallet-based)
  *
- * Handles wallet-based payments.
- * Transfers money from passenger wallet to driver wallet.
+ * Money flow:
+ *   booking   → chargePassengerForBooking   : passenger wallet → escrow
+ *   confirm   → releaseEscrowToDriver       : escrow → driver wallet (minus cut)
+ *   cancel    → refundPassengersFor…        : escrow → passenger wallet
  */
 final class EPayPaymentStrategy implements PaymentStrategy
 {
     public function __construct(
-        private WalletTransactionService $walletService
+        private readonly WalletTransactionService $walletService,
     ) {}
 
-    public function processBookingPayment(Booking $booking, Ride $ride, User $passenger): PaymentResult
-    {
+    // ── Book ─────────────────────────────────────────────────────────────────
+
+    public function processBookingPayment(
+        Booking $booking,
+        Ride    $ride,
+        User    $passenger,
+    ): PaymentResult {
         try {
             $this->walletService->chargePassengerForBooking($booking, $ride, $passenger);
-            return PaymentResult::success('Payment processed successfully');
+            return PaymentResult::success('Payment held in escrow');
         } catch (\Exception $e) {
             return PaymentResult::failure($e->getMessage());
         }
     }
 
-    public function processRefund(Booking $booking, Ride $ride, User $passenger): RefundResult
-    {
+    // ── Confirm (per-passenger) ──────────────────────────────────────────────
+
+    /**
+     * Called once for each booking when THAT passenger confirms.
+     * Releases this passenger's share from escrow to the driver's wallet.
+     */
+    public function processRideCompletionPayment(
+        Booking $booking,
+        Ride    $ride,
+        User    $passenger,
+    ): PaymentResult {
         try {
-            // WalletTransactionService::refundPassengersForDriverCancellation()
-            // requires an Illuminate\Database\Eloquent\Collection, not the
-            // plain Support\Collection that collect() returns.
+            $driver = $ride->driver;   // ← derive driver from ride; passenger is the confirmer
+            $this->walletService->releaseEscrowToDriver($booking, $ride, $driver);
+            return PaymentResult::success('Escrow released to driver');
+        } catch (\Exception $e) {
+            return PaymentResult::failure($e->getMessage());
+        }
+    }
+    // ── Refund ───────────────────────────────────────────────────────────────
+
+    public function processRefund(
+        Booking $booking,
+        Ride    $ride,
+        User    $passenger,
+    ): RefundResult {
+        try {
             $bookings = new EloquentCollection([$booking]);
             $this->walletService->refundPassengersForDriverCancellation($ride, $bookings);
             return RefundResult::success('Refund processed successfully');
@@ -43,6 +71,8 @@ final class EPayPaymentStrategy implements PaymentStrategy
             return RefundResult::failure($e->getMessage());
         }
     }
+
+    // ── Meta ─────────────────────────────────────────────────────────────────
 
     public function canProcess(string $paymentMethod): bool
     {

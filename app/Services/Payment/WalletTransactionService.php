@@ -3,6 +3,7 @@
 namespace App\Services\Payment;
 
 use App\Models\Booking;
+use App\Models\Employee;
 use App\Models\Ride;
 use App\Models\User;
 use App\Models\Wallet;
@@ -629,5 +630,160 @@ class WalletTransactionService
         if ($wallet->balance < $required) {
             throw new \RuntimeException($message);
         }
+    }
+
+
+    /**
+     * ══════════════════════════════════════════════════════════════════════════
+     * PASTE THIS METHOD INTO:
+     *   app/Services/Payment/WalletTransactionService.php
+     *
+     * PLACE IT after chargePassengerForBooking() — they are paired operations.
+     *
+     * IMPORTS TO ADD at the top of WalletTransactionService if not already there:
+     *   use App\Models\Booking;
+     *   use App\Models\Ride;
+     *   use App\Models\User;
+     *   use App\Models\Wallet;
+     *   use App\Models\WalletTransaction;
+     *   use App\Models\Employee;
+     *   use Illuminate\Support\Facades\DB;
+     *   use Illuminate\Support\Facades\Log;
+     * ══════════════════════════════════════════════════════════════════════════
+     */
+
+    /**
+     * Release a single passenger's escrowed funds to the driver.
+     *
+     * Called once per passenger when they confirm trip completion.
+     * Money flow:
+     *   admin escrow wallet  →  driver wallet (95%)
+     *                        →  SyCash wallet (5%)
+     *
+     * Must be called inside a DB::transaction() — the caller (BookingService)
+     * wraps the whole confirmation in one.
+     *
+     * @throws \RuntimeException if the escrow or driver wallet cannot be found,
+     *                           or if the escrow has insufficient balance.
+     */
+
+
+    /**
+     * ══════════════════════════════════════════════════════════════════════════════
+     * FIND and REPLACE the entire releaseEscrowToDriver() method in:
+     *   app/Services/Payment/WalletTransactionService.php
+     *
+     * The old version deducted from system_admin's wallet, which is WRONG.
+     * The escrow is held in the SyCash wallet (chargePassengerForBooking puts
+     * money there), so the release must come FROM SyCash too.
+     *
+     * This version mirrors releaseEarningsToDriver() but for ONE booking,
+     * not the whole ride — so it can be called per-passenger.
+     * ══════════════════════════════════════════════════════════════════════════════
+     *
+     * MONEY FLOW (matches chargePassengerForBooking exactly):
+     *   SyCash (escrow)  →  Driver wallet   (95%)
+     *   SyCash (escrow)  →  Primary Admin   (5%)
+     */
+
+    /**
+     * Release ONE passenger's escrowed share to the driver.
+     *
+     * Called by BookingService::passengerConfirmCompletion() once per booking
+     * when that specific passenger confirms the ride.
+     *
+     * Must be called inside a DB::transaction() — BookingService already does this.
+     *
+     * @throws \RuntimeException  if SyCash has insufficient balance,
+     *                            or if any required wallet is missing.
+     */
+    public function releaseEscrowToDriver(Booking $booking, Ride $ride, User $driver): void
+    {
+        $total        = round((float) ($booking->seats * $ride->price_per_seat), 2);
+        $driverShare  = round($total * 0.95, 2);
+        $primaryShare = round($total - $driverShare, 2); // subtract to avoid float drift
+
+        // ── Lock all three wallets (same order as everywhere else to prevent deadlock) ──
+        $syCashWallet  = $this->lockWalletByPhone(config('admin.sycash.phone'));
+        $primaryWallet = $this->lockWalletByPhone(config('admin.system_admin.phone'));
+        $driverWallet  = $this->lockWalletByUserId($driver->id);
+
+        // ── Guard: SyCash must have enough to release ─────────────────────────────
+        $this->assertSufficientBalance(
+            $syCashWallet,
+            $total,
+            "SyCash escrow has insufficient balance to release booking #{$booking->id}. "
+            . "Required: {$total} SYP. Available: {$syCashWallet->balance} SYP."
+        );
+
+        // ── Snapshot previous balances ────────────────────────────────────────────
+        $syCashPrev  = (float) $syCashWallet->balance;
+        $driverPrev  = (float) $driverWallet->balance;
+        $primaryPrev = (float) $primaryWallet->balance;
+
+        // ── Apply balance changes ─────────────────────────────────────────────────
+        $syCashWallet->balance  = $syCashPrev  - $total;
+        $driverWallet->balance  = $driverPrev  + $driverShare;
+        $primaryWallet->balance = $primaryPrev + $primaryShare;
+
+        $syCashWallet->save();
+        $driverWallet->save();
+        $primaryWallet->save();
+
+        // ── Transaction IDs ───────────────────────────────────────────────────────
+        $ts    = now()->timestamp;
+        $txId  = 'ESC_REL_' . $booking->id . '_' . $ts;
+        $txRef = "booking:{$booking->id}";
+
+        // ── 1. SyCash debit (escrow released) ────────────────────────────────────
+        WalletTransaction::create([
+            'wallet_id'        => $syCashWallet->id,
+            'user_id'          => null,
+            'type'             => 'escrow_release',
+            'amount'           => -$total,
+            'previous_balance' => $syCashPrev,
+            'new_balance'      => (float) $syCashWallet->balance,
+            'description'      => "Escrow released — booking #{$booking->id}, {$booking->seats} seat(s)",
+            'transaction_id'   => 'SYCASH_' . $txId,
+            'status'           => 'completed',
+            'reference'        => $txRef,
+        ]);
+
+        // ── 2. Driver credit (95%) ────────────────────────────────────────────────
+        WalletTransaction::create([
+            'wallet_id'        => $driverWallet->id,
+            'user_id'          => $driver->id,
+            'type'             => 'ride_earning',
+            'amount'           => $driverShare,
+            'previous_balance' => $driverPrev,
+            'new_balance'      => (float) $driverWallet->balance,
+            'description'      => "Earnings (95%) — booking #{$booking->id}, {$booking->seats} seat(s)",
+            'transaction_id'   => 'DRIVER_' . $txId,
+            'status'           => 'completed',
+            'reference'        => $txRef,
+        ]);
+
+        // ── 3. Primary Admin credit (5%) ──────────────────────────────────────────
+        WalletTransaction::create([
+            'wallet_id'        => $primaryWallet->id,
+            'user_id'          => null,
+            'type'             => 'platform_fee',
+            'amount'           => $primaryShare,
+            'previous_balance' => $primaryPrev,
+            'new_balance'      => (float) $primaryWallet->balance,
+            'description'      => "Platform fee (5%) — booking #{$booking->id}",
+            'transaction_id'   => 'PRIMARY_' . $txId,
+            'status'           => 'completed',
+            'reference'        => $txRef,
+        ]);
+
+        Log::info('Escrow released per passenger confirmation', [
+            'booking_id'    => $booking->id,
+            'ride_id'       => $ride->id,
+            'driver_id'     => $driver->id,
+            'total'         => $total,
+            'driver_share'  => $driverShare,
+            'primary_share' => $primaryShare,
+        ]);
     }
 }
