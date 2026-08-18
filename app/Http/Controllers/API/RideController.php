@@ -12,6 +12,7 @@ use App\Http\Requests\BookRideRequest;
 use App\Http\Resources\CityTripResource;
 use App\Http\Resources\RideResource;
 use App\Http\Resources\BookingResource;
+use App\Models\Ride;
 use App\Services\Geocoding\GeocodingService;
 use App\Services\Geocoding\RouteCalculationService;
 use App\Services\Ride\CityTripService;
@@ -344,7 +345,16 @@ class RideController extends Controller
     public function getRides(Request $request): JsonResponse
     {
         try {
-            $rides = $this->rideService->getDriverRides($request->user()->id);
+            // Same payload shape as always, except route_geometry is trimmed to
+            // the path's start and end point — the full polyline is thousands of
+            // coordinates per ride and this endpoint returns every ride a driver
+            // has. GET /rides/{id} still returns the complete line for the map.
+            $rides = $this->rideService->getDriverRides($request->user()->id)
+                ->map(function (Ride $ride) {
+                    return array_merge($ride->toArray(), [
+                        'route_geometry' => $ride->routeEndpoints(),
+                    ]);
+                });
 
             return response()->json([
                 'success' => true,
@@ -799,10 +809,16 @@ class RideController extends Controller
                 );
                 $validated['distance']       = $validated['distance']  ?? $route['distance'];
                 $validated['duration']       = $validated['duration']  ?? $route['duration'];
-                $validated['route_geometry'] = $validated['route_geometry'] ?? [
-                    'type'        => 'LineString',
-                    'coordinates' => $route['geometry'],
-                ];
+                if (empty($validated['route_geometry'])) {
+                    // Only persist a geometry the routing service actually returned.
+                    // A LineString with fewer than two positions is not valid GeoJSON,
+                    // and ST_GeomFromGeoJSON rejects it later during ride search —
+                    // null is the same "no route" state the repository already stores.
+                    $geometry = $route['geometry'] ?? null;
+                    $validated['route_geometry'] = (is_array($geometry) && count($geometry) >= 2)
+                        ? ['type' => 'LineString', 'coordinates' => $geometry]
+                        : null;
+                }
             }
 
             $dto  = CreateRideDTO::fromRequest($validated, $request->user()->id);

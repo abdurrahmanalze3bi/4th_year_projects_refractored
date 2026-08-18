@@ -353,6 +353,12 @@ class RideRepository implements RideRepositoryInterface
                         ->whereRaw("JSON_VALID(route_geometry)")
                         ->whereRaw("JSON_EXTRACT(route_geometry, '$.coordinates') IS NOT NULL")
                         ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates')) = 'ARRAY'")
+                        // A LineString needs at least two positions, and each position
+                        // must itself be an array. ST_GeomFromGeoJSON raises error 3072
+                        // on anything else, and that aborts the whole query rather than
+                        // skipping the row, so one malformed ride would 500 every search.
+                        ->whereRaw("JSON_LENGTH(JSON_EXTRACT(route_geometry, '$.coordinates')) >= 2")
+                        ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates[0]')) = 'ARRAY'")
                         ->whereRaw(
                             "ST_Distance(ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry), 1, 0), ST_GeomFromText(?, 0)) <= ?",
                             [$srcWkt, $routeBufferDegrees]

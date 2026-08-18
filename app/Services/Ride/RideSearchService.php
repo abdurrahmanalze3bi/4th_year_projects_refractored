@@ -116,6 +116,12 @@ final class RideSearchService
             ->whereRaw("JSON_VALID(route_geometry)")
             ->whereRaw("JSON_EXTRACT(route_geometry, '$.coordinates') IS NOT NULL")
             ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates')) = 'ARRAY'")
+            // A LineString needs at least two positions, and each position must
+            // itself be an array. ST_GeomFromGeoJSON raises error 3072 on anything
+            // else, and that aborts the whole query rather than skipping the row,
+            // so a single malformed ride would 500 the entire search.
+            ->whereRaw("JSON_LENGTH(JSON_EXTRACT(route_geometry, '$.coordinates')) >= 2")
+            ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates[0]')) = 'ARRAY'")
             // Check if source point is near route
             ->whereRaw(
                 "ST_Distance(

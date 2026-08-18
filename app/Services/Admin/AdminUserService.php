@@ -28,7 +28,8 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
  * ── Status definitions ──────────────────────────────────────────────────────
  *   verified  = is_verified_driver = 1  OR  is_verified_passenger = 1
  *   pending   = verification_status = 'pending'
- *   suspended = status = 0
+ *   suspended = status IN (-1, 0)   — banned or logged-out
+ *   banned    = status = -1         — the ban-only subset of `suspended`
  */
 final class AdminUserService
 {
@@ -42,7 +43,7 @@ final class AdminUserService
      *
      * @param int|null $adminUserId
      * @param string   $typeFilter    all | driver | passenger
-     * @param string   $statusFilter  all | verified | pending | suspended
+     * @param string   $statusFilter  all | verified | pending | suspended | banned
      * @param string   $dateFilter    all | last_30_days | last_3_months | last_6_months | last_12_months
      * @param int      $perPage
      * @param int      $page
@@ -207,6 +208,10 @@ final class AdminUserService
             // 'suspended' covers both banned (-1) and logged-out (0) accounts.
             'suspended' => $query->whereIn('status', [-1, 0]),
 
+            // 'banned' is the narrower cut: only accounts an admin actually
+            // banned, excluding the logged-out (0) rows `suspended` sweeps in.
+            'banned'    => $query->where('status', -1),
+
             default     => null,   // 'all' — no constraint
         };
     }
@@ -214,9 +219,10 @@ final class AdminUserService
     /**
      * Per-status counts for the filter-tab badges, respecting the *other*
      * active filters (type/date/search) — unlike getStats(), which is always
-     * platform-wide. Four separate counted queries over the same filtered
-     * base rather than one grouped query, since 'verified' and 'suspended'
-     * are OR/whereIn conditions that don't reduce to a single GROUP BY.
+     * platform-wide. Separate counted queries over the same filtered base
+     * rather than one grouped query, since 'verified' and 'suspended' are
+     * OR/whereIn conditions that don't reduce to a single GROUP BY (and
+     * 'banned' overlaps 'suspended', so the buckets aren't disjoint anyway).
      */
     public function getStatusCounts(
         string  $typeFilter,
@@ -229,7 +235,7 @@ final class AdminUserService
 
         $counts = ['all' => $base()->count()];
 
-        foreach (['verified', 'pending', 'suspended'] as $status) {
+        foreach (['verified', 'pending', 'suspended', 'banned'] as $status) {
             $query = $base();
             $this->applyStatusFilter($query, $status);
             $counts[$status] = $query->count();
