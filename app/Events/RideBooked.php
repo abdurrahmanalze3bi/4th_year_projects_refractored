@@ -17,7 +17,7 @@ use Illuminate\Queue\SerializesModels;
  *
  * FIXED: Explicit data arrays instead of only() to prevent accidental exposure
  */
-class RideBooked implements  ShouldBroadcastNow
+class RideBooked implements  ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
