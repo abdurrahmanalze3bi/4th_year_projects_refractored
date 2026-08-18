@@ -405,10 +405,14 @@ Route::prefix('admin')->group(function () {
                 Route::post('/{userId}/reject',  [AdminDashboardController::class, 'rejectVerification']);
             });
 
-            // Privacy / cancellation policy text — Settings page.
+            // Privacy / cancellation / FAQ content — Settings page.
+            // `/settings` and `/faq` are literal routes registered ahead of
+            // the `{type}` wildcard (which only accepts privacy|cancellation)
+            // so they never fall through to it.
             Route::prefix('policies')->group(function () {
                 Route::get('/',         [PolicyManagementController::class, 'index']);
                 Route::put('/settings', [PolicyManagementController::class, 'updateSettings']);
+                Route::put('/faq',      [PolicyManagementController::class, 'updateFaq']);
                 Route::put('/{type}',   [PolicyManagementController::class, 'update']);
             });
 

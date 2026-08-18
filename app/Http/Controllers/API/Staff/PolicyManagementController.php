@@ -79,6 +79,45 @@ final class PolicyManagementController extends Controller
         }
     }
 
+    // ── PUT /api/admin/policies/faq ─────────────────────────────────────────
+
+    public function updateFaq(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'groups' => 'required|array|min:1',
+            'groups.*.title' => 'required|string|max:255',
+            'groups.*.icon' => 'required|string|max:100',
+            'groups.*.entries' => 'required|array|min:1',
+            'groups.*.entries.*.question' => 'required|string|max:500',
+            'groups.*.entries.*.answer' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'error',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $faq = $this->policyService->updateFaq(
+                $validator->validated(),
+                $request->attributes->get('staffEmployee')
+            );
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'FAQ updated successfully.',
+                'data' => [
+                    'groups' => $faq->sections,
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('FAQ update failed', ['error' => $e->getMessage(), 'class' => get_class($e)]);
+            return $this->serverError();
+        }
+    }
+
     // ── PUT /api/admin/policies/settings ────────────────────────────────────
 
     public function updateSettings(Request $request): JsonResponse
