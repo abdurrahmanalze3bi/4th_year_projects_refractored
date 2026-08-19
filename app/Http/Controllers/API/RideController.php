@@ -850,89 +850,35 @@ class RideController extends Controller
 
     public function finish(int $rideId, Request $request): JsonResponse
     {
-        try {
-            $ride = $this->rideService->finishRide($rideId, $request->user());
-
-            return response()->json([
-                'success' => true,
-                'data'    => new RideResource($ride),
-                'message' => 'Ride finished successfully',
-            ]);
-
-        } catch (\Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], 422);
-        }
+        return $this->finishRide($request, $rideId);
     }
 
     public function finishRide(Request $request, int $rideId): JsonResponse
     {
-        try {
-            $this->rideService->finishRide($rideId, $request->user());
-            $this->rideService->driverConfirmCompletion($rideId, $request->user());
-
-            try {
-                $ride = $this->rideService->getRideById($rideId);
-                $ride->bookings()
-                    ->where('status', 'confirmed')
-                    ->with('user')
-                    ->get()
-                    ->each(function ($booking) use ($rideId) {
-                        if (!$booking->user) return;
-                        $this->notificationService->createNotification(
-                            $booking->user,
-                            'ride_finished',
-                            'وصلت رحلتك',
-                            'أعلن السائق إتمام الرحلة. يرجى تأكيد وصولك.',
-                            ['ride_id' => $rideId],
-                            'high',
-                            'ride'
-                        );
-                    });
-            } catch (\Throwable) {}
-
-            return response()->json([
-                'status'  => 'success',
-                'message' => 'Ride finished. Waiting for passenger to confirm.',
-                'data'    => [
-                    'ride_status'      => 'awaiting_confirmation',
-                    'driver_confirmed' => true,
-                ],
-            ]);
-
-        } catch (\Throwable $e) {
-            Log::error('Ride finish failed', [
-                'ride_id' => $rideId,
-                'user_id' => $request->user()->id,
-                'error'   => $e->getMessage(),
-                'class'   => get_class($e),
-            ]);
-            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 400);
-        }
+        return response()->json([
+            'status'  => 'info',
+            'message' => 'No driver action required. Once the departure time passes, '
+                . 'passengers can confirm their completion. The ride finishes '
+                . 'automatically when the last passenger confirms.',
+            'data'    => [
+                'ride_id'          => $rideId,
+                'driver_confirmed' => false,          // nothing happened
+                'ride_status'      => 'active',       // unchanged
+            ],
+        ]);
     }
+
 
     public function driverConfirmCompletion(Request $request, int $rideId): JsonResponse
     {
-        try {
-            $result = $this->rideService->driverConfirmCompletion($rideId, $request->user());
-
-            return response()->json([
-                'status'  => 'success',
-                'message' => $result['message'],
-            ]);
-
-        } catch (\Throwable $e) {
-            Log::error('Driver confirmation failed', [
-                'ride_id' => $rideId,
-                'user_id' => $request->user()->id,
-                'error'   => $e->getMessage(),
-                'class'   => get_class($e),
-            ]);
-            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 400);
-        }
+        return response()->json([
+            'status'  => 'info',
+            'message' => 'Driver confirmation is no longer required. '
+                . 'Each passenger confirms individually. '
+                . 'The ride completes automatically when all passengers have confirmed.',
+        ]);
     }
+
 
     // =========================================================================
     // PASSENGER CONFIRM COMPLETION
@@ -953,26 +899,55 @@ class RideController extends Controller
     public function passengerConfirmCompletion(Request $request, int $booking): JsonResponse
     {
         try {
-            $result = $this->bookingService->passengerConfirmCompletion($booking, $request->user());
+            $result = $this->bookingService->passengerConfirmCompletion(
+                $booking,
+                $request->user()
+            );
 
+            // ── Notifications ──────────────────────────────────────────────────
+            // Always notify the driver that this passenger confirmed (and was paid).
+            // If the ride is now fully finished, send a separate "all done" notice.
             try {
                 $b = \App\Models\Booking::with('ride.driver')->find($booking);
+
                 if ($b?->ride?->driver) {
-                    $this->notificationService->createNotification(
-                        $b->ride->driver,
-                        'passenger_confirmed',
-                        'تأكيد إتمام الرحلة',
-                        'أكد أحد الركاب وصوله وإتمام الرحلة بنجاح.',
-                        ['booking_id' => $booking, 'ride_id' => $b->ride_id],
-                        'normal',
-                        'ride'
-                    );
+                    if ($result['ride_finished']) {
+                        // All passengers confirmed — ride is closed
+                        $this->notificationService->createNotification(
+                            $b->ride->driver,
+                            'ride_completed',
+                            'اكتملت رحلتك',
+                            'أكد جميع الركاب وصولهم. تم تحويل جميع المبالغ إلى محفظتك.',
+                            ['ride_id' => $b->ride_id],
+                            'high',
+                            'ride'
+                        );
+                    } else {
+                        // Partial — this passenger confirmed, others still pending
+                        $passengerName = trim(
+                            ($request->user()->first_name ?? '') . ' ' .
+                            ($request->user()->last_name  ?? '')
+                        );
+
+                        $this->notificationService->createNotification(
+                            $b->ride->driver,
+                            'passenger_confirmed',
+                            'تأكيد ركاب',
+                            "أكد {$passengerName} وصوله. تم تحويل حصته إلى محفظتك.",
+                            ['booking_id' => $booking, 'ride_id' => $b->ride_id],
+                            'normal',
+                            'ride'
+                        );
+                    }
                 }
-            } catch (\Throwable) {}
+            } catch (\Throwable) {
+                // Notification failure must never block the confirmation response
+            }
 
             return response()->json([
-                'status'  => 'success',
-                'message' => $result['message'],
+                'status'        => 'success',
+                'message'       => $result['message'],
+                'ride_finished' => $result['ride_finished'],
             ]);
 
         } catch (\Throwable $e) {
@@ -984,6 +959,7 @@ class RideController extends Controller
                 'file'       => $e->getFile(),
                 'line'       => $e->getLine(),
             ]);
+
             return response()->json([
                 'status'  => 'error',
                 'message' => $e->getMessage(),
