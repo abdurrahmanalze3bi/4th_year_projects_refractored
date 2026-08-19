@@ -197,7 +197,7 @@ final class PassengerProfileController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'status'   => 'sometimes|in:all,pending,in_review,resolved,closed,escalated',
-            'type'     => 'sometimes|in:all,trip_safety,driver_behavior,passenger_behavior,ride_cancellation,financial_issue,account_issue,technical_issue,other',
+            'type'     => 'sometimes|in:all,trip_safety,driver_behavior,passenger_behavior,ride_cancellation,financial_issue,account_issue,technical_issue,no_show,other',
             'per_page' => 'sometimes|integer|min:1|max:50',
             'page'     => 'sometimes|integer|min:1',
         ]);
@@ -578,6 +578,7 @@ final class PassengerProfileController extends Controller
             'financial_issue'    => 'مشكلة مالية',
             'account_issue'      => 'مشكلة في الحساب',
             'technical_issue'    => 'عطل تقني',
+            'no_show'            => 'تعارض تقارير الغياب',
             'other'              => 'أخرى',
         ];
 

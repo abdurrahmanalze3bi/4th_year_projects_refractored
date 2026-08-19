@@ -487,74 +487,8 @@ final class  RideService
      */
     public function reportDriverNoShow(int $rideId, User $passenger): array
     {
-        return DB::transaction(function () use ($rideId, $passenger) {
-            $ride = Ride::lockForUpdate()->findOrFail($rideId);
-
-            if (now()->lessThan(Carbon::parse($ride->departure_time))) {
-                throw new \InvalidArgumentException('Cannot report a no-show before the departure time');
-            }
-
-            // Passenger must have a confirmed booking on this ride
-            $booking = $ride->bookings()
-                ->where('user_id', $passenger->id)
-                ->where('status', BookingStatus::CONFIRMED->value)
-                ->lockForUpdate()
-                ->first();
-
-            if (!$booking) {
-                throw new \InvalidArgumentException('No confirmed booking found for you on this ride');
-            }
-
-            $booking->status = Booking::NO_SHOW;
-            $booking->save();
-
-            // E-PAY: full refund from admin escrow → passenger wallet
-            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
-                $this->walletService->processDriverNoShowRefund($ride, $booking, $passenger);
-            }
-
-            // Score: −15 to driver — always, regardless of payment method
-            $this->scoreService->recordDriverNoShow($ride->driver, $ride, $ride->payment_method);
-
-            // Notify driver
-            $refundNote = $ride->payment_method === PaymentMethod::E_PAY->value
-                ? ' A full refund has been issued to the passenger.'
-                : '';
-
-            $this->notificationService->createNotification(
-                $ride->driver,
-                'driver_no_show_reported',
-                'No-Show Reported Against You',
-                "{$passenger->first_name} {$passenger->last_name} reported you as a no-show for the ride "
-                . "from {$ride->pickup_address} to {$ride->destination_address}. "
-                . "Your trust score has been penalised (−15 pts).{$refundNote}",
-                ['ride_id' => $ride->id, 'booking_id' => $booking->id],
-                'high', 'ride'
-            );
-
-            // Notify passenger if there is a refund
-            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
-                $refundAmount = $booking->seats * $ride->price_per_seat;
-
-                $this->notificationService->createNotification(
-                    $passenger,
-                    'driver_no_show_refund',
-                    'Refund Issued ✓',
-                    "Driver no-show confirmed. A full refund of "
-                    . number_format($refundAmount, 0) . " SYP has been returned to your wallet.",
-                    ['ride_id' => $ride->id, 'booking_id' => $booking->id, 'refund_amount' => $refundAmount],
-                    'high', 'ride'
-                );
-            }
-
-            Log::info('Driver no-show reported', [
-                'ride_id'        => $ride->id,
-                'passenger_id'   => $passenger->id,
-                'payment_method' => $ride->payment_method,
-            ]);
-
-            return ['message' => 'Driver no-show reported. Refund (if applicable) has been processed.'];
-        });
+        return app(\App\Services\Ride\NoshowService::class)
+            ->reportDriverNoShow($rideId, $passenger);
     }
 
     // =========================================================================

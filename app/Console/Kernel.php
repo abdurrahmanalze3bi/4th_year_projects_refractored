@@ -76,6 +76,12 @@ class Kernel extends ConsoleKernel
         //     ->monthly()
         //     ->onOneServer()
         //     ->emailOutputOnFailure(config('admin.alert_email'));
+        $schedule->command('noshow:resolve')
+            ->everyFifteenMinutes()
+            ->onOneServer()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->appendOutputTo(storage_path('logs/scheduled/noshow-resolve.log'));
     }
 
     /**
