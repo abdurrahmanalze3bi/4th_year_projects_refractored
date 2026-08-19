@@ -435,57 +435,8 @@ final class BookingService
      */
     public function reportPassengerNoShow(int $bookingId, User $driver): array
     {
-        return DB::transaction(function () use ($bookingId, $driver) {
-            $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
-            $ride    = $booking->ride;
-
-            if ($ride->driver_id !== $driver->id) {
-                throw new \InvalidArgumentException('Only the ride driver can report a passenger no-show');
-            }
-            if ($booking->status !== BookingStatus::CONFIRMED->value) {
-                throw new \InvalidArgumentException('Can only report no-show for confirmed bookings');
-            }
-            if (now()->lessThan(Carbon::parse($ride->departure_time))) {
-                throw new \InvalidArgumentException('Cannot report a no-show before the departure time');
-            }
-
-            $booking->status = Booking::NO_SHOW;
-            $booking->save();
-
-            // E-PAY: split 95% driver / 5% SyCash
-            if ($ride->payment_method === PaymentMethod::E_PAY->value) {
-                $this->walletService->processPassengerNoShow($booking, $ride, $booking->user);
-            }
-
-            // Score: −15 CASH only; E-PAY uses wallet split as the penalty
-            $this->scoreService->recordPassengerNoShow(
-                $booking->user,
-                $booking,
-                $ride->payment_method
-            );
-
-            $walletNote = $ride->payment_method === PaymentMethod::E_PAY->value
-                ? ' Payment has been transferred to the driver; no refund issued.'
-                : '';
-
-            $this->notificationService->createNotification(
-                $booking->user,
-                'passenger_no_show',
-                'No-Show Recorded',
-                "You were marked as a no-show for the ride from {$ride->pickup_address} "
-                . "to {$ride->destination_address}.{$walletNote}",
-                ['ride_id' => $ride->id, 'booking_id' => $booking->id],
-                'high', 'ride'
-            );
-
-            Log::info('Passenger no-show recorded', [
-                'booking_id'     => $booking->id,
-                'driver_id'      => $driver->id,
-                'payment_method' => $ride->payment_method,
-            ]);
-
-            return ['message' => 'Passenger no-show recorded. Settlement processed.'];
-        });
+        return app(\App\Services\Ride\NoshowService::class)
+            ->reportPassengerNoShow($bookingId, $driver);
     }
 
     // =========================================================================

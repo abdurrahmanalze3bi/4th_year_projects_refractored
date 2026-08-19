@@ -161,7 +161,11 @@ final class ScoreService
         $result    = $this->policyFactory->make($action)
             ->calculate($action, $userScore);
 
-        $points = ($paymentMethod === PaymentMethod::E_PAY->value) ? 0 : $result->points;
+        // Driver always loses −15 pts regardless of payment method.
+        // For passengers, e-pay zeroes the score because their wallet IS the penalty.
+        // For drivers, the refund goes to the passenger — the driver has nothing
+        // deducted from their wallet, so the score deduction must always apply.
+        $points = $result->points;
 
         $previousScore = $userScore->score;
         $userScore->applyDelta($points);
@@ -175,9 +179,7 @@ final class ScoreService
             'new_score'                => $userScore->score,
             'reference_type'           => Ride::class,
             'reference_id'             => $ride->id,
-            'reason'                   => $paymentMethod === PaymentMethod::E_PAY->value
-                ? 'Driver no-show (e-pay) — score unchanged, passengers refunded'
-                : $result->reason,
+            'reason'                   => $result->reason,
             'high_cancel_rate_applied' => false,
             'metadata'                 => [
                 'payment_method' => $paymentMethod,

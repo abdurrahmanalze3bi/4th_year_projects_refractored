@@ -32,7 +32,7 @@ final class StaffComplaintController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'status'   => 'sometimes|in:pending,in_review,resolved,closed',
-            'type'     => 'sometimes|in:trip_safety,driver_behavior,passenger_behavior,ride_cancellation,financial_issue,account_issue,technical_issue,other',
+            'type'     => 'sometimes|in:trip_safety,driver_behavior,passenger_behavior,ride_cancellation,financial_issue,account_issue,technical_issue,no_show,other',
             'date'     => 'sometimes|in:last_7_days,last_30_days',
             'user_id'  => 'sometimes|integer|exists:users,id',
             'per_page' => 'sometimes|integer|min:1|max:50',
