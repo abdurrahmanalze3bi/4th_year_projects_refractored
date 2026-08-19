@@ -389,6 +389,7 @@ class RideController extends Controller
             'dest_lng'            => 'required_with:dest_lat|numeric',
             'departure_date'      => 'required|date|after:yesterday',
             'seats_required'      => 'required|integer|min:1',
+            'sort_by'             => 'sometimes|string|in:best,price_asc,price_desc,rating_desc,distance_asc,departure_time_asc',
         ]);
 
         try {
@@ -407,11 +408,12 @@ class RideController extends Controller
                 'source_lng'     => $source['lng'],
                 'dest_lat'       => $destination['lat'],
                 'dest_lng'       => $destination['lng'],
+                'sort_by'        => $validated['sort_by'] ?? 'best',
             ]);
 
             return response()->json([
                 'success' => true,
-                'data'    => $rides,
+                'data'    => RideResource::collection($rides),
             ]);
 
         } catch (\Throwable $e) {

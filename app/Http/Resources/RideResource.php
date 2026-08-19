@@ -28,6 +28,7 @@ class RideResource extends JsonResource
                     ? asset('storage/' . $this->driver->profile->profile_photo)
                     : $this->driver->avatar,
                 'rating' => $this->driverRating(),
+                'score' => $this->driver->userScore->score ?? null,
             ],
 
             'pickup' => [
@@ -58,6 +59,7 @@ class RideResource extends JsonResource
 
             'price_per_seat' => $this->price_per_seat,
             'status' => $this->status,
+            'match_score' => $this->when(isset($this->match_score), fn () => $this->match_score),
 
             'distance' => [
                 'meters' => $this->distance,

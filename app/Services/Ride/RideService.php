@@ -580,7 +580,7 @@ final class  RideService
 
     public function searchRides(array $criteria): Collection
     {
-        return $this->rideRepository->searchRides($criteria);
+        return $this->searchService->searchRides($criteria);
     }
 
     // =========================================================================
