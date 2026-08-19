@@ -194,28 +194,55 @@ final class CityTripService
     }
 
     /**
-     * One endpoint matches the city when it is inside the radius OR its label
-     * names the city.
+     * One endpoint matches the city when EITHER:
+     *   - its label names the city (wins outright), OR
+     *   - it is inside the city's radius AND its label does not already
+     *     name a DIFFERENT governorate.
+     *
+     * Governorate centroids in Syria sit as little as ~60km apart, so the
+     * generous radii in SyrianCity::radiusKm() (up to 70km, to cover large
+     * desert governorates) routinely overlap a neighbour's centroid. Without
+     * the "doesn't already name a different city" guard, e.g. any ride
+     * touching القنيطرة (Quneitra) — no matter where its other endpoint is,
+     * Aleppo, Al-Hasakah, anywhere — gets pulled into ريف دمشق (Rural
+     * Damascus) results purely because Quneitra's centroid is ~63km from
+     * Rural Damascus's, well inside its 70km radius. The address text is the
+     * reliable signal here; the radius is only a fallback for points whose
+     * label carries no governorate name at all.
      *
      * @param  string  $endpoint  'pickup' | 'destination'
      */
     private function matchEndpoint(Builder $query, SyrianCity $city, string $endpoint): void
     {
-        $centroid      = $city->centroid();
-        $radiusMeters  = $city->radiusKm() * 1000;
         $pointColumn   = "rides.{$endpoint}_location";
         $addressColumn = "rides.{$endpoint}_address";
-        $wkt           = sprintf('POINT(%F %F)', $centroid['lng'], $centroid['lat']);
 
-        $query->where(function (Builder $q) use ($city, $pointColumn, $addressColumn, $wkt, $radiusMeters) {
-            $q->whereRaw(
-                "ST_Distance_Sphere({$pointColumn}, ST_GeomFromText(?, 4326)) <= ?",
-                [$wkt, $radiusMeters]
-            );
-
+        $query->where(function (Builder $q) use ($city, $pointColumn, $addressColumn) {
             foreach ($city->aliases() as $alias) {
                 $q->orWhere($addressColumn, 'LIKE', '%' . $alias . '%');
             }
+
+            $centroid     = $city->centroid();
+            $radiusMeters = $city->radiusKm() * 1000;
+            $wkt          = sprintf('POINT(%F %F)', $centroid['lng'], $centroid['lat']);
+
+            $q->orWhere(function (Builder $q2) use ($city, $pointColumn, $addressColumn, $wkt, $radiusMeters) {
+                $q2->whereRaw(
+                    "ST_Distance_Sphere({$pointColumn}, ST_GeomFromText(?, 4326)) <= ?",
+                    [$wkt, $radiusMeters]
+                );
+
+                $compatible = [$city, ...$city->overlappingCities()];
+
+                foreach (SyrianCity::cases() as $other) {
+                    if (in_array($other, $compatible, true)) {
+                        continue;
+                    }
+                    foreach ($other->aliases() as $alias) {
+                        $q2->where($addressColumn, 'NOT LIKE', '%' . $alias . '%');
+                    }
+                }
+            });
         });
     }
 

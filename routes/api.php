@@ -390,6 +390,8 @@ Route::prefix('admin')->group(function () {
             Route::get('/{userId}/complaints',     [PassengerProfileController::class, 'complaints']);
             Route::get('/{userId}/wallet-charges', [PassengerProfileController::class, 'walletCharges']);
             Route::post('/{userId}/charge-wallet', [PassengerProfileController::class, 'chargeWallet']);
+            Route::post('/{userId}/increase-score', [PassengerProfileController::class, 'increaseScore']);
+            Route::post('/{userId}/decrease-score', [PassengerProfileController::class, 'decreaseScore']);
         });
 
         // ── System Admin only ──────────────────────────────────────────────

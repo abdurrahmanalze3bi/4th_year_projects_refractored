@@ -142,6 +142,28 @@ enum SyrianCity: string
     }
 
     /**
+     * Governorates whose geography legitimately overlaps this one, so an
+     * address that explicitly names one of them should NOT disqualify a
+     * spatial-radius match against $this city (see CityTripService::
+     * matchEndpoint()).
+     *
+     * Currently only دمشق / ريف دمشق: Rural Damascus geographically
+     * surrounds Damascus city, so a ريف دمشق rider legitimately sees
+     * دمشق-labelled rides inside their radius, and vice versa. Every other
+     * pair of governorates is treated as mutually exclusive — an address
+     * naming one of them means a ride does NOT belong to another city's
+     * results just because it also falls inside that city's radius.
+     */
+    public function overlappingCities(): array
+    {
+        return match ($this) {
+            self::DAMASCUS       => [self::RURAL_DAMASCUS],
+            self::RURAL_DAMASCUS => [self::DAMASCUS],
+            default              => [],
+        };
+    }
+
+    /**
      * All governorate values — use as the `in:` rule for request validation.
      */
     public static function values(): array
