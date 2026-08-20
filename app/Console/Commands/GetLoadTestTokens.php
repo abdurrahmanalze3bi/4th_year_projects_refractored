@@ -27,7 +27,7 @@ use App\Models\User;
 use App\Services\JwtService;
 use Illuminate\Console\Command;
 
-class GetLoadTestTokens extends Command
+class Getloadtesttokens extends Command
 {
     protected $signature   = 'loadtest:tokens {--count=5} {--export=table}';
     protected $description = 'Generate JWT tokens for seeded test users (for k6 load testing)';

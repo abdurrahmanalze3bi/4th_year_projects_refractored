@@ -260,6 +260,10 @@ class ProfileController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'comment' => 'required|string|max:500',
+            'ride_id' => 'required|integer|exists:rides,id',  // ← new required field
+        ], [
+            'ride_id.required' => 'A ride ID is required. You can only comment after completing a ride.',
+            'ride_id.exists'   => 'The specified ride does not exist.',
         ]);
 
         if ($validator->fails()) {
@@ -273,16 +277,19 @@ class ProfileController extends Controller
             $comment = $this->interactionService->addComment(
                 $request->user()->id,
                 $userId,
-                $request->input('comment')
+                $request->input('comment'),
+                (int) $request->input('ride_id'),  // ← pass ride_id to service
             );
 
             Cache::forget("profile.user.{$userId}");
+            Cache::forget("profile.user.owner.{$userId}");
 
             return response()->json([
                 'success' => true,
                 'message' => 'Comment added',
                 'data'    => $comment,
             ], 201);
+
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -301,7 +308,11 @@ class ProfileController extends Controller
     public function rateUser(Request $request, int $userId)
     {
         $validator = Validator::make($request->all(), [
-            'rating' => 'required|numeric|min:1|max:5',
+            'rating'  => 'required|numeric|min:1|max:5',
+            'ride_id' => 'required|integer|exists:rides,id',  // ← new required field
+        ], [
+            'ride_id.required' => 'A ride ID is required. You can only rate after completing a ride.',
+            'ride_id.exists'   => 'The specified ride does not exist.',
         ]);
 
         if ($validator->fails()) {
@@ -315,16 +326,19 @@ class ProfileController extends Controller
             $ratingStats = $this->interactionService->rateUser(
                 $request->user()->id,
                 $userId,
-                (float) $request->input('rating')
+                (float) $request->input('rating'),
+                (int) $request->input('ride_id'),  // ← pass ride_id to service
             );
 
             Cache::forget("profile.user.{$userId}");
+            Cache::forget("profile.user.owner.{$userId}");
 
             return response()->json([
                 'success' => true,
                 'message' => 'Rating submitted successfully',
                 'data'    => $ratingStats,
             ]);
+
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,

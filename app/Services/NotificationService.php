@@ -6,14 +6,12 @@ use App\Models\User;
 use App\Models\UserNotification;
 use App\Models\Notification;
 use App\Events\NotificationSent;
-use App\Services\PushNotification\PushNotificationService;
+use App\Jobs\SendPushNotificationJob;
 use Illuminate\Pagination\LengthAwarePaginator;
 
 class NotificationService
 {
-    public function __construct(
-        private readonly PushNotificationService $pushService
-    ) {}
+    // constructor removed entirely — no dependencies left
 
     public function getUserNotifications(
         User $user,
@@ -25,17 +23,15 @@ class NotificationService
             ->orderBy('created_at', 'desc');
 
         if (!empty($filters['category'])) {
-            $query->whereHas('notification', function ($q) use ($filters) {
-                $q->where('type', $filters['category']);
-            });
+            $query->whereHas('notification', fn($q) =>
+            $q->where('type', $filters['category'])
+            );
         }
 
         if (isset($filters['is_read'])) {
-            if ($filters['is_read']) {
-                $query->whereNotNull('read_at');
-            } else {
-                $query->whereNull('read_at');
-            }
+            $filters['is_read']
+                ? $query->whereNotNull('read_at')
+                : $query->whereNull('read_at');
         }
 
         return $query->paginate($perPage);
@@ -50,8 +46,6 @@ class NotificationService
         string $priority = 'normal',
         string $category = 'general'
     ): UserNotification {
-        // FIX: was using SendPushNotificationJob::dispatch() which does not exist
-        // → caused every createNotification() call to throw a fatal error
 
         $notification = Notification::create([
             'title'   => $title,
@@ -66,34 +60,24 @@ class NotificationService
             'notification_id' => $notification->id,
         ]);
 
-        // Push notification — wrapped in try/catch so a failed push never
-        // blocks the in-app notification from being saved and returned.
-        try {
-            $this->pushService->sendToUser($user, [
-                'title' => $title,
-                'body'  => $message,
-                'data'  => array_merge($data, [
-                    'notification_id' => $notification->id,
-                    'type'            => $type,
-                    'category'        => $category,
-                    'priority'        => $priority,
-                ]),
-            ]);
-        } catch (\Throwable) {
-            // Push failure must never break notification creation
-        }
+        SendPushNotificationJob::dispatch($user->id, [
+            'title' => $title,
+            'body'  => $message,
+            'data'  => array_merge($data, [
+                'notification_id' => $notification->id,
+                'type'            => $type,
+                'category'        => $category,
+                'priority'        => $priority,
+            ]),
+        ]);
 
         try {
             broadcast(new NotificationSent($user, $notification));
-        } catch (\Throwable) {
-            // Broadcast failure must never break notification creation
-        }
+        } catch (\Throwable) {}
 
         return $userNotification->load('notification');
     }
 
-    // FIX: was missing entirely — NotificationController::markAsRead() called
-    // this method, got "Call to undefined method" → 500 HTML response
     public function markAsRead(UserNotification $notification): void
     {
         if (!$notification->read_at) {
