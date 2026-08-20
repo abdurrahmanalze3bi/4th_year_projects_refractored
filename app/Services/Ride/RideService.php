@@ -487,7 +487,7 @@ final class  RideService
      */
     public function reportDriverNoShow(int $rideId, User $passenger): array
     {
-        return app(\App\Services\Ride\NoshowService::class)
+        return app(\App\Services\Ride\Noshowservice::class)
             ->reportDriverNoShow($rideId, $passenger);
     }
 

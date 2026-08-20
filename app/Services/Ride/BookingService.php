@@ -435,7 +435,7 @@ final class BookingService
      */
     public function reportPassengerNoShow(int $bookingId, User $driver): array
     {
-        return app(\App\Services\Ride\NoshowService::class)
+        return app(\App\Services\Ride\Noshowservice::class)
             ->reportPassengerNoShow($bookingId, $driver);
     }
 
@@ -453,15 +453,12 @@ final class BookingService
     {
         return DB::transaction(function () use ($bookingId, $passenger) {
 
-            // ── Lock booking to prevent concurrent double-confirm ──────────────
             $booking = Booking::lockForUpdate()->findOrFail($bookingId);
 
-            // ── Authorization ─────────────────────────────────────────────────
             if ((int) $booking->user_id !== (int) $passenger->id) {
                 throw new \InvalidArgumentException('You can only confirm your own bookings.');
             }
 
-            // ── State check ───────────────────────────────────────────────────
             if ($booking->status !== BookingStatus::CONFIRMED->value) {
                 $msg = match ($booking->status) {
                     BookingStatus::COMPLETED->value => 'You have already confirmed this ride.',
@@ -472,21 +469,30 @@ final class BookingService
                 throw new \InvalidArgumentException($msg);
             }
 
-            // ── Lock the ride row too ─────────────────────────────────────────
+            // ── NO-SHOW MUTUAL EXCLUSION ──────────────────────────────────────────
+            // A passenger who filed a driver-no-show report cannot simultaneously
+            // confirm the ride. The two actions are mutually exclusive.
+            $hasPendingNoShow = \App\Models\NoshowReport::where('ride_id', $booking->ride_id)
+                ->where('reporter_id', $passenger->id)
+                ->where('reporter_role', 'passenger')
+                ->whereIn('status', ['pending', 'disputed'])
+                ->exists();
+
+            if ($hasPendingNoShow) {
+                throw new \InvalidArgumentException(
+                    'You have an active no-show report for this ride. You cannot confirm and dispute simultaneously.'
+                );
+            }
+            // ─────────────────────────────────────────────────────────────────────
+
             $ride = Ride::lockForUpdate()->findOrFail($booking->ride_id);
 
-            // ── DEPARTURE TIME GATE ───────────────────────────────────────────
-            // Replaces the old driver "finish" button entirely.
-            // Passengers can confirm only after the scheduled departure time.
             if (now()->lt($ride->departure_time)) {
                 throw new \InvalidArgumentException(
                     'The ride has not departed yet. Confirmation opens after the departure time.'
                 );
             }
 
-            // ── LAZY TRANSITION: active / full → launched ─────────────────────
-            // The first passenger to confirm after departure flips the ride status.
-            // Subsequent confirmations find it already in 'launched' and proceed.
             if (in_array($ride->status, [RideStatus::ACTIVE->value, RideStatus::FULL->value])) {
                 $ride->status = RideStatus::LAUNCHED->value;
                 $ride->save();
@@ -496,35 +502,24 @@ final class BookingService
                 );
             }
 
-            // ── Mark this booking as completed ────────────────────────────────
             $booking->update([
                 'status'       => BookingStatus::COMPLETED->value,
                 'completed_at' => now(),
             ]);
 
-            // ── Release payment to driver for THIS passenger's share ──────────
-            // FIX: $this->paymentFactory  (NOT $this->paymentStrategyFactory)
             $strategy      = $this->paymentFactory->make($ride->payment_method);
             $paymentResult = $strategy->processRideCompletionPayment($booking, $ride, $passenger);
 
             if (!$paymentResult->success) {
-                throw new \RuntimeException(
-                    'Payment release failed: ' . $paymentResult->message
-                );
+                throw new \RuntimeException('Payment release failed: ' . $paymentResult->message);
             }
 
-            // ── Award passenger +10 score immediately ─────────────────────────
-            // Passenger gets their score right now, independent of all others.
-            // FIX: applyAction()  (method that actually exists in ScoreService)
             $this->scoreService->applyAction(
                 user:      $passenger,
                 action:    ScoreAction::RIDE_COMPLETED,
                 reference: $booking,
             );
 
-            // ── Check if the ride is fully done ───────────────────────────────
-            // Terminal booking states: completed, cancelled, no_show.
-            // Ride finishes only when EVERY booking has reached one of those.
             $unresolvedCount = Booking::where('ride_id', $ride->id)
                 ->whereNotIn('status', [
                     BookingStatus::COMPLETED->value,
@@ -539,7 +534,6 @@ final class BookingService
                 $ride->status = RideStatus::FINISHED->value;
                 $ride->save();
 
-                // Award driver +10 score once the whole ride finishes.
                 $driver = User::find($ride->driver_id);
                 if ($driver) {
                     $this->scoreService->applyAction(

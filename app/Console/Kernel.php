@@ -77,7 +77,7 @@ class Kernel extends ConsoleKernel
         //     ->onOneServer()
         //     ->emailOutputOnFailure(config('admin.alert_email'));
         $schedule->command('noshow:resolve')
-            ->everyFifteenMinutes()
+            ->everyMinute()
             ->onOneServer()
             ->withoutOverlapping()
             ->runInBackground()
