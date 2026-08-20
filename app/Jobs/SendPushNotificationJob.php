@@ -20,8 +20,17 @@ class SendPushNotificationJob implements ShouldQueue
     public function __construct(
         private readonly int $userId,
         private readonly array $payload
-    ) {}
+    ) {
+        $this->onQueue('notifications');   // ← add this
+    }
 
+    public function tags(): array          // ← add this method
+    {
+        return [
+            'push-notification',
+            'user:' . $this->userId,
+        ];
+    }
     public function handle(PushNotificationService $pushService): void
     {
         if ($user = User::find($this->userId)) {

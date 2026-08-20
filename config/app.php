@@ -72,13 +72,12 @@ return [
     |--------------------------------------------------------------------------
     */
     'providers' => ServiceProvider::defaultProviders()->merge([
-        // Core Application Providers
         App\Providers\AppServiceProvider::class,
         App\Providers\AuthServiceProvider::class,
         App\Providers\EventServiceProvider::class,
         App\Providers\RouteServiceProvider::class,
-        App\Providers\BroadcastServiceProvider::class, // ← ADD THIS
-
+        App\Providers\BroadcastServiceProvider::class,
+        App\Providers\HorizonServiceProvider::class,
     ])->toArray(),
 
     /*

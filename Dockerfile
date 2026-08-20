@@ -58,7 +58,6 @@ RUN apt-get update \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# PHP ini: send errors to stderr so stdout stays clean for the RR pipe
 RUN echo 'display_errors = stderr'    > /usr/local/etc/php/conf.d/zz-octane.ini \
  && echo 'log_errors = On'           >> /usr/local/etc/php/conf.d/zz-octane.ini \
  && echo 'error_log = /dev/stderr'   >> /usr/local/etc/php/conf.d/zz-octane.ini \
@@ -68,20 +67,15 @@ ENV APP_BASE_PATH=/var/www/html
 
 WORKDIR /var/www/html
 
-# Copy vendor from composer stage — vendor/bin/rr is the PHP proxy, keep it intact
 COPY --from=composer-builder /app/vendor ./vendor
-
-# Copy built front-end assets
 COPY --from=frontend-builder /app/public/build ./public/build
-
-# Copy application source (.dockerignore excludes vendor, .env, .rr.yaml)
 COPY . .
 
-# Copy the compatible RR binary (2023.x) from the official image
+RUN mkdir -p public/vendor/horizon && cp -r vendor/laravel/horizon/dist/. public/vendor/horizon/
+
 COPY --from=rr-binary /usr/bin/rr ./rr
 RUN chmod +x ./rr
 
-# Fix permissions
 RUN chown -R www-data:www-data /var/www/html \
  && chmod -R 755 storage \
  && chmod -R 755 bootstrap/cache
@@ -91,5 +85,4 @@ RUN php artisan storage:link --no-interaction 2>/dev/null || true
 USER www-data
 EXPOSE 8000
 
-# Run migrations then start Octane
 CMD ["sh", "-c", "php artisan migrate --force && php artisan octane:start --server=roadrunner --host=0.0.0.0 --port=8000 --workers=4 --max-requests=500"]
