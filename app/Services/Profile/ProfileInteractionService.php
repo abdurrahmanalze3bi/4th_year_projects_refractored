@@ -7,6 +7,7 @@ use App\Models\Profile;
 use App\Models\ProfileComment;
 use App\Models\User;
 use App\Models\UserRating;
+use App\Services\Score\ScoreService;
 
 /**
  * ProfileInteractionService — corrected for actual DB schema:
@@ -15,6 +16,10 @@ use App\Models\UserRating;
  */
 class ProfileInteractionService
 {
+    public function __construct(
+        private readonly ScoreService $scoreService,
+    ) {}
+
     // =========================================================================
     // COMMENT
     // =========================================================================
@@ -113,12 +118,14 @@ class ProfileInteractionService
             throw new \Exception('You have already rated this ride.', 409);
         }
 
-        UserRating::create([
+        $userRating = UserRating::create([
             'rater_id'      => $raterId,    // ← was user_id
             'rated_user_id' => $ratedUserId,
             'rating'        => $rating,
             'ride_id'       => $rideId,
         ]);
+
+        $this->scoreService->recordRating(User::findOrFail($ratedUserId), $userRating);
 
         return $this->getRatingStats($ratedUserId);
     }

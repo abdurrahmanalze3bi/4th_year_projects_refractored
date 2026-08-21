@@ -12,6 +12,11 @@ enum ScoreAction: string
 {
     // ── Positive ────────────────────────────────────────────────────────────
     case RIDE_COMPLETED = 'ride_completed';              // +10 all parties
+    case RATING_POSITIVE = 'rating_positive';             // +3  rating of 4 or 5 stars
+    case RATING_FIVE_STAR_STREAK = 'rating_five_star_streak'; // +2 bonus, 3 consecutive 5-star ratings
+    case DRIVER_COMMITMENT_STREAK_7  = 'driver_commitment_streak_7';  // +2  7 days without cancellation
+    case DRIVER_COMMITMENT_STREAK_14 = 'driver_commitment_streak_14'; // +4  14 days without cancellation
+    case DRIVER_COMMITMENT_STREAK_30 = 'driver_commitment_streak_30'; // +6  30 days without cancellation
 
     // ── Passenger negative ───────────────────────────────────────────────────
     case PASSENGER_CANCEL_EARLY  = 'passenger_cancel_early';  // 0-30 % elapsed
@@ -33,6 +38,11 @@ enum ScoreAction: string
     {
         return match ($this) {
             self::RIDE_COMPLETED          => 'Ride completed',
+            self::RATING_POSITIVE         => 'Positive rating received',
+            self::RATING_FIVE_STAR_STREAK => '3 consecutive 5-star ratings',
+            self::DRIVER_COMMITMENT_STREAK_7  => '7-day cancellation-free streak',
+            self::DRIVER_COMMITMENT_STREAK_14 => '14-day cancellation-free streak',
+            self::DRIVER_COMMITMENT_STREAK_30 => '30-day cancellation-free streak',
             self::PASSENGER_CANCEL_EARLY  => 'Passenger cancelled (early)',
             self::PASSENGER_CANCEL_MID    => 'Passenger cancelled (mid)',
             self::PASSENGER_CANCEL_LATE   => 'Passenger cancelled (late)',
@@ -68,7 +78,14 @@ enum ScoreAction: string
     /** Whether this action is a positive event */
     public function isPositive(): bool
     {
-        return $this === self::RIDE_COMPLETED;
+        return in_array($this, [
+            self::RIDE_COMPLETED,
+            self::RATING_POSITIVE,
+            self::RATING_FIVE_STAR_STREAK,
+            self::DRIVER_COMMITMENT_STREAK_7,
+            self::DRIVER_COMMITMENT_STREAK_14,
+            self::DRIVER_COMMITMENT_STREAK_30,
+        ], true);
     }
 
     /** Whether this action is driver-specific */
