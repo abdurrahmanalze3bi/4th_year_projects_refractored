@@ -267,7 +267,7 @@ final class ScoreService
             $result = $policy->calculate($action, $userScore, $context);
 
             $previousScore = (int) $userScore->score;
-            $newScore      = max(0, $previousScore + $result->points);
+            $newScore      = max(0, min(100, $previousScore + $result->points));
 
             if ($result->isPositive()) {
                 $userScore->total_rides = (int) $userScore->total_rides + 1;
@@ -400,7 +400,7 @@ final class ScoreService
 
             // ── Update aggregate stats on UserScore ───────────────────────────
             $previousScore = $userScore->score;
-            $newScore = max(0, $previousScore + $result->points);
+            $newScore = max(0, min(100, $previousScore + $result->points));
 
             $updates = ['score' => $newScore];
 
