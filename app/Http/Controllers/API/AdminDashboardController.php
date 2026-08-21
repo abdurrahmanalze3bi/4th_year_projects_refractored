@@ -463,9 +463,10 @@ final class AdminDashboardController extends Controller
     public function approveVerification(int $userId, Request $request): JsonResponse
     {
         $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
-            'national_id' => 'required|string|max:50',
+            'national_id' => 'required|digits:10',
         ], [
             'national_id.required' => 'The national ID number is required to approve verification.',
+            'national_id.digits'   => 'The national ID number must be exactly 10 digits.',
         ]);
 
         if ($validator->fails()) {

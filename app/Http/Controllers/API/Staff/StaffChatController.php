@@ -79,6 +79,95 @@ final class StaffChatController extends Controller
     }
 
     // =========================================================================
+    // START OR FIND CONVERSATION WITH USER
+    // =========================================================================
+
+    /**
+     * POST /api/staff/chat/conversations
+     *
+     * Finds or creates a support conversation between the staff member and a target user.
+     *
+     * Body:
+     *   user_id  int  required, exists:users,id
+     */
+    public function startConversation(Request $request): JsonResponse
+    {
+        $agentUser = $this->resolveUserAccount($request);
+
+        if (!$agentUser) {
+            return $this->noEmail($request);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'user_id' => 'required|integer|exists:users,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $targetUser = User::find($request->user_id);
+
+            if (!$targetUser) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'User not found.',
+                ], 404);
+            }
+
+            if ($targetUser->id === $agentUser->id) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Cannot start a chat with your own account.',
+                ], 422);
+            }
+
+            // Find if a support conversation already exists for this customer
+            $existing = $this->chatRepo->findSupportConversationForUser($targetUser);
+
+            if ($existing) {
+                // Ensure current agent is attached if not already
+                if (!$existing->isParticipant($agentUser)) {
+                    $existing->participants()->attach($agentUser->id, [
+                        'role'      => 'agent',
+                        'joined_at' => now(),
+                    ]);
+                    $existing->load('participants');
+                    Cache::forget("conversation.{$existing->id}");
+                }
+
+                return response()->json([
+                    'status'          => 'success',
+                    'conversation_id' => $existing->id,
+                    'is_new'          => false,
+                    'conversation'    => $this->formatConversation($existing, $agentUser),
+                ]);
+            }
+
+            // Create new support conversation
+            $conversation = $this->chatRepo->createConversation(
+                participants: [$targetUser->id, $agentUser->id],
+                type:         'support',
+                title:        null,
+                roles:        [
+                    $targetUser->id => 'customer',
+                    $agentUser->id  => 'agent',
+                ],
+            );
+
+            return response()->json([
+                'status'          => 'success',
+                'conversation_id' => $conversation->id,
+                'is_new'          => true,
+                'conversation'    => $this->formatConversation($conversation, $agentUser),
+            ], 201);
+        } catch (\Exception $e) {
+            return $this->serverError($e);
+        }
+    }
+
+    // =========================================================================
     // GET MESSAGES IN A CONVERSATION
     // =========================================================================
 

@@ -470,6 +470,7 @@ Route::prefix('staff')->name('staff.')->group(function () {
         // The agent's User account (matched by email) is the chat participant.
         Route::prefix('chat')->name('chat.')->group(function () {
             Route::get('conversations',                    [StaffChatController::class, 'conversations'])->name('conversations');
+            Route::post('conversations',                   [StaffChatController::class, 'startConversation'])->name('start');
             Route::get('conversations/{id}/messages',      [StaffChatController::class, 'messages'])->name('messages');
             Route::post('conversations/{id}/messages',     [StaffChatController::class, 'sendMessage'])->name('send');
         });
@@ -495,10 +496,10 @@ Route::prefix('staff')->name('staff.')->group(function () {
 });
 
 // ========================================
-// EMPLOYEE MANAGEMENT — system_admin only [throttle:admin]
+// EMPLOYEE MANAGEMENT — admin + system_admin [throttle:admin]
 // ========================================
 
-Route::prefix('employees')->middleware(['staff:system_admin', 'throttle:admin'])->group(function () {
+Route::prefix('employees')->middleware(['staff:admin,system_admin', 'throttle:admin'])->group(function () {
     Route::get('/',                      [EmployeeManagementController::class, 'index']);
     Route::post('/',                     [EmployeeManagementController::class, 'store']);
     Route::get('/{id}',                  [EmployeeManagementController::class, 'show']);
