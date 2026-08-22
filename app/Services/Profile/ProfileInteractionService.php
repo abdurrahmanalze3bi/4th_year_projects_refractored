@@ -148,20 +148,29 @@ class ProfileInteractionService
 
     private function assertEligible(
         int    $actorId,
-        int    $driverId,
+        int    $targetUserId,
         int    $rideId,
         string $action,
     ): void {
-        $eligible = Booking::query()
+        // Case 1: Passenger rating/commenting on Driver
+        $passengerOnDriver = Booking::query()
             ->where('user_id', $actorId)
             ->where('ride_id', $rideId)
             ->where('status', 'completed')
-            ->whereHas('ride', fn ($q) => $q->where('driver_id', $driverId))
+            ->whereHas('ride', fn ($q) => $q->where('driver_id', $targetUserId))
             ->exists();
 
-        if (! $eligible) {
+        // Case 2: Driver rating/commenting on Passenger
+        $driverOnPassenger = Booking::query()
+            ->where('user_id', $targetUserId)
+            ->where('ride_id', $rideId)
+            ->where('status', 'completed')
+            ->whereHas('ride', fn ($q) => $q->where('driver_id', $actorId))
+            ->exists();
+
+        if (! $passengerOnDriver && ! $driverOnPassenger) {
             throw new \Exception(
-                "You can only {$action} a driver after completing a ride with them.",
+                "You can only {$action} a user after completing a ride together.",
                 403
             );
         }

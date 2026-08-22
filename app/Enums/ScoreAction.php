@@ -31,6 +31,10 @@ enum ScoreAction: string
     case DRIVER_CANCEL_RIDE_LATE  = 'driver_cancel_ride_late';  // 50-100 %
     case DRIVER_NO_SHOW           = 'driver_no_show';           // -15 fixed
 
+    // ── Admin manual adjustments ─────────────────────────────────────────────
+    case ADMIN_INCREASE          = 'admin_increase';
+    case ADMIN_DECREASE          = 'admin_decrease';
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /** Human-readable label for logs / admin UI */
@@ -52,6 +56,8 @@ enum ScoreAction: string
             self::DRIVER_CANCEL_RIDE_MID   => 'Driver cancelled ride (mid)',
             self::DRIVER_CANCEL_RIDE_LATE  => 'Driver cancelled ride (late)',
             self::DRIVER_NO_SHOW           => 'Driver no-show',
+            self::ADMIN_INCREASE          => 'Admin point increase',
+            self::ADMIN_DECREASE          => 'Admin point decrease',
         };
     }
 
