@@ -448,3 +448,5 @@ Route::prefix('employees')->middleware(['staff:system_admin', 'throttle:admin'])
     Route::patch('/{id}/toggle-active',  [EmployeeManagementController::class, 'toggleActive']);
     Route::patch('/{id}/reset-password', [EmployeeManagementController::class, 'resetPassword']);
 });
+
+Route::get('/health', fn() => response()->json(['status' => 'ok', 'node' => gethostname()]));

@@ -48,12 +48,10 @@ return [
             'url'       => env('DATABASE_URL'),
 
             'read' => [
-                'host' => env('DB_USE_REPLICA', 'false') === 'true'
-                    ? ['syride_mysql_replica']
-                    : ['syride_mysql'],
+                'host' => [env('DB_REPLICA_HOST', env('DB_HOST', '127.0.0.1'))],
             ],
             'write' => [
-                'host' => ['syride_mysql'],
+                'host' => [env('DB_HOST', '127.0.0.1')],
             ],
             'sticky' => true,
 
