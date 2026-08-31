@@ -85,4 +85,4 @@ RUN php artisan storage:link --no-interaction 2>/dev/null || true
 USER www-data
 EXPOSE 8000
 
-CMD ["sh", "-c", "php artisan migrate --force && php artisan octane:start --server=roadrunner --host=0.0.0.0 --port=8000 --workers=4 --max-requests=500"]
+CMD ["sh", "-c", "php artisan config:cache && php artisan route:cache && php artisan migrate --force && php artisan octane:start --server=roadrunner --host=0.0.0.0 --port=${PORT:-8000} --workers=1 --max-requests=500"]
