@@ -1,10 +1,10 @@
 # ============================================================
-# Stage 1: RoadRunner binary (2023.x — matches spiral PHP packages)
+# Stage 1: RoadRunner binary
 # ============================================================
 FROM ghcr.io/roadrunner-server/roadrunner:2023.3.5 AS rr-binary
 
 # ============================================================
-# Stage 2: Build front-end assets with Node
+# Stage 2: Front-end assets
 # ============================================================
 FROM node:20 AS frontend-builder
 WORKDIR /app
@@ -14,7 +14,7 @@ COPY . .
 RUN npm run build
 
 # ============================================================
-# Stage 3: Install PHP dependencies with Composer
+# Stage 3: PHP dependencies
 # ============================================================
 FROM composer:2.7 AS composer-builder
 WORKDIR /app
@@ -28,7 +28,7 @@ COPY . .
 RUN composer run-script post-autoload-dump --no-interaction || true
 
 # ============================================================
-# Stage 4: Final image — PHP 8.2 CLI + Octane + RoadRunner
+# Stage 4: Final image
 # ============================================================
 FROM php:8.2-cli
 
@@ -76,6 +76,10 @@ RUN mkdir -p public/vendor/horizon && cp -r vendor/laravel/horizon/dist/. public
 COPY --from=rr-binary /usr/bin/rr ./rr
 RUN chmod +x ./rr
 
+# ← NEW: copy and arm the startup script
+COPY docker/start.sh /start.sh
+RUN chmod +x /start.sh
+
 RUN chown -R www-data:www-data /var/www/html \
  && chmod -R 755 storage \
  && chmod -R 755 bootstrap/cache
@@ -85,4 +89,5 @@ RUN php artisan storage:link --no-interaction 2>/dev/null || true
 USER www-data
 EXPOSE 8000
 
-CMD ["sh", "-c", "php artisan config:cache && php artisan route:cache && php artisan migrate --force && php artisan octane:start --server=roadrunner --host=0.0.0.0 --port=${PORT:-8000} --workers=1 --max-requests=500"]
+# ← CHANGED: was octane:start, now uses the script
+CMD ["/start.sh"]
