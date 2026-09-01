@@ -8,11 +8,16 @@ server:
   relay: pipes
 
 http:
-  address: "0.0.0.0:${RENDER_PORT:-8000}"
+  address: "0.0.0.0:8000"
   middleware: ["static", "gzip", "headers"]
+  static:
+    dir: "public"
+    forbid: [".php"]
   pool:
     num_workers: 1
     max_jobs: 500
+    allocate_timeout: 60s
+    destroy_timeout: 60s
 
 logs:
   mode: production
