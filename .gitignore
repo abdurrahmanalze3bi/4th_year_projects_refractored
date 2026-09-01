@@ -30,8 +30,7 @@ config/*credentials*.json
 config/*service-account*.json
 config/*firebase*.json
 google-services.json
-rr
-.rr.yaml
+
 
 **/caddy
 frankenphp

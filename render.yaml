@@ -5,12 +5,14 @@ services:
     envVars:
       - key: RENDER_PORT
         value: 10000
+      - key: OCTANE_SERVER
+        value: roadrunner
     buildCommand: |
       composer install --no-dev --optimize-autoloader
       php artisan config:clear
       php artisan route:clear
       php artisan view:clear
       php artisan migrate --force
-    startCommand: php artisan serve --host=0.0.0.0 --port=$RENDER_PORT
+    startCommand: php artisan octane:start --server=roadrunner --host=0.0.0.0 --port=$RENDER_PORT
     plan: free
     healthCheckPath: /up
