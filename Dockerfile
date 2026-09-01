@@ -78,7 +78,7 @@ RUN chmod +x ./rr
 
 # ← NEW: copy and arm the startup script
 COPY docker/start.sh /start.sh
-RUN chmod +x /start.sh
+RUN sed -i 's/\r//' /start.sh && chmod +x /start.sh
 
 RUN chown -R www-data:www-data /var/www/html \
  && chmod -R 755 storage \
