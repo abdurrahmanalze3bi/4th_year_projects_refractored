@@ -4,28 +4,41 @@ set -e
 APP_PORT="${PORT:-8000}"
 WORKERS="${WEB_CONCURRENCY:-1}"
 
-# ── Startup diagnostics ──────────────────────────────────────
 echo "=== SyRide: port=${APP_PORT} workers=${WORKERS} ==="
 echo "    PHP $(php -r 'echo phpversion();')"
 echo "    Ext: $(php -m | grep -E '^(sockets|pcntl|redis|pdo_mysql)$' | tr '\n' ' ')"
 
-# ── Laravel bootstrap ─────────────────────────────────────────
 php artisan config:cache
 php artisan route:cache
 php artisan storage:link --no-interaction 2>/dev/null || true
 php artisan migrate --force
 
-# ── Worker boot probe ─────────────────────────────────────────
-# Boots a worker process for 8 s with no RoadRunner attached.
-# Any PHP bootstrap error (bad service provider, missing class, etc.)
-# will print to stdout here and appear in Render's deploy log.
-# Clean output + exit 124 (killed by timeout) = worker boots fine.
-# Any PHP error printed = that error is crashing your workers.
+echo "=== Provider discovery check ==="
+php -r "
+\$pkg = '/var/www/html/bootstrap/cache/packages.php';
+if (!file_exists(\$pkg)) { echo 'packages.php: MISSING'; exit; }
+\$providers = (require \$pkg)['providers'] ?? [];
+echo in_array('Laravel\\Octane\\OctaneServiceProvider', \$providers) ? 'Octane SP: IN CACHE' : 'Octane SP: NOT IN CACHE';
+echo PHP_EOL;
+"
+
+echo "=== Class loader check ==="
+php -r "
+require '/var/www/html/vendor/autoload.php';
+\$classes = [
+  'Spiral\\RoadRunner\\Worker',
+  'Spiral\\RoadRunner\\Http\\PSR7Worker',
+  'Laravel\\Octane\\Commands\\WorkerCommand',
+];
+foreach (\$classes as \$c) {
+  echo \$c . ': ' . (class_exists(\$c) ? 'OK' : 'MISSING') . PHP_EOL;
+}
+"
+
 echo "=== Worker probe ==="
 ( timeout 8s php artisan octane:worker --server=roadrunner 2>&1 || true )
 echo "=== Probe complete ==="
 
-# ── RoadRunner config ─────────────────────────────────────────
 cat > /var/www/html/.rr.yaml << RRCFG
 version: "3"
 
