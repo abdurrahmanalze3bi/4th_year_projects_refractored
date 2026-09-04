@@ -70,6 +70,10 @@ COPY --from=composer-builder /app/vendor ./vendor
 COPY --from=frontend-builder /app/public/build ./public/build
 COPY . .
 
+# Delete any stale bootstrap cache baked in from the local machine.
+# The correct packages.php is regenerated at startup by package:discover in start.sh.
+RUN rm -f bootstrap/cache/*.php
+
 RUN mkdir -p public/vendor/horizon && cp -r vendor/laravel/horizon/dist/. public/vendor/horizon/
 
 COPY --from=rr-binary /usr/bin/rr ./rr
@@ -84,8 +88,5 @@ RUN chown -R www-data:www-data /var/www/html \
 
 USER www-data
 EXPOSE 8000
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/up || exit 1
 
 CMD ["/start.sh"]

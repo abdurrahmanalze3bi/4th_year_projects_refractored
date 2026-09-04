@@ -8,6 +8,9 @@ echo "=== SyRide: port=${APP_PORT} workers=${WORKERS} ==="
 echo "    PHP $(php -r 'echo phpversion();')"
 echo "    Ext: $(php -m | grep -E '^(sockets|pcntl|redis|pdo_mysql)$' | tr '\n' ' ')"
 
+# CRITICAL: regenerate packages.php so OctaneServiceProvider registers octane:worker
+php artisan package:discover --ansi
+
 php artisan config:cache
 php artisan route:cache
 php artisan storage:link --no-interaction 2>/dev/null || true
@@ -61,7 +64,6 @@ http:
     - "fd00::/8"
     - "::1/128"
   pool:
-    debug: true
     num_workers: ${WORKERS}
     max_jobs: 500
     allocate_timeout: 60s
@@ -72,16 +74,9 @@ http:
 
 logs:
   mode: production
-  level: debug
+  level: warn
   encoding: json
   output: stderr
-  channels:
-    server:
-      level: debug
-    pool:
-      level: debug
-    http:
-      level: warn
 RRCFG
 
 echo "=== Starting RoadRunner ==="
