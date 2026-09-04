@@ -8,37 +8,9 @@ php artisan config:cache
 php artisan route:cache
 php artisan migrate --force
 
-cat > /var/www/html/.rr.yaml << RRCFG
-version: "3"
-
-rpc:
-  listen: "tcp://127.0.0.1:6001"
-
-server:
-  command: "php /var/www/html/artisan octane:worker --server=roadrunner"
-  relay: pipes
-
-http:
-  address: "0.0.0.0:${APP_PORT}"
-  middleware: ["static", "headers", "gzip"]
-  trusted_subnets: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1/8", "fd00::/8", "::1/128"]
-  pool:
-    num_workers: ${WORKERS}
-    max_jobs: 500
-    supervisor:
-      exec_ttl: 60s
-  static:
-    dir: "public"
-    forbid: [".php"]
-  headers:
-    response:
-      X-Powered-By: "RoadRunner"
-
-logs:
-  mode: production
-  level: warn
-  encoding: json
-  output: stderr
-RRCFG
-
-exec /var/www/html/rr serve -c /var/www/html/.rr.yaml
+exec php artisan octane:start \
+    --server=roadrunner \
+    --host=0.0.0.0 \
+    --port="${APP_PORT}" \
+    --workers="${WORKERS}" \
+    --max-requests=500
