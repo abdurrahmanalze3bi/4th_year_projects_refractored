@@ -8,7 +8,6 @@ php artisan config:cache
 php artisan route:cache
 php artisan migrate --force
 
-# Write .rr.yaml at boot — no status plugin, port comes from $PORT.
 cat > /var/www/html/.rr.yaml << RRCFG
 version: "3"
 
@@ -16,7 +15,7 @@ rpc:
   listen: "tcp://127.0.0.1:6001"
 
 server:
-  command: "php /var/www/html/artisan octane:worker --server=roadrunner --host=0.0.0.0 --rpc-port=6001 --port=${APP_PORT}"
+  command: "php /var/www/html/artisan octane:worker --server=roadrunner"
   relay: pipes
 
 http:

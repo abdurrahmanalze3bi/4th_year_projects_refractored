@@ -1,5 +1,9 @@
 services:
   - type: web
-    name: laravel-app
+    name: atareekak
     runtime: docker
     healthCheckPath: /up
+    dockerCommand: /start.sh
+    envVars:
+      - key: PORT
+        value: 8000
