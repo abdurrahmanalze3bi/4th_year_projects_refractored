@@ -64,7 +64,6 @@ RUN echo 'display_errors = stderr'    > /usr/local/etc/php/conf.d/zz-octane.ini 
  && echo 'variables_order = "EGPCS"' >> /usr/local/etc/php/conf.d/zz-octane.ini
 
 ENV APP_BASE_PATH=/var/www/html
-
 WORKDIR /var/www/html
 
 COPY --from=composer-builder /app/vendor ./vendor
@@ -76,7 +75,6 @@ RUN mkdir -p public/vendor/horizon && cp -r vendor/laravel/horizon/dist/. public
 COPY --from=rr-binary /usr/bin/rr ./rr
 RUN chmod +x ./rr
 
-# ← NEW: copy and arm the startup script
 COPY docker/start.sh /start.sh
 RUN sed -i 's/\r//' /start.sh && chmod +x /start.sh
 
@@ -84,10 +82,10 @@ RUN chown -R www-data:www-data /var/www/html \
  && chmod -R 755 storage \
  && chmod -R 755 bootstrap/cache
 
-RUN php artisan storage:link --no-interaction 2>/dev/null || true
-
 USER www-data
 EXPOSE 8000
 
-# ← CHANGED: was octane:start, now uses the script
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/up || exit 1
+
 CMD ["/start.sh"]
